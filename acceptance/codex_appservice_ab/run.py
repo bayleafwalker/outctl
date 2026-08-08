@@ -589,11 +589,13 @@ def _run_arm(
     )
 
 
-def _read_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+def _read_jsonl(
+    path: Path, *, artifact: str = "events JSONL"
+) -> tuple[list[dict[str, Any]], list[str]]:
     events: list[dict[str, Any]] = []
     warnings: list[str] = []
     if not path.exists():
-        return events, ["JSONL file is missing"]
+        return events, [f"{artifact} is missing"]
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -895,7 +897,7 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
 
 
 def _hook_metrics(path: Path) -> tuple[dict[str, Any], list[str]]:
-    events, warnings = _read_jsonl(path)
+    events, warnings = _read_jsonl(path, artifact="hook log")
     models = sorted(
         {value for event in events if isinstance((value := event.get("model")), str) and value}
     )
@@ -1693,12 +1695,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 continue
 
             base_env = os.environ.copy()
+            # Never allow either arm to inherit a workstation/admin kubeconfig.
+            base_env.pop("KUBECONFIG", None)
             env_a = {
                 **base_env,
                 "CODEX_HOME": str(home_a),
                 "CODEX_AB_ARM": "A",
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_a / "hook-events.jsonl"),
+                "KUBECONFIG": str(kubeconfig),
                 "OUTCTL_AB_SPOOL_ROOT": str(pair_dir / "outctl-spool-A"),
                 "OUTCTL_ENABLED": "1",
                 "OUTCTL_MODE": "enforce",
@@ -1709,6 +1714,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CODEX_AB_ARM": "B",
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_b / "hook-events.jsonl"),
+                "KUBECONFIG": str(kubeconfig),
             }
 
             barrier = threading.Barrier(3)
