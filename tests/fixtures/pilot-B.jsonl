@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"pilot-control-1","timestamp":10}
+{"type":"turn.completed","thread_id":"pilot-control-1","timestamp":16,"usage":{"input_tokens":260,"output_tokens":25,"cached_input_tokens":50,"cache_creation_input_tokens":20,"cost_usd":0.23}}

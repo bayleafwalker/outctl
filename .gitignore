@@ -10,4 +10,4 @@ build/
 dist/
 .outctl/
 outctl-captures/
-
+.outctl-pilot/
