@@ -286,6 +286,14 @@ def classify_kubectl(command: str) -> list[KubectlInvocation]:
                 if suffix[:1] == ["run"] and "--" in suffix[1:]:
                     wrapped = True
                     break
+            if not wrapped:
+                for router_index, value in enumerate(preceding):
+                    if _basename(value) != "outctl_kubectl_router.py":
+                        continue
+                    suffix = preceding[router_index + 1 :]
+                    if suffix[:1] == ["run"] and "--" in suffix[1:]:
+                        wrapped = True
+                        break
             invocations.append(_classify_args(segment[index + 1 :], wrapped))
     return invocations
 

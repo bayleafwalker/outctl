@@ -505,20 +505,19 @@ Canonical execution prefix:
 {wrapper} kubectl <read-only arguments>
 ```
 
-Narrow retrieval examples, using the capture ID returned by the first command:
+Narrow retrieval example, using the capture ID returned by the Pod inventory:
 
 ```bash
-{retrieval_prefix} inspect --spool-root "$OUTCTL_AB_SPOOL_ROOT" <capture-id>
-{retrieval_prefix} tail --spool-root "$OUTCTL_AB_SPOOL_ROOT" <capture-id> stdout --lines 80
-{retrieval_prefix} search --spool-root "$OUTCTL_AB_SPOOL_ROOT" <capture-id> stdout '<pattern>'
+{retrieval_prefix} --lines 80 <capture-id>
 ```
 
 Rules:
 
 - Preserve direct argv after `--`; do not introduce an implicit shell inside outctl.
-- Start from the bounded projection returned by `outctl run`.
-- Use `outctl inspect`, `slice`, `tail`, or `search` against the capture ID only
-  when a narrow omitted detail is actually needed.
+- Start from the bounded projection returned by the router. It is derived from
+  `outctl run`, while raw capture bytes remain private.
+- Use the router tail command against the existing capture ID only when a
+  narrow omitted detail is actually needed.
 - After the all-namespaces Pod inventory, perform exactly one bounded `tail`
   retrieval from that existing capture. Do not run any additional retrievals.
 - Do not open raw spool files and do not rerun the original kubectl command just
@@ -1866,20 +1865,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     # The launcher supplies the explicit scoped kubeconfig directly.  Do not
     # invoke direnv inside the least-privilege Codex sandbox: it can touch
     # user-local state that is unrelated to this fixed corpus.
-    retrieval_prefix = f"env {kubeconfig_env}{shlex.join(launcher)}"
-    execution_prefix = (
+    router = Path(__file__).with_name("outctl_kubectl_router.py").resolve()
+    router_exec = (
         f"env {kubeconfig_env}OUTCTL_ENABLED=1 OUTCTL_MODE=enforce "
-        'UV_OFFLINE=1 UV_CACHE_DIR="$OUTCTL_AB_SPOOL_ROOT/uv-cache" '
-        'TMPDIR="$OUTCTL_AB_SPOOL_ROOT/tmp" '
-        f"{shlex.join(launcher)}"
+        f"python3 {shlex.quote(str(router))}"
     )
+    router_common = (
+        f"--outctl-command-json {shlex.quote(json.dumps(launcher, separators=(',', ':')))} "
+        ' --spool-root "$OUTCTL_AB_SPOOL_ROOT"'
+    )
+    retrieval_prefix = f"{router_exec} tail {router_common}"
     wrapper = (
-        f"{execution_prefix} run "
-        f'--mode enforce --spool-root "$OUTCTL_AB_SPOOL_ROOT" '
+        f"{router_exec} run {router_common} "
         f"--policy-ref {shlex.quote(args.policy_ref)} "
         f"--policy-digest {shlex.quote(args.policy_digest)} "
-        "--max-projection-bytes 4096 --max-projection-lines 120 "
-        "--max-projection-tokens 1024 --"
+        "--"
     )
 
     prompt_template = prompt_path.read_text(encoding="utf-8")

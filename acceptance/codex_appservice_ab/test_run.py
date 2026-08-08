@@ -37,6 +37,12 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(len(fake_wrapper), 1)
         self.assertFalse(fake_wrapper[0].wrapped_by_outctl)
 
+        routed = classify_kubectl(
+            "python3 /opt/outctl_kubectl_router.py run --spool-root /tmp/x -- kubectl get pods -A"
+        )
+        self.assertEqual(len(routed), 1)
+        self.assertTrue(routed[0].wrapped_by_outctl)
+
     def test_denies_mutation_and_secret_read(self) -> None:
         delete = classify_kubectl("kubectl delete pod example")
         self.assertFalse(delete[0].read_only)
