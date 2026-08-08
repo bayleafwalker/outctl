@@ -1083,6 +1083,36 @@ def _parse_arm(
     validator: Draft202012Validator,
 ) -> tuple[dict[str, Any], set[tuple[str, str]]]:
     events, warnings = _read_jsonl(result.events_path)
+    event_types: dict[str, int] = {}
+    for event in events:
+        event_type = event.get("type")
+        if isinstance(event_type, str):
+            event_types[event_type] = event_types.get(event_type, 0) + 1
+    try:
+        stderr_text = result.stderr_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        stderr_text = ""
+    diagnostic_source = "\n".join(
+        str(event.get("message", "")) for event in events if event.get("type") == "error"
+    ) + "\n" + stderr_text
+    folded_diagnostic = diagnostic_source.casefold()
+    diagnostic_code = next(
+        (
+            code
+            for code, terms in {
+                "auth": ("auth", "login", "credential"),
+                "model_unavailable": ("model", "unavailable", "not found"),
+                "schema": ("schema", "structured output"),
+                "config": ("config", "toml"),
+                "provider_network": ("network", "connect", "dns"),
+                "rate_limit": ("rate limit", "quota"),
+                "hook_config": ("hook",),
+                "sandbox": ("sandbox", "permission denied"),
+            }.items()
+            if any(term in folded_diagnostic for term in terms)
+        ),
+        "unknown" if diagnostic_source else None,
+    )
     try:
         usage, usage_warnings = _extract_usage(events)
     except ExperimentError as exc:
@@ -1158,6 +1188,12 @@ def _parse_arm(
             "outctl_spool": spool,
             "final": final,
             "event_errors": len(errors),
+            "startup_diagnostics": {
+                "event_type_counts": event_types,
+                "stderr_bytes": len(stderr_text.encode("utf-8")),
+                "stderr_lines": len(stderr_text.splitlines()),
+                "code": diagnostic_code,
+            },
             "model_observed": bool(observed_models),
             "model_mismatch": model_mismatch,
             "model_reroute_signal": bool(reroute_signals),
