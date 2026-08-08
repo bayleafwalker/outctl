@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+import outctl.capture.runner
+from outctl.cli import main
+
+
+def _capture(root: Path, capture_id: str = "capture-0001") -> Path:
+    path = root / "captures" / capture_id
+    path.mkdir(parents=True)
+    stdout = b"alpha\nbeta marker\ngamma\n"
+    stderr = b"warning\n"
+    events = b'{"seq":0,"stream":"stdout"}\n'
+    for name, data in (("stdout.raw", stdout), ("stderr.raw", stderr), ("events.ndjson", events)):
+        (path / name).write_bytes(data)
+        os.chmod(path / name, 0o600)
+    (path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "capture_id": capture_id,
+                "capture_status": "COMPLETE",
+                "streams": {
+                    "stdout": {"bytes": len(stdout), "sha256": hashlib.sha256(stdout).hexdigest()},
+                    "stderr": {"bytes": len(stderr), "sha256": hashlib.sha256(stderr).hexdigest()},
+                },
+                "event_index": {"events": 1, "sha256": hashlib.sha256(events).hexdigest()},
+            }
+        )
+    )
+    os.chmod(path / "manifest.json", 0o600)
+    return path
+
+
+def _payload(capsys: pytest.CaptureFixture[str]) -> dict[str, object]:
+    return json.loads(capsys.readouterr().out)
+
+
+def test_cli_dispatches_read_only_retrieval_without_running_a_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _capture(tmp_path)
+    invoked = False
+
+    async def fail_if_called(*args: object, **kwargs: object) -> object:
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("CLI retrieval must not run commands")
+
+    monkeypatch.setattr(outctl.capture.runner, "capture_command", fail_if_called)
+    assert main(["slice", "--spool-root", str(tmp_path), "capture-0001", "stdout", "0", "5"]) == 0
+    payload = _payload(capsys)
+    assert payload["status"] == "AVAILABLE"
+    assert invoked is False
+
+
+def test_cli_projects_binary_data_and_reports_tampering(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = _capture(tmp_path)
+    binary = b"safe\x1b]52;clipboard\x07\xff\n"
+    (path / "stdout.raw").write_bytes(binary)
+
+    assert main(["slice", "--spool-root", str(tmp_path), "capture-0001", "stdout", "0", "100"]) == 0
+    payload = _payload(capsys)
+    text = payload["projection"]["text"]  # type: ignore[index]
+    assert "\x1b" not in text
+    assert "\\x1b" in text
+    assert "\ufffd" in text
+
+    assert main(["verify", "--spool-root", str(tmp_path), "capture-0001"]) == 1
+    verification = _payload(capsys)
+    assert verification["status"] == "TAMPERED"
+    checks = verification["checks"]  # type: ignore[assignment]
+    assert any(not check["matches"] for check in checks)  # type: ignore[union-attr]
+
+
+def test_cli_recover_and_gc_dry_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    partial = tmp_path / "partial" / "abandoned.partial"
+    partial.mkdir(parents=True)
+    _capture(tmp_path)
+    before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+
+    assert main(["recover", "--spool-root", str(tmp_path)]) == 0
+    recovered = _payload(capsys)
+    assert recovered["status"] == "RECOVERED"
+    assert (partial / "recovery.json").exists()
+
+    before_gc = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+    assert main(["gc", "--spool-root", str(tmp_path), "--dry-run"]) == 0
+    gc = _payload(capsys)
+    assert gc == {
+        "candidates": ["capture-0001"],
+        "deleted": [],
+        "dry_run": True,
+        "status": "DRY_RUN",
+    }
+    assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before_gc
+    assert before != before_gc  # recovery is intentionally the only mutation in this test.

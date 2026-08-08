@@ -7,6 +7,7 @@ from outctl.comparison import (
     compare_direct_wrapped,
     make_direct_reference,
 )
+from outctl.envelope import build_result_envelope
 from outctl.fixtures import FixtureGenerator, GeneratedFixture
 from outctl.models import (
     AuditEvent,
@@ -109,4 +110,6 @@ __all__ = [
     "ComparisonResult",
     "compare_direct_wrapped",
     "make_direct_reference",
+    # Result envelopes
+    "build_result_envelope",
 ]

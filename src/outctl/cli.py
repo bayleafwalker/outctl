@@ -1,31 +1,308 @@
-"""Command-line entry point.
-
-The runtime commands deliberately remain unavailable until their corresponding
-implementation slice and acceptance gates land.
-"""
+"""Read-only, binary-safe command-line access to local captures."""
 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+import json
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
 
 from outctl import __version__
+from outctl.capture import recover_partials
+from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
+from outctl.retrieval import (
+    InspectionResult,
+    RetrievalStatus,
+    SearchResult,
+    SliceResult,
+    TailResult,
+    VerificationResult,
+    inspect_capture,
+    search_stream,
+    slice_stream,
+    tail_stream,
+    verify_capture,
+)
+
+_DEFAULT_SPOOL = Path(".outctl")
+_DEFAULT_MAX_BYTES = 64 * 1024
+_MAX_METADATA_TEXT = 512
+
+
+def _spool_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--spool-root",
+        type=Path,
+        default=_DEFAULT_SPOOL,
+        help="local outctl spool root (default: .outctl)",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="outctl",
-        description="Bounded, recoverable command-output tooling (implementation scaffold)",
+        description="Bounded, recoverable command-output retrieval",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    commands = parser.add_subparsers(dest="command")
+
+    inspect = commands.add_parser("inspect", help="inspect capture metadata")
+    _spool_argument(inspect)
+    inspect.add_argument("capture_id")
+
+    slice_parser = commands.add_parser("slice", help="project a byte range safely")
+    _spool_argument(slice_parser)
+    slice_parser.add_argument("capture_id")
+    slice_parser.add_argument("stream", choices=("stdout", "stderr"))
+    slice_parser.add_argument("start", type=int)
+    slice_parser.add_argument("end", type=int)
+    slice_parser.add_argument("--max-bytes", type=int, default=_DEFAULT_MAX_BYTES)
+
+    tail = commands.add_parser("tail", help="project a stream suffix safely")
+    _spool_argument(tail)
+    tail.add_argument("capture_id")
+    tail.add_argument("stream", choices=("stdout", "stderr"))
+    tail.add_argument("--lines", type=int)
+    tail.add_argument("--max-bytes", type=int, default=_DEFAULT_MAX_BYTES)
+
+    search = commands.add_parser("search", help="search a stream without rerunning it")
+    _spool_argument(search)
+    search.add_argument("capture_id")
+    search.add_argument("stream", choices=("stdout", "stderr"))
+    search.add_argument("pattern")
+    search.add_argument("--regex", action="store_true")
+    search.add_argument("--context-bytes", type=int, default=80)
+    search.add_argument("--max-matches", type=int, default=20)
+
+    verify = commands.add_parser("verify", help="verify capture digests")
+    _spool_argument(verify)
+    verify.add_argument("capture_id")
+
+    recover = commands.add_parser("recover", help="mark abandoned partial captures")
+    _spool_argument(recover)
+
+    gc = commands.add_parser("gc", help="list garbage-collection candidates")
+    _spool_argument(gc)
+    gc.add_argument("--dry-run", action="store_true", required=True)
     return parser
 
 
+def _json(value: Mapping[str, Any]) -> None:
+    """Emit ASCII JSON so metadata cannot control the caller's terminal."""
+    print(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+
+
+def _metadata_text(value: object) -> str | None:
+    """Keep error and manifest strings bounded before serializing them."""
+    if not isinstance(value, str):
+        return None
+    return value[:_MAX_METADATA_TEXT]
+
+
+def _status_code(status: RetrievalStatus) -> int:
+    return 0 if status is RetrievalStatus.AVAILABLE else 1
+
+
+def _safe_projection(data: bytes, max_bytes: int) -> ProjectionResult:
+    # Retrieval byte limits and model-exposure limits are separate.  This
+    # second cap ensures a response remains safe if the retrieval API evolves.
+    limit = max(1, min(max_bytes, _DEFAULT_MAX_BYTES))
+    return project_bytes(data, limits=ProjectionLimits(limit, 2_000, 16_000))
+
+
+def _projection_data(data: bytes, max_bytes: int) -> dict[str, object]:
+    projection = _safe_projection(data, max_bytes)
+    return {
+        "text": projection.text,
+        "bytes": projection.bytes,
+        "lines": projection.lines,
+        "estimated_tokens": projection.estimated_tokens,
+        "lossy": projection.lossy,
+        "normalized": projection.normalized,
+        "redacted": projection.redacted,
+        "sha256": projection.sha256,
+        "gap_marker": projection.gap_marker,
+    }
+
+
+def _inspection_payload(result: InspectionResult) -> dict[str, object]:
+    """Expose a compact allowlist, never arbitrary manifest contents."""
+    payload: dict[str, object] = {
+        "status": result.status.value,
+        "capture_id": result.capture_id,
+        "capture_status": _metadata_text(result.capture_status),
+        "detail": _metadata_text(result.detail),
+    }
+    manifest = result.manifest
+    if manifest is not None:
+        streams = manifest.get("streams")
+        event_index = manifest.get("event_index")
+        payload["metadata"] = {
+            "stdout_bytes": _nested_int(streams, "stdout", "bytes"),
+            "stderr_bytes": _nested_int(streams, "stderr", "bytes"),
+            "event_count": event_index.get("events")
+            if isinstance(event_index, dict) and isinstance(event_index.get("events"), int)
+            else None,
+        }
+    return payload
+
+
+def _nested_int(value: object, key: str, nested_key: str) -> int | None:
+    entry = value.get(key) if isinstance(value, dict) else None
+    result = entry.get(nested_key) if isinstance(entry, dict) else None
+    return result if isinstance(result, int) else None
+
+
+def _slice_payload(result: SliceResult, max_bytes: int) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": result.status.value,
+        "capture_id": result.capture_id,
+        "stream": result.stream,
+        "start": result.start,
+        "end": result.end,
+        "detail": _metadata_text(result.detail),
+    }
+    if result.status is RetrievalStatus.AVAILABLE:
+        payload["projection"] = _projection_data(result.data, max_bytes)
+    return payload
+
+
+def _tail_payload(result: TailResult, max_bytes: int) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": result.status.value,
+        "capture_id": result.capture_id,
+        "stream": result.stream,
+        "truncated": result.truncated,
+        "detail": _metadata_text(result.detail),
+    }
+    if result.status is RetrievalStatus.AVAILABLE:
+        payload["projection"] = _projection_data(result.data, max_bytes)
+    return payload
+
+
+def _search_payload(result: SearchResult) -> dict[str, object]:
+    matches: list[dict[str, object]] = []
+    for match in result.matches:
+        matches.append(
+            {
+                "start": match.start,
+                "end": match.end,
+                "projection": _projection_data(match.context, 4 * 1024),
+            }
+        )
+    return {
+        "status": result.status.value,
+        "capture_id": result.capture_id,
+        "stream": result.stream,
+        "matches": matches,
+        "limited": result.limited,
+        "detail": _metadata_text(result.detail),
+    }
+
+
+def _verification_payload(result: VerificationResult) -> dict[str, object]:
+    return {
+        "status": result.status.value,
+        "capture_id": result.capture_id,
+        "checks": [
+            {
+                "artifact": check.artifact,
+                "expected": check.expected,
+                "observed": check.observed,
+                "matches": check.matches,
+            }
+            for check in result.checks
+        ],
+        "detail": _metadata_text(result.detail),
+    }
+
+
+def _gc_candidates(root: Path) -> list[str]:
+    captures = root / "captures"
+    try:
+        return sorted(
+            path.name
+            for path in captures.iterdir()
+            if path.is_dir() and not path.is_symlink()
+        )
+    except OSError:
+        return []
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    build_parser().parse_args(argv)
-    return 0
+    args = build_parser().parse_args(argv)
+    if args.command is None:
+        return 0
+    try:
+        if args.command == "inspect":
+            inspection = inspect_capture(args.spool_root, args.capture_id)
+            _json(_inspection_payload(inspection))
+            return _status_code(inspection.status)
+        if args.command == "slice":
+            sliced = slice_stream(
+                args.spool_root,
+                args.capture_id,
+                args.stream,
+                args.start,
+                args.end,
+                max_bytes=args.max_bytes,
+            )
+            _json(_slice_payload(sliced, args.max_bytes))
+            return _status_code(sliced.status)
+        if args.command == "tail":
+            tailed = tail_stream(
+                args.spool_root,
+                args.capture_id,
+                args.stream,
+                lines=args.lines,
+                max_bytes=args.max_bytes,
+            )
+            _json(_tail_payload(tailed, args.max_bytes))
+            return _status_code(tailed.status)
+        if args.command == "search":
+            searched = search_stream(
+                args.spool_root,
+                args.capture_id,
+                args.stream,
+                args.pattern,
+                regex=args.regex,
+                context_bytes=args.context_bytes,
+                max_matches=args.max_matches,
+            )
+            _json(_search_payload(searched))
+            return _status_code(searched.status)
+        if args.command == "verify":
+            verified = verify_capture(args.spool_root, args.capture_id)
+            _json(_verification_payload(verified))
+            return _status_code(verified.status)
+        if args.command == "recover":
+            records = recover_partials(args.spool_root)
+            _json(
+                {
+                    "status": "RECOVERED",
+                    "captures": [
+                        {"capture_id": record.capture_id, "status": record.status}
+                        for record in records
+                    ],
+                }
+            )
+            return 0
+        if args.command == "gc":
+            _json(
+                {
+                    "status": "DRY_RUN",
+                    "dry_run": True,
+                    "candidates": _gc_candidates(args.spool_root),
+                    "deleted": [],
+                }
+            )
+            return 0
+    except (OSError, ValueError) as error:
+        _json({"status": "ERROR", "detail": _metadata_text(str(error))})
+        return 2
+    raise AssertionError(f"unknown command {args.command!r}")
 
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
-
