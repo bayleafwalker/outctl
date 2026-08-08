@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"pilot-guided-1","timestamp":10}
+{"type":"turn.completed","thread_id":"pilot-guided-1","timestamp":15,"usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":10,"cache_creation_input_tokens":5,"cost_usd":0.12}}

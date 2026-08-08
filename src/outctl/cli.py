@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from outctl import __version__
+from outctl import __version__, pilot
 from outctl.adapter import (
     AdapterIdentity,
     AdapterMode,
@@ -110,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
         "pilot-validate", help="validate a raw-free qualitative pilot report"
     )
     pilot_validate.add_argument("report", type=Path)
+    pilot_command = commands.add_parser("pilot", help="concurrent Terra pilot tooling")
+    pilot_command.add_argument("pilot_args", nargs=argparse.REMAINDER)
     return parser
 
 
@@ -390,6 +392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             return 0
+        if args.command == "pilot":
+            return pilot.main(args.pilot_args)
     except (OSError, PilotReportError, ValueError) as error:
         _json({"status": "ERROR", "detail": _metadata_text(str(error))})
         return 2

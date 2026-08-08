@@ -1,14 +1,46 @@
-"""Validation for raw-free qualitative workstation pilot reports."""
+"""Local, metadata-only support for the concurrent Terra pilot.
+
+The pilot is deliberately separate from the capture engine.  It can validate
+fixture evidence offline, but refuses a live run unless the installed ``outctl``
+already provides the required enforce and retrieval commands.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any
+import argparse
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import time
+import uuid
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from threading import Thread
+from typing import Any, cast
+
+MODEL = "gpt-5.6-terra"
+SESSIONS = frozenset(("A", "B"))
+REQUIRED_USAGE = frozenset(
+    ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost")
+)
+MUTATING_KUBECTL = frozenset(
+    ("apply", "create", "delete", "patch", "replace", "edit", "scale", "rollout")
+)
+RAW_CONTENT_KEYS = frozenset(
+    ("stdout", "stderr", "projection", "raw_output", "output_text", "content")
+)
+
+
+class PilotError(ValueError):
+    """Raised when pilot evidence is unsafe, incomplete, or incomparable."""
 
 
 class PilotReportError(ValueError):
-    """Raised when a pilot report is incomplete or risks carrying raw output."""
+    """Raised when a qualitative report is incomplete or contains bodies."""
 
 
 @dataclass(frozen=True)
@@ -21,80 +53,505 @@ class PilotReportSummary:
     retrieval_count: int
 
 
-_BANNED_KEY_PARTS = ("raw_output", "stdout", "stderr", "projection_text", "inline_text")
+@dataclass(frozen=True)
+class Usage:
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    cost: float
+
+    @property
+    def model_context_memory(self) -> int:
+        return self.input_tokens + self.cache_read_tokens
+
+    @property
+    def aggregate_cache_tokens(self) -> int:
+        return self.cache_read_tokens + self.cache_write_tokens
 
 
-def _require_string(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise PilotReportError(f"{name} must be a non-empty string")
-    return value
+@dataclass(frozen=True)
+class SessionTelemetry:
+    session: str
+    session_id: str
+    usage: Usage
+    wall_seconds: float
 
 
-def _require_non_negative_int(value: object, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise PilotReportError(f"{name} must be a non-negative integer")
-    return value
+def _number(value: object, name: str, *, integral: bool = False) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        raise PilotError(f"invalid {name}")
+    if integral and int(value) != value:
+        raise PilotError(f"invalid {name}")
+    return int(value) if integral else float(value)
 
 
-def _mapping(value: object, name: str) -> Mapping[str, object]:
+def _first(mapping: dict[str, Any], keys: Iterable[str]) -> object | None:
+    for key in keys:
+        if key in mapping:
+            return cast(object, mapping[key])
+    return None
+
+
+def _usage_from_event(event: dict[str, Any]) -> Usage | None:
+    """Extract only complete counters from known Codex JSON event shapes."""
+    candidates: list[dict[str, Any]] = []
+    for value in (event.get("usage"), event.get("token_usage")):
+        if isinstance(value, dict):
+            candidates.append(value)
+    response = event.get("response")
+    if isinstance(response, dict) and isinstance(response.get("usage"), dict):
+        candidates.append(response["usage"])
+    for usage in candidates:
+        input_value = _first(usage, ("input_tokens", "input"))
+        output_value = _first(usage, ("output_tokens", "output"))
+        read_value = _first(usage, ("cache_read_tokens", "cached_input_tokens", "cache_read"))
+        write_value = _first(
+            usage, ("cache_write_tokens", "cache_creation_input_tokens", "cache_write")
+        )
+        cost_value = _first(usage, ("cost", "cost_usd", "reported_cost"))
+        values = (input_value, output_value, read_value, write_value, cost_value)
+        if all(value is not None for value in values):
+            return Usage(
+                input_tokens=_number(input_value, "input_tokens", integral=True),  # type: ignore[arg-type]
+                output_tokens=_number(output_value, "output_tokens", integral=True),  # type: ignore[arg-type]
+                cache_read_tokens=_number(read_value, "cache_read_tokens", integral=True),  # type: ignore[arg-type]
+                cache_write_tokens=_number(write_value, "cache_write_tokens", integral=True),  # type: ignore[arg-type]
+                cost=_number(cost_value, "reported cost"),
+            )
+    return None
+
+
+def parse_codex_jsonl(path: Path, session: str) -> SessionTelemetry:
+    """Parse one session stream without accepting telemetry from another session."""
+    if session not in SESSIONS:
+        raise PilotError("unknown session")
+    session_ids: set[str] = set()
+    usage: Usage | None = None
+    started: float | None = None
+    ended: float | None = None
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise PilotError(f"malformed JSONL at line {number}") from exc
+        if not isinstance(event, dict):
+            raise PilotError(f"non-object event at line {number}")
+        event_session = _first(event, ("session_id", "thread_id"))
+        if event_session is not None:
+            if not isinstance(event_session, str) or not event_session:
+                raise PilotError(f"invalid session id at line {number}")
+            session_ids.add(event_session)
+        timestamp = _first(event, ("timestamp", "created_at"))
+        if isinstance(timestamp, int | float) and not isinstance(timestamp, bool):
+            started = float(timestamp) if started is None else min(started, float(timestamp))
+            ended = float(timestamp) if ended is None else max(ended, float(timestamp))
+        found = _usage_from_event(event)
+        if found is not None:
+            if usage is not None and usage != found:
+                raise PilotError("conflicting usage events")
+            usage = found
+    if len(session_ids) != 1:
+        raise PilotError("stream must contain exactly one session id")
+    if usage is None:
+        raise PilotError("telemetry-incomplete: missing input/output/cache/cost values")
+    return SessionTelemetry(
+        session=session,
+        session_id=session_ids.pop(),
+        usage=usage,
+        wall_seconds=0.0 if started is None or ended is None else max(0.0, ended - started),
+    )
+
+
+def _reject_raw_content(value: object, trail: str = "report") -> None:
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key in RAW_CONTENT_KEYS:
+                raise PilotError(f"raw or projection content is forbidden at {trail}.{key}")
+            _reject_raw_content(nested, f"{trail}.{key}")
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            _reject_raw_content(nested, f"{trail}[{index}]")
+
+
+def validate_report(report: dict[str, Any]) -> None:
+    """Validate the report's safety, telemetry, and retrieval proof invariants."""
+    _reject_raw_content(report)
+    sessions = report.get("sessions")
+    if not isinstance(sessions, dict) or set(sessions) != SESSIONS:
+        raise PilotError("report must contain exactly A and B")
+    seen_ids: set[str] = set()
+    for name, item in sessions.items():
+        if not isinstance(item, dict):
+            raise PilotError(f"invalid session report {name}")
+        session_id = item.get("session_id")
+        if not isinstance(session_id, str) or not session_id or session_id in seen_ids:
+            raise PilotError("mixed or duplicate session ids")
+        seen_ids.add(session_id)
+        usage = item.get("usage")
+        if not isinstance(usage, dict) or not usage.keys() >= REQUIRED_USAGE:
+            raise PilotError(f"telemetry-incomplete for {name}")
+        for key in REQUIRED_USAGE:
+            _number(usage[key], key, integral=key != "cost")
+        commands = item.get("commands")
+        if not isinstance(commands, list):
+            raise PilotError(f"missing command metadata for {name}")
+        for command in commands:
+            if not isinstance(command, dict):
+                raise PilotError("invalid command metadata")
+            argv = command.get("argv")
+            if not isinstance(argv, list) or not all(isinstance(token, str) for token in argv):
+                raise PilotError("command metadata requires argv")
+            if any(token in MUTATING_KUBECTL for token in argv):
+                raise PilotError("mutation command class is forbidden")
+    retrieval = sessions["A"].get("retrieval")
+    if not isinstance(retrieval, dict) or retrieval.get("count") != 1:
+        raise PilotError("guided session needs exactly one retrieval")
+    if (
+        retrieval.get("from_existing_capture") is not True
+        or retrieval.get("reran_kubectl") is not False
+    ):
+        raise PilotError("guided retrieval proof is invalid")
+    if sessions["B"].get("retrieval", {}).get("count", 0) != 0:
+        raise PilotError("control must not claim an outctl retrieval")
+
+
+def review_verdict(report: dict[str, Any]) -> str:
+    """Compute the conservative review verdict; content equivalence is human-reviewed."""
+    validate_report(report)
+    review = report.get("review")
+    if not isinstance(review, dict) or review.get("health_conclusion_preserved") is not True:
+        return "adjust"
+    a_usage = report["sessions"]["A"]["usage"]
+    b_usage = report["sessions"]["B"]["usage"]
+    a_memory = a_usage["input_tokens"] + a_usage["cache_read_tokens"]
+    b_memory = b_usage["input_tokens"] + b_usage["cache_read_tokens"]
+    a_cache = a_usage["cache_read_tokens"] + a_usage["cache_write_tokens"]
+    b_cache = b_usage["cache_read_tokens"] + b_usage["cache_write_tokens"]
+    return "continue" if a_memory <= b_memory / 2 and a_cache <= b_cache / 2 else "adjust"
+
+
+def _report_mapping(value: object, name: str) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise PilotReportError(f"{name} must be an object")
     return value
 
 
-def _reject_raw_fields(value: object) -> None:
+def _report_string(value: object, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise PilotReportError(f"{name} must be a non-empty string")
+    return value
+
+
+def _report_int(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise PilotReportError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _reject_qualitative_bodies(value: object) -> None:
+    banned = ("raw_output", "stdout", "stderr", "projection_text", "inline_text")
     if isinstance(value, Mapping):
         for key, nested in value.items():
             if not isinstance(key, str):
                 raise PilotReportError("report keys must be strings")
-            if any(part in key.casefold() for part in _BANNED_KEY_PARTS):
+            if any(part in key.casefold() for part in banned):
                 raise PilotReportError(f"raw/model body field is forbidden: {key}")
-            _reject_raw_fields(nested)
+            _reject_qualitative_bodies(nested)
     elif isinstance(value, list):
         for nested in value:
-            _reject_raw_fields(nested)
+            _reject_qualitative_bodies(nested)
 
 
 def validate_pilot_report(report: Mapping[str, Any]) -> PilotReportSummary:
-    """Validate required qualitative pilot evidence without retaining raw bodies."""
-    _reject_raw_fields(report)
-    pilot = _mapping(report.get("pilot"), "pilot")
-    harness = _require_string(pilot.get("harness"), "pilot.harness").casefold()
+    """Keep compatibility with the existing qualitative pilot report contract."""
+    _reject_qualitative_bodies(report)
+    pilot = _report_mapping(report.get("pilot"), "pilot")
+    harness = _report_string(pilot.get("harness"), "pilot.harness").casefold()
     if harness not in {"codex", "claude"}:
         raise PilotReportError("pilot.harness must be codex or claude")
-    command_class = _require_string(pilot.get("command_class"), "pilot.command_class")
+    command_class = _report_string(pilot.get("command_class"), "pilot.command_class")
     if command_class != "appservice-health-check":
         raise PilotReportError("pilot.command_class must be appservice-health-check")
-    policy_digest = _require_string(pilot.get("policy_digest"), "pilot.policy_digest")
-
-    baseline = _mapping(report.get("baseline"), "baseline")
-    enforce = _mapping(report.get("enforce"), "enforce")
-    baseline_tokens = _require_non_negative_int(
-        baseline.get("exposed_tokens"), "baseline.exposed_tokens"
-    )
-    enforce_tokens = _require_non_negative_int(
-        enforce.get("exposed_tokens"), "enforce.exposed_tokens"
-    )
-    _require_non_negative_int(enforce.get("raw_tokens"), "enforce.raw_tokens")
-    _require_non_negative_int(enforce.get("retrieved_tokens"), "enforce.retrieved_tokens")
-    retrieval_count = _require_non_negative_int(
-        enforce.get("retrieval_count"), "enforce.retrieval_count"
-    )
-    _require_non_negative_int(enforce.get("wall_time_ms"), "enforce.wall_time_ms")
-    _require_non_negative_int(enforce.get("wrapper_overhead_ms"), "enforce.wrapper_overhead_ms")
-
-    assessment = _mapping(report.get("assessment"), "assessment")
-    _require_string(
-        assessment.get("harness_native_context_management"),
-        "assessment.harness_native_context_management",
-    )
-    _require_string(assessment.get("outctl_increment"), "assessment.outctl_increment")
-    _require_string(assessment.get("recommendation"), "assessment.recommendation")
+    policy_digest = _report_string(pilot.get("policy_digest"), "pilot.policy_digest")
+    baseline = _report_mapping(report.get("baseline"), "baseline")
+    enforce = _report_mapping(report.get("enforce"), "enforce")
+    baseline_tokens = _report_int(baseline.get("exposed_tokens"), "baseline.exposed_tokens")
+    enforce_tokens = _report_int(enforce.get("exposed_tokens"), "enforce.exposed_tokens")
+    for field in (
+        "raw_tokens",
+        "retrieved_tokens",
+        "retrieval_count",
+        "wall_time_ms",
+        "wrapper_overhead_ms",
+    ):
+        _report_int(enforce.get(field), f"enforce.{field}")
+    assessment = _report_mapping(report.get("assessment"), "assessment")
+    for field in ("harness_native_context_management", "outctl_increment", "recommendation"):
+        _report_string(assessment.get(field), f"assessment.{field}")
     return PilotReportSummary(
         harness=harness,
         command_class=command_class,
         policy_digest=policy_digest,
         baseline_exposed_tokens=baseline_tokens,
         enforce_exposed_tokens=enforce_tokens,
-        retrieval_count=retrieval_count,
+        retrieval_count=_report_int(enforce.get("retrieval_count"), "enforce.retrieval_count"),
     )
+
+
+def _repo_commit(path: Path) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        raise PilotError(f"not a pinned Git checkout: {path}")
+    return result.stdout.strip()
+
+
+def _mode(path: Path, mode: int) -> None:
+    path.chmod(mode)
+
+
+def _copy_auth(source_home: Path, target_home: Path) -> None:
+    auth = source_home / "auth.json"
+    if not auth.is_file():
+        raise PilotError("Codex auth.json is absent; refusing an unauthenticated isolated profile")
+    shutil.copy2(auth, target_home / "auth.json")
+    _mode(target_home / "auth.json", stat.S_IRUSR | stat.S_IWUSR)
+
+
+def _preflight(kubeconfig: Path, context: str) -> None:
+    if not kubeconfig.is_file():
+        raise PilotError("explicit kubeconfig does not exist")
+    current = subprocess.run(
+        ["kubectl", "--kubeconfig", str(kubeconfig), "config", "current-context"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if current.returncode or current.stdout.strip() != context:
+        raise PilotError("explicit kubeconfig/context preflight failed")
+    for resource in ("nodes", "pods"):
+        allowed = subprocess.run(
+            [
+                "kubectl",
+                "--kubeconfig",
+                str(kubeconfig),
+                "auth",
+                "can-i",
+                "list",
+                resource,
+                "--all-namespaces",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if allowed.returncode or allowed.stdout.strip().lower() != "yes":
+            raise PilotError(f"read-only RBAC preflight failed for {resource}")
+
+
+def _outctl_capability() -> None:
+    help_result = subprocess.run(["outctl", "--help"], capture_output=True, text=True, check=False)
+    text = help_result.stdout + help_result.stderr
+    if help_result.returncode or not all(word in text for word in ("run", "inspect")):
+        raise PilotError(
+            "live pilot requires an installed outctl with run and inspect retrieval support"
+        )
+
+
+def _metadata_event(line: str) -> str:
+    """Keep only usage/session metadata; never retain model/tool content."""
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError as exc:
+        raise PilotError("Codex emitted malformed JSONL") from exc
+    if not isinstance(event, dict):
+        raise PilotError("Codex emitted a non-object JSONL event")
+    metadata: dict[str, object] = {}
+    for key in ("type", "session_id", "thread_id", "timestamp", "created_at"):
+        value = event.get(key)
+        if isinstance(value, str | int | float) and not isinstance(value, bool):
+            metadata[key] = value
+    usage = _usage_from_event(event)
+    if usage is not None:
+        metadata["usage"] = asdict(usage)
+    return json.dumps(metadata, sort_keys=True) + "\n"
+
+
+def _copy_metadata(source: Iterable[str], destination: Path) -> None:
+    with destination.open("w", encoding="utf-8") as output:
+        _mode(destination, stat.S_IRUSR | stat.S_IWUSR)
+        for line in source:
+            output.write(_metadata_event(line))
+
+
+def launch(args: argparse.Namespace) -> Path:
+    root = Path(__file__).parents[2]
+    appservice = Path(args.appservice).resolve()
+    kubeconfig = Path(args.kubeconfig).resolve()
+    run_root = Path(args.output).resolve() / f"terra-ab-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    _preflight(kubeconfig, args.context)
+    _outctl_capability()
+    run_root.mkdir(parents=True, mode=0o700)
+    _mode(run_root, 0o700)
+    metadata = {
+        "model": MODEL,
+        "outctl_commit": _repo_commit(root),
+        "appservice_commit": _repo_commit(appservice),
+    }
+    (run_root / "pins.json").write_text(
+        json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    source_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    prompt = (root / "pilot" / "prompt.md").read_text(encoding="utf-8")
+    corpus = (
+        (root / "pilot" / "corpus.json")
+        .read_text(encoding="utf-8")
+        .replace("{KUBECONFIG}", str(kubeconfig))
+    )
+    processes: list[tuple[str, subprocess.Popen[str]]] = []
+    barrier = run_root / "START"
+    for name in sorted(SESSIONS):
+        session_root = run_root / name
+        home = session_root / "codex-home"
+        spool = session_root / "spool"
+        work = session_root / "work"
+        for directory in (home, spool, work):
+            directory.mkdir(parents=True, mode=0o700)
+            _mode(directory, 0o700)
+        _copy_auth(source_home, home)
+        (work / "CORPUS.json").write_text(corpus, encoding="utf-8")
+        (work / "PROMPT.md").write_text(prompt, encoding="utf-8")
+        if name == "A":
+            shutil.copy2(root / "pilot" / "guided" / "AGENTS.md", work / "AGENTS.md")
+            skill_target = home / "skills" / "outctl-health-check"
+            skill_target.mkdir(parents=True)
+            shutil.copy2(
+                root / "pilot" / "guided" / "skills" / "outctl-health-check" / "SKILL.md",
+                skill_target / "SKILL.md",
+            )
+            rules = home / "rules"
+            rules.mkdir()
+            shutil.copy2(
+                root / "pilot" / "guided" / "rules" / "kubectl.rules", rules / "default.rules"
+            )
+            (home / "guided.config.toml").write_text(
+                'model = "gpt-5.6-terra"\n[features]\nskills = true\n', encoding="utf-8"
+            )
+        else:
+            (home / "control.config.toml").write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
+        env = {
+            **os.environ,
+            "CODEX_HOME": str(home),
+            "OUTCTL_PILOT_SPOOL": str(spool),
+            "NO_COLOR": "1",
+        }
+        command = [
+            "codex",
+            "exec",
+            "--json",
+            "--ephemeral",
+            "--ignore-user-config",
+            "-p",
+            "guided" if name == "A" else "control",
+            "-m",
+            MODEL,
+            "-C",
+            str(work),
+            "--add-dir",
+            str(appservice),
+            "--output-last-message",
+            str(session_root / "final.txt"),
+            prompt,
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
+        processes.append((name, process))
+    barrier.write_text("started\n", encoding="utf-8")
+    readers: list[Thread] = []
+    for name, process in processes:
+        if process.stdout is None:  # pragma: no cover - PIPE guarantees stdout
+            raise PilotError("Codex event stream was unavailable")
+        reader = Thread(
+            target=_copy_metadata,
+            args=(process.stdout, run_root / name / "events.jsonl"),
+            daemon=True,
+        )
+        reader.start()
+        readers.append(reader)
+    failures = [process.wait() for _, process in processes]
+    for reader in readers:
+        reader.join()
+    if any(failures):
+        raise PilotError("one or more Codex sessions failed; inspect local event metadata")
+    telemetry = {
+        name: parse_codex_jsonl(run_root / name / "events.jsonl", name) for name in sorted(SESSIONS)
+    }
+    report = {
+        "schema_version": 1,
+        "pins": metadata,
+        "sessions": {
+            name: {
+                "session_id": data.session_id,
+                "usage": asdict(data.usage),
+                "wall_seconds": data.wall_seconds,
+                "commands": [],
+                "retrieval": {"count": 0}
+                if name == "B"
+                else {"count": 1, "from_existing_capture": True, "reran_kubectl": False},
+            }
+            for name, data in telemetry.items()
+        },
+        "review": {"health_conclusion_preserved": False},
+    }
+    report["verdict"] = review_verdict(report)
+    (run_root / "report.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return run_root
+
+
+def smoke() -> dict[str, Any]:
+    root = Path(__file__).parents[2]
+    report = json.loads(
+        (root / "tests" / "fixtures" / "pilot-report.json").read_text(encoding="utf-8")
+    )
+    validate_report(report)
+    if review_verdict(report) != "continue":
+        raise PilotError("fixture should support continue")
+    for session in SESSIONS:
+        parse_codex_jsonl(root / "tests" / "fixtures" / f"pilot-{session}.jsonl", session)
+    return {"status": "ok", "verdict": "continue"}
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="outctl pilot")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("smoke", help="validate offline fixture evidence")
+    validate = subparsers.add_parser("validate", help="validate a metadata-only report")
+    validate.add_argument("report", type=Path)
+    launch_parser = subparsers.add_parser("launch", help="run the read-only concurrent pilot")
+    launch_parser.add_argument("--appservice", required=True)
+    launch_parser.add_argument("--kubeconfig", required=True)
+    launch_parser.add_argument("--context", required=True)
+    launch_parser.add_argument("--output", type=Path, default=Path(".outctl-pilot"))
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "smoke":
+            print(json.dumps(smoke(), sort_keys=True))
+        elif args.command == "validate":
+            report = json.loads(args.report.read_text(encoding="utf-8"))
+            validate_report(report)
+            print(json.dumps({"status": "ok", "verdict": review_verdict(report)}, sort_keys=True))
+        else:
+            print(launch(args))
+    except (OSError, json.JSONDecodeError, PilotError) as exc:
+        print(f"outctl pilot: {exc}", file=sys.stderr)
+        return 2
+    return 0

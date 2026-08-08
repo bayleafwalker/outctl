@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "description": "Fixed read-only appservice health-check corpus. The launcher substitutes the explicit kubeconfig path.",
+  "commands": [
+    ["kubectl", "--kubeconfig", "{KUBECONFIG}", "config", "current-context"],
+    ["kubectl", "--kubeconfig", "{KUBECONFIG}", "get", "nodes", "-o", "wide"],
+    ["kubectl", "--kubeconfig", "{KUBECONFIG}", "get", "pods", "-A", "-o", "wide"],
+    ["kubectl", "--kubeconfig", "{KUBECONFIG}", "get", "pods", "-A", "-o", "json"]
+  ],
+  "oversized_command_index": 3,
+  "required_conclusion_fields": ["health_conclusion", "evidence_statement", "retrieval_statement"]
+}

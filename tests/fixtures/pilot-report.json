@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "sessions": {
+    "A": {
+      "session_id": "pilot-guided-1",
+      "usage": {"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 10, "cache_write_tokens": 5, "cost": 0.12},
+      "wall_seconds": 5,
+      "commands": [{"argv": ["outctl", "run", "--mode", "enforce", "--", "kubectl", "get", "pods", "-A", "-o", "json"], "command_status": "success", "capture_status": "complete", "raw_bytes": 120000, "exposed_bytes": 3200, "retrieved_bytes": 400}],
+      "retrieval": {"count": 1, "from_existing_capture": true, "reran_kubectl": false}
+    },
+    "B": {
+      "session_id": "pilot-control-1",
+      "usage": {"input_tokens": 260, "output_tokens": 25, "cache_read_tokens": 50, "cache_write_tokens": 20, "cost": 0.23},
+      "wall_seconds": 6,
+      "commands": [{"argv": ["kubectl", "get", "pods", "-A", "-o", "json"], "command_status": "success", "capture_status": "native", "raw_bytes": 0, "exposed_bytes": 18000, "retrieved_bytes": 0}],
+      "retrieval": {"count": 0}
+    }
+  },
+  "review": {"health_conclusion_preserved": true}
+}

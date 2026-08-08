@@ -1,0 +1,3 @@
+# Deny direct Kubernetes execution; the allowed route begins with outctl.
+prefix_rule(pattern=["kubectl"], decision="forbidden")
+prefix_rule(pattern=["outctl", "run", "--mode", "enforce"], decision="allow")
