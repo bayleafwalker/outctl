@@ -98,7 +98,7 @@ class HarnessValidationTests(unittest.TestCase):
                 worktree=worktree,
                 canonical=worktree,
                 outctl_project=worktree,
-                spool_root=root / "spool",
+                write_roots=(root / "spool", root / "hook-log"),
                 kubernetes_api_host="192.0.2.10",
                 auth_source=None,
                 reasoning_effort="high",
@@ -128,6 +128,23 @@ class HarnessValidationTests(unittest.TestCase):
         )
         self.assertNotIn("--sandbox", command)
         self.assertIn("--ephemeral", command)
+
+    def test_home_hook_registration_uses_isolated_active_config_layer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            worktree = root / "worktree"
+            hook_dir = worktree / ".codex" / "hooks"
+            hook_dir.mkdir(parents=True)
+            (hook_dir / "kubectl_outctl_guard.py").write_text("# guard\n", encoding="utf-8")
+            (worktree / ".codex" / "outctl-routing-policy.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            home = root / "home"
+            home.mkdir()
+            run._install_home_hook(home, worktree, arm="A")
+            self.assertTrue((home / "hooks" / "kubectl_outctl_guard.py").is_file())
+            self.assertTrue((home / "outctl-routing-policy.json").is_file())
+            self.assertIn("kubectl_outctl_guard.py", (home / "hooks.json").read_text())
 
     def test_full_schema_validation_catches_constraint_violation(self) -> None:
         schema = json.loads(
@@ -334,6 +351,9 @@ class EndToEndTests(unittest.TestCase):
                                 "stderr": {"bytes": 0}
                             }
                         }))
+                        (spool / "retrieval-events.jsonl").write_text(
+                            json.dumps({"capture_id": "capture-1", "operation": "tail"}) + "\\n"
+                        )
                     else:
                         command = "kubectl get pods -A"
                         output = "x" * 1000

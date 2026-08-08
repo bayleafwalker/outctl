@@ -468,6 +468,8 @@ Rules:
 - Start from the bounded projection returned by `outctl run`.
 - Use `outctl inspect`, `slice`, `tail`, or `search` against the capture ID only
   when a narrow omitted detail is actually needed.
+- After the all-namespaces Pod inventory, perform exactly one bounded `tail`
+  retrieval from that existing capture. Do not run any additional retrievals.
 - Do not open raw spool files and do not rerun the original kubectl command just
   to recover more output.
 - The experiment hook denies direct kubectl, mutation/interactive verbs, and
@@ -476,11 +478,8 @@ Rules:
     (skill_dir / "SKILL.md").write_text(skill, encoding="utf-8")
 
 
-def _write_hook_config(worktree: Path, hook_script: Path) -> None:
-    codex_dir = worktree / ".codex"
-    codex_dir.mkdir(parents=True, exist_ok=True)
-    hooks_path = codex_dir / "hooks.json"
-    command = f'python3 "$(git rev-parse --show-toplevel)/.codex/hooks/{hook_script.name}"'
+def _write_hook_config(hooks_path: Path, command: str) -> None:
+    hooks_path.parent.mkdir(parents=True, exist_ok=True)
     value = {
         "description": "Experiment-local read-only command guard",
         "hooks": {
@@ -527,7 +526,34 @@ def _install_guard(worktree: Path, *, arm: str, wrapper: str) -> None:
         shutil.copy2(source_guard, target_guard)
 
     target_guard.chmod(0o755)
-    _write_hook_config(worktree, target_guard)
+    _write_hook_config(
+        codex_dir / "hooks.json",
+        f'python3 "$(git rev-parse --show-toplevel)/.codex/hooks/{target_guard.name}"',
+    )
+
+
+def _install_home_hook(home: Path, worktree: Path, *, arm: str) -> None:
+    """Register generated hooks beside the active isolated Codex config layer.
+
+    Project-local copies remain in the detached worktree for dry-run review.
+    The home-local registration is required because `codex exec --ephemeral`
+    does not reliably activate a project hook file unless that project also has
+    an active config layer.  The home is per arm and deleted after the run.
+    """
+    source_dir = worktree / ".codex" / "hooks"
+    source_name = "kubectl_outctl_guard.py" if arm == "A" else "kubectl_readonly_guard.py"
+    source = source_dir / source_name
+    target_dir = home / "hooks"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / source_name
+    shutil.copy2(source, target)
+    target.chmod(0o755)
+    if arm == "A":
+        shutil.copy2(
+            worktree / ".codex" / "outctl-routing-policy.json",
+            home / "outctl-routing-policy.json",
+        )
+    _write_hook_config(home / "hooks.json", f"python3 {shlex.quote(str(target))}")
 
 
 def _write_codex_home(
@@ -536,7 +562,7 @@ def _write_codex_home(
     worktree: Path,
     canonical: Path,
     outctl_project: Path,
-    spool_root: Path | None,
+    write_roots: Sequence[Path],
     kubernetes_api_host: str | None,
     auth_source: Path | None,
     reasoning_effort: str | None,
@@ -584,11 +610,11 @@ def _write_codex_home(
         f"[permissions.{PERMISSION_PROFILE_NAME}.filesystem.\":workspace_roots\"]",
         '"." = "read"',
     ]
-    if spool_root is not None:
+    for write_root in dict.fromkeys(write_roots):
         lines.extend(
             (
                 "",
-                f"[permissions.{PERMISSION_PROFILE_NAME}.filesystem.{_toml_string(str(spool_root))}]",
+                f"[permissions.{PERMISSION_PROFILE_NAME}.filesystem.{_toml_string(str(write_root))}]",
                 '"." = "write"',
             )
         )
@@ -960,6 +986,7 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
         "retained_stderr_bytes": 0,
         "retained_total_bytes": 0,
         "manifest_errors": 0,
+        "retrieval_count": 0,
     }
     warnings: list[str] = []
     if root is None:
@@ -968,6 +995,11 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
     captures_root = root / "captures"
     partial_root = root / "partial"
     metrics["present"] = root.exists()
+    retrieval_events = root / "retrieval-events.jsonl"
+    if retrieval_events.is_file():
+        retrievals, retrieval_warnings = _read_jsonl(retrieval_events, artifact="retrieval log")
+        metrics["retrieval_count"] = len(retrievals)
+        warnings.extend(retrieval_warnings)
     if partial_root.is_dir():
         try:
             metrics["partial_capture_count"] = sum(
@@ -1436,12 +1468,13 @@ def _compare_pair(
     )
     treatment_capture_accounted = (
         int(a_spool.get("capture_directory_count", 0))
-        == int(a_commands.get("kubectl_via_outctl_completed", 0))
+        == int(a_commands.get("kubectl_via_outctl_attempts", 0))
         and int(a_spool.get("capture_directory_count", 0)) > 0
         and int(a_spool.get("capture_count", 0)) == int(a_spool.get("capture_directory_count", 0))
         and int(a_spool.get("partial_capture_count", 0)) == 0
         and int(a_spool.get("manifest_errors", 0)) == 0
         and set(a_spool.get("capture_status_counts", {})) <= {"COMPLETE"}
+        and int(a_spool.get("retrieval_count", 0)) == 1
     )
     hooks_observed_both_arms = (
         int(a_hooks.get("events", 0)) > 0 and int(b_hooks.get("events", 0)) > 0
@@ -1450,6 +1483,8 @@ def _compare_pair(
     no_mutation_attempts = (
         int(a_commands.get("kubectl_non_read_only_attempts", 0)) == 0
         and int(b_commands.get("kubectl_non_read_only_attempts", 0)) == 0
+        and int(a_hooks.get("read_only_policy_denials", 0)) == 0
+        and int(b_hooks.get("read_only_policy_denials", 0)) == 0
     )
     same_overall_status = a_final.get("overall_status") == b_final.get("overall_status")
     critical_high_a = {
@@ -1487,7 +1522,8 @@ def _compare_pair(
         flags.append("arm A required hook correction before completing kubectl through outctl")
     if not treatment_capture_accounted:
         flags.append(
-            "arm A outctl captures did not account for every completed wrapped kubectl command"
+            "arm A did not produce one complete capture per wrapped command and one "
+            "bounded retrieval"
         )
     if not hooks_observed_both_arms:
         flags.append("PreToolUse hook telemetry was not observed in both arms")
@@ -1664,6 +1700,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--pairs", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--prompt", type=Path, default=here / "prompt.md")
+    parser.add_argument(
+        "--output-schema",
+        type=Path,
+        default=here / "health-result.codex-output.schema.json",
+        help="Codex-compatible JSON Schema used to constrain the final response",
+    )
     parser.add_argument("--schema", type=Path, default=here / "health-result.schema.json")
     parser.add_argument(
         "--outctl-cmd",
@@ -1692,12 +1734,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     canonical = args.canonical_appservice.resolve()
     kubeconfig = args.kubeconfig.resolve() if args.kubeconfig is not None else None
     prompt_path = args.prompt.resolve()
+    output_schema_path = args.output_schema.resolve()
     schema_path = args.schema.resolve()
     for path, name in ((source, "appservice"), (canonical, "canonical appservice")):
         if not path.is_dir():
             raise ExperimentError(f"{name} directory does not exist: {path}")
-    if not prompt_path.is_file() or not schema_path.is_file():
-        raise ExperimentError("prompt/schema file is missing")
+    if not prompt_path.is_file() or not output_schema_path.is_file() or not schema_path.is_file():
+        raise ExperimentError("prompt/output-schema/validator schema file is missing")
     if not args.dry_run and (kubeconfig is None or not kubeconfig.is_file() or not args.context):
         raise ExperimentError("live runs require an explicit readable --kubeconfig and --context")
     try:
@@ -1706,6 +1749,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, SchemaError) as exc:
         raise ExperimentError(f"output schema is not a valid Draft 2020-12 schema: {exc}") from exc
     validator = Draft202012Validator(schema_value)
+    try:
+        output_schema_value = json.loads(output_schema_path.read_text(encoding="utf-8"))
+        if not isinstance(output_schema_value, dict):
+            raise ValueError("root is not an object")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ExperimentError(f"Codex output schema is not valid JSON: {exc}") from exc
     preflight: dict[str, Any] | None = None
     if not args.dry_run:
         assert kubeconfig is not None and args.context is not None
@@ -1759,7 +1808,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     execution_prefix = (
         f"direnv exec {shlex.quote(str(canonical))} "
-        f"env {kubeconfig_env}OUTCTL_ENABLED=1 OUTCTL_MODE=enforce {shlex.join(launcher)}"
+        f"env {kubeconfig_env}OUTCTL_ENABLED=1 OUTCTL_MODE=enforce "
+        'UV_OFFLINE=1 UV_CACHE_DIR="$OUTCTL_AB_SPOOL_ROOT/uv-cache" '
+        'TMPDIR="$OUTCTL_AB_SPOOL_ROOT/tmp" '
+        f"{shlex.join(launcher)}"
     )
     wrapper = (
         f"{execution_prefix} run "
@@ -1830,12 +1882,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             pair_dir = private / f"pair-{pair_index:03d}"
             home_a = pair_dir / "codex-home-A"
             home_b = pair_dir / "codex-home-B"
+            arm_dir_a = pair_dir / "A"
+            arm_dir_b = pair_dir / "B"
+            spool_a = pair_dir / "outctl-spool-A"
+            for path in (arm_dir_a, arm_dir_b, spool_a):
+                path.mkdir(parents=True, exist_ok=True)
+                path.chmod(0o700)
             _write_codex_home(
                 home_a,
                 worktree=worktree_a,
                 canonical=canonical,
                 outctl_project=Path(__file__).resolve().parents[2],
-                spool_root=pair_dir / "outctl-spool-A",
+                write_roots=(spool_a, arm_dir_a),
                 kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
@@ -1845,18 +1903,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 worktree=worktree_b,
                 canonical=canonical,
                 outctl_project=Path(__file__).resolve().parents[2],
-                spool_root=None,
+                write_roots=(arm_dir_b,),
                 kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
             )
-            arm_dir_a = pair_dir / "A"
-            arm_dir_b = pair_dir / "B"
+            _install_home_hook(home_a, worktree_a, arm="A")
+            _install_home_hook(home_b, worktree_b, arm="B")
             command_a = _build_codex_command(
                 codex_bin=args.codex_bin,
                 model=args.model,
                 worktree=worktree_a,
-                schema=schema_path,
+                schema=output_schema_path,
                 final_path=arm_dir_a / "final.json",
                 prompt=prompt,
             )
@@ -1864,7 +1922,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 codex_bin=args.codex_bin,
                 model=args.model,
                 worktree=worktree_b,
-                schema=schema_path,
+                schema=output_schema_path,
                 final_path=arm_dir_b / "final.json",
                 prompt=prompt,
             )
@@ -1890,7 +1948,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_a / "hook-events.jsonl"),
                 "KUBECONFIG": str(kubeconfig),
-                "OUTCTL_AB_SPOOL_ROOT": str(pair_dir / "outctl-spool-A"),
+                "OUTCTL_AB_SPOOL_ROOT": str(spool_a),
                 "OUTCTL_ENABLED": "1",
                 "OUTCTL_MODE": "enforce",
             }
@@ -2040,6 +2098,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "rendered_prompt_sha256": _sha256_text(prompt),
                     "rendered_prompt_bytes": len(prompt.encode("utf-8")),
                     "output_schema_sha256": _sha256_file(schema_path),
+                    "codex_output_schema_sha256": _sha256_file(output_schema_path),
                     "policy_ref": args.policy_ref,
                     "policy_digest": args.policy_digest,
                     "baseline_native_outctl_guidance": contamination,
