@@ -188,6 +188,7 @@ def run_app_server_turn(
     prompt: str,
     model: str,
     spool_root: Path,
+    developer_instructions: str,
 ) -> tuple[str, AppServerTokenUsage]:
     """Run one ephemeral, read-only turn and retain only its token notification.
 
@@ -241,9 +242,10 @@ def run_app_server_turn(
             {
                 "cwd": str(cwd),
                 "model": model,
-                "sandbox": "read-only",
+                "sandbox": {"type": "readOnly"},
                 "ephemeral": True,
                 "approvalPolicy": "never",
+                "developerInstructions": developer_instructions,
             },
         )
         thread = started.get("thread")
@@ -672,6 +674,25 @@ def _guided_evidence(spool: Path) -> tuple[list[dict[str, object]], dict[str, ob
     )
 
 
+def _corpus_instructions(name: str, corpus: str) -> str:
+    """Keep the shared user prompt equal while pinning each arm's tool route."""
+    if name == "A":
+        route = 'outctl run --mode enforce --spool-root "$OUTCTL_PILOT_SPOOL" -- kubectl'
+        retrieval = (
+            "After the oversized command, run exactly one `outctl tail --spool-root "
+            '"$OUTCTL_PILOT_SPOOL" <capture-id> stdout --lines 20` for that capture.'
+        )
+    else:
+        route = "kubectl"
+        retrieval = "Do not use outctl retrieval."
+    return (
+        "Execute each of the four argv entries in CORPUS.json exactly once. "
+        f"For this arm, every entry must begin with `{route}`. {retrieval} "
+        "Do not run any other command, use a shell, or mutate any resource.\n"
+        f"Frozen corpus metadata:\n{corpus}"
+    )
+
+
 def launch(args: argparse.Namespace) -> Path:
     root = Path(__file__).parents[2]
     appservice = Path(args.appservice).resolve()
@@ -738,7 +759,12 @@ def launch(args: argparse.Namespace) -> Path:
         try:
             start.wait()
             telemetry[name] = run_app_server_turn(
-                codex_home=home, cwd=work, prompt=prompt, model=MODEL, spool_root=spool
+                codex_home=home,
+                cwd=work,
+                prompt=prompt,
+                model=MODEL,
+                spool_root=spool,
+                developer_instructions=_corpus_instructions(name, corpus),
             )
         except BaseException as exc:  # surfaced after both workers finish
             failures.append(exc)
