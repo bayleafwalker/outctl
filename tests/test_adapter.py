@@ -271,6 +271,57 @@ def test_local_pilot_reports_bypass_shadow_and_enforce_metrics(
     assert shadow["retrieval_count"] == enforce["retrieval_count"] == 0
 
 
+def test_g01_long_session_pilot_bounds_exposure_without_retrieval_or_rerun(
+    tmp_path: Path,
+) -> None:
+    """Measure a representative long-session class without exposing its raw body."""
+    execution_marker = tmp_path / "executions"
+    policy_digest = "sha256:" + "1" * 64
+    # 179,200 deterministic estimated tokens at the documented v1 estimator.
+    # The child constructs the body itself, so neither this test nor failures
+    # contain the large raw output.
+    code = (
+        "from pathlib import Path; import sys; "
+        f"marker = Path({str(execution_marker)!r}); "
+        "marker.write_text(str(int(marker.read_text()) + 1) if marker.exists() else '1'); "
+        "line = b'representative bash output record 000000000000000000000000000000\\n'; "
+        "sys.stdout.buffer.write(line * 11200)"
+    )
+    quota_bytes = 800_000
+    result = run(
+        request(
+            AdapterMode.ENFORCE,
+            tmp_path,
+            code,
+            max_capture_bytes=quota_bytes,
+            projection_limits=ProjectionLimits(4_096, 128, 1_024),
+        )
+    )
+
+    assert result.capture is not None
+    assert result.envelope is not None
+    assert result.receipt is not None
+    raw_bytes = result.capture.stdout_bytes + result.capture.stderr_bytes
+    report = {
+        "raw_estimated_tokens": result.envelope.metrics["raw_estimated_tokens"],
+        "exposed_estimated_tokens": result.envelope.metrics[
+            "exposed_estimated_tokens"
+        ],
+        "retrieved_estimated_tokens": 0,
+        "retrieval_count": 0,
+        "policy_digest": result.receipt["policy"]["digest"],
+    }
+
+    assert result.command.exit_code == 0
+    assert execution_marker.read_text() == "1"
+    assert result.capture.capture_status == "COMPLETE"
+    assert 0 < raw_bytes <= quota_bytes
+    assert report["raw_estimated_tokens"] >= 178_000
+    assert report["exposed_estimated_tokens"] * 2 <= report["raw_estimated_tokens"]
+    assert report["retrieved_estimated_tokens"] == report["retrieval_count"] == 0
+    assert report["policy_digest"] == policy_digest
+
+
 def test_fresh_installed_interpreter_imports_adapter_without_network_or_external_state() -> None:
     result = subprocess.run(
         [

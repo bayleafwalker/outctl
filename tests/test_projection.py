@@ -132,3 +132,26 @@ def test_acceptance_b03_clips_a_giant_line_with_explicit_markers() -> None:
     assert LINE_CLIPPED_MARKER in result.text
     assert result.text.endswith(OMISSION_MARKER)
     assert result.gap_marker == OMISSION_MARKER
+
+
+def test_acceptance_a05_selects_traceback_context_and_final_tail_from_noise() -> None:
+    passing = b"".join(f"passing test {index:05d}\n".encode() for index in range(20_000))
+    traceback = (
+        b"Traceback (most recent call last):\n"
+        b'  File "demo.py", line 42, in <module>\n'
+        b"    raise RuntimeError('simulated failure')\n"
+        b"RuntimeError: simulated failure\n"
+    )
+    cleanup = b"".join(f"cleanup {index:05d}\n".encode() for index in range(5_000))
+
+    result = project_bytes(passing + traceback + cleanup)
+
+    assert result.bytes <= 65_536
+    assert result.lines <= 2_000
+    assert result.estimated_tokens <= 16_000
+    assert "Traceback (most recent call last):" in result.text
+    assert 'File "demo.py", line 42' in result.text
+    assert "RuntimeError: simulated failure" in result.text
+    assert "cleanup 04999" in result.text
+    assert result.text.count(OMISSION_MARKER) >= 2
+    assert result.gap_marker == OMISSION_MARKER

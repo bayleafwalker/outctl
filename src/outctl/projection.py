@@ -17,6 +17,25 @@ OMISSION_MARKER = "[... output omitted ...]"
 LINE_CLIPPED_MARKER = " [... line clipped ...]"
 _PROCESSING_CHUNK_BYTES = 64 * 1024
 _MAX_REPRESENTATIVE_BYTES = 4 * 1024
+_FAILURE_CONTEXT_BEFORE = 3
+_FAILURE_CONTEXT_AFTER = 4
+
+
+def _is_failure_anchor(text: str) -> bool:
+    """Return whether a normalized record is useful failure evidence."""
+    lowered = text.casefold()
+    return any(
+        anchor in lowered
+        for anchor in (
+            "traceback",
+            "exception",
+            "error",
+            "failure",
+            "failed",
+            "fatal",
+            "assertionerror",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -281,7 +300,9 @@ class _ProjectionNormalizer:
         if not terminated:
             self._flush_repetition()
             self.line_clipped = self.line_clipped or record.clipped
-            self._collector.add(record.render())
+            self._collector.add(
+                record.render(), failure_anchor=_is_failure_anchor(record.render())
+            )
             return
         if self._repeat_record is not None and record.identity == self._repeat_record.identity:
             self._repeat_count += 1
@@ -297,15 +318,18 @@ class _ProjectionNormalizer:
         self._flush_repetition()
         self.line_clipped = self.line_clipped or self._progress_first.clipped
         self.line_clipped = self.line_clipped or self._progress_last.clipped
-        self._collector.add(f"{self._progress_first.render()}\n")
+        first = self._progress_first.render()
+        self._collector.add(f"{first}\n", failure_anchor=_is_failure_anchor(first))
         if self._progress_count > 2:
             final_update = self._progress_count - 1
-            self._collector.add(
+            progress_marker = (
                 "[progress updates 2-"
-                f"{final_update} collapsed; raw updates 2-{final_update}]\n"
+                f"{final_update} collapsed; raw updates 2-{final_update}]"
             )
+            self._collector.add(f"{progress_marker}\n")
         if self._progress_count > 1:
-            self._collector.add(f"{self._progress_last.render()}\n")
+            last = self._progress_last.render()
+            self._collector.add(f"{last}\n", failure_anchor=_is_failure_anchor(last))
         self._progress_first = None
         self._progress_last = None
         self._progress_count = 0
@@ -322,7 +346,7 @@ class _ProjectionNormalizer:
                 f" [line repeated {self._repeat_count} times; raw lines "
                 f"{self._repeat_start}-{end}]"
             )
-        self._collector.add(f"{text}\n")
+        self._collector.add(f"{text}\n", failure_anchor=_is_failure_anchor(text))
         self._repeat_record = None
         self._repeat_count = 0
 
@@ -338,7 +362,9 @@ class _PrefixCollector:
         self._current_line_counted = False
         self.truncated = False
 
-    def add(self, text: str) -> None:
+    def add(self, text: str, *, failure_anchor: bool = False) -> None:
+        """Add display text; base prefix projection ignores failure anchors."""
+        del failure_anchor
         if self.truncated:
             return
         for character in text:
@@ -387,6 +413,174 @@ class _PrefixCollector:
         # visible full stop is still an explicit gap sentinel in the metadata.
         marker = "."
         return marker, marker
+
+    def trim_to(self, limits: ProjectionLimits) -> None:
+        """Retain only the prefix that fits tighter limits in-place."""
+        byte_count = 0
+        line_count = 0
+        current_line_counted = False
+        end = 0
+        for end, character in enumerate(self.characters, start=1):
+            encoded_length = len(character.encode("utf-8"))
+            next_bytes = byte_count + encoded_length
+            next_lines = line_count
+            next_current_counted = current_line_counted
+            if character == "\n":
+                if not next_current_counted:
+                    next_lines += 1
+                next_current_counted = False
+            elif not next_current_counted:
+                next_lines += 1
+                next_current_counted = True
+            if (
+                next_bytes > limits.max_bytes
+                or next_lines > limits.max_lines
+                or _estimate_tokens(next_bytes) > limits.max_estimated_tokens
+            ):
+                end -= 1
+                break
+            byte_count = next_bytes
+            line_count = next_lines
+            current_line_counted = next_current_counted
+        else:
+            end = len(self.characters)
+
+        del self.characters[end:]
+        self.byte_count = byte_count
+        self.line_count = line_count
+        self._current_line_counted = current_line_counted
+
+
+class _BoundedRecordBuffer:
+    """Store complete normalized records within independent hard limits."""
+
+    def __init__(self, limits: ProjectionLimits, *, rolling: bool) -> None:
+        self._limits = limits
+        self._rolling = rolling
+        self._records: list[tuple[str, int, int]] = []
+        self._byte_count = 0
+        self._line_count = 0
+
+    def add(self, text: str) -> None:
+        byte_count = len(text.encode("utf-8"))
+        line_count = _line_count(text)
+        if byte_count > self._limits.max_bytes or line_count > self._limits.max_lines:
+            return
+        if self._rolling:
+            while self._records and (
+                self._byte_count + byte_count > self._limits.max_bytes
+                or self._line_count + line_count > self._limits.max_lines
+            ):
+                _, removed_bytes, removed_lines = self._records.pop(0)
+                self._byte_count -= removed_bytes
+                self._line_count -= removed_lines
+        if (
+            self._byte_count + byte_count > self._limits.max_bytes
+            or self._line_count + line_count > self._limits.max_lines
+        ):
+            return
+        self._records.append((text, byte_count, line_count))
+        self._byte_count += byte_count
+        self._line_count += line_count
+
+    @property
+    def text(self) -> str:
+        return "".join(record[0] for record in self._records)
+
+
+class _FailureCollector(_PrefixCollector):
+    """Add bounded failure context and a tail after ordinary prefix truncation."""
+
+    def __init__(self, limits: ProjectionLimits) -> None:
+        super().__init__(limits)
+        self._selection_active = False
+        self._failure_found = False
+        self._before: list[str] = []
+        self._after_remaining = 0
+        self._anchors: _BoundedRecordBuffer | None = None
+        self._tail: _BoundedRecordBuffer | None = None
+
+    def add(self, text: str, *, failure_anchor: bool = False) -> None:
+        was_truncated = self.truncated
+        super().add(text)
+        if not was_truncated and self.truncated:
+            self._activate_selection()
+        if not self._selection_active:
+            return
+
+        assert self._anchors is not None
+        assert self._tail is not None
+        self._tail.add(text)
+        if failure_anchor:
+            if self._after_remaining == 0:
+                for context in self._before:
+                    self._anchors.add(context)
+            self._anchors.add(text)
+            self._failure_found = True
+            self._after_remaining = _FAILURE_CONTEXT_AFTER
+        elif self._after_remaining:
+            self._anchors.add(text)
+            self._after_remaining -= 1
+
+        self._before.append(text)
+        if len(self._before) > _FAILURE_CONTEXT_BEFORE:
+            self._before.pop(0)
+
+    def _activate_selection(self) -> None:
+        marker_bytes = len(f"{OMISSION_MARKER}\n".encode()) * 2
+        marker_lines = 2
+        byte_budget = min(
+            self._limits.max_bytes,
+            self._limits.max_estimated_tokens * 4,
+        ) - marker_bytes
+        line_budget = self._limits.max_lines - marker_lines
+        if byte_budget < 3 or line_budget < 3:
+            return
+
+        head_bytes = byte_budget // 4
+        anchor_bytes = byte_budget // 2
+        tail_bytes = byte_budget - head_bytes - anchor_bytes
+        head_lines = line_budget // 4
+        anchor_lines = line_budget // 2
+        tail_lines = line_budget - head_lines - anchor_lines
+        if min(head_bytes, anchor_bytes, tail_bytes, head_lines, anchor_lines, tail_lines) <= 0:
+            return
+
+        self.trim_to(
+            ProjectionLimits(head_bytes, head_lines, max(1, head_bytes // 4))
+        )
+        self._anchors = _BoundedRecordBuffer(
+            ProjectionLimits(anchor_bytes, anchor_lines, max(1, anchor_bytes // 4)),
+            rolling=False,
+        )
+        self._tail = _BoundedRecordBuffer(
+            ProjectionLimits(tail_bytes, tail_lines, max(1, tail_bytes // 4)),
+            rolling=True,
+        )
+        self._selection_active = True
+
+    def finish(self) -> tuple[str, str | None]:
+        if not self._selection_active or not self._failure_found:
+            return super().finish()
+
+        assert self._anchors is not None
+        assert self._tail is not None
+        sections = ("".join(self.characters), self._anchors.text, self._tail.text)
+        selected: list[str] = []
+        for index, section in enumerate(sections):
+            if section:
+                selected.append(section if section.endswith("\n") else f"{section}\n")
+            if index < len(sections) - 1:
+                selected.append(f"{OMISSION_MARKER}\n")
+
+        text = "".join(selected)
+        if _fits(text, self._limits):
+            return text, OMISSION_MARKER
+        # The allocation above reserves both markers, but retain the ordinary
+        # bounded fallback for unusual multi-line normalized records.
+        fallback = _PrefixCollector(self._limits)
+        fallback.add(text)
+        return fallback.finish()
 
 
 def _estimate_tokens(byte_count: int) -> int:
@@ -482,7 +676,7 @@ def project_bytes(
     )
     redactor = _ExactRedactor(rules, replacement_bytes)
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    collector = _PrefixCollector(limits)
+    collector = _FailureCollector(limits)
     normalizer = _ProjectionNormalizer(collector, limits)
 
     supplied_chunks: Iterable[bytes] = (chunks,) if isinstance(chunks, bytes) else chunks

@@ -85,6 +85,66 @@ def test_timeout_kills_the_process_group_and_preserves_result_status(tmp_path: P
     assert result.command.timed_out is True
     assert result.command.signals_sent == (9,)
     assert result.capture_status == "COMPLETE"
+    manifest = json.loads((result.path / "manifest.json").read_text())
+    assert manifest["termination"]["reason"] == "TIMEOUT"
+    assert manifest["termination"]["caller_cancelled"] is False
+
+
+def test_caller_cancellation_kills_drains_and_leaves_unknown_partial_status(tmp_path: Path) -> None:
+    async def cancel_capture() -> None:
+        child_started = tmp_path / "child-started"
+        child_marker = tmp_path / "leaked-child"
+        child_code = (
+            f"import pathlib, time; pathlib.Path({str(child_started)!r}).touch(); time.sleep(0.5); "
+            f"pathlib.Path({str(child_marker)!r}).write_text('leaked')"
+        )
+        code = (
+            "import subprocess, sys, time; print('started', flush=True); "
+            f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); time.sleep(60)"
+        )
+        task = asyncio.create_task(
+            capture_command(
+                [sys.executable, "-c", code],
+                tmp_path,
+                max_bytes=1024,
+            )
+        )
+        for _ in range(100):
+            if child_started.exists():
+                break
+            await asyncio.sleep(0.01)
+        else:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            pytest.fail("child process did not start")
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.6)
+        assert not child_marker.exists()
+
+    asyncio.run(cancel_capture())
+    partials = list((tmp_path / "partial").glob("*.partial"))
+    assert len(partials) == 1
+    partial = partials[0]
+    assert (partial / "stdout.raw").read_bytes() == b"started\n"
+
+    records = recover_partials(tmp_path)
+    assert records[0].path == partial
+    manifest = json.loads((partial / "manifest.json").read_text())
+    assert manifest["capture_status"] == "INCOMPLETE"
+    assert manifest["command"] == {
+        "final_status": "UNKNOWN",
+        "exit_code": None,
+        "signal": None,
+    }
+    assert manifest["termination"] == {
+        "reason": "CALLER_CANCELLED",
+        "caller_cancelled": True,
+        "timed_out": False,
+        "signals_sent": [9],
+    }
 
 
 def test_storage_failure_fails_open_without_stopping_command(
@@ -128,4 +188,20 @@ def test_recovery_marks_partial_without_execution(tmp_path: Path) -> None:
     records = recover_partials(tmp_path)
     assert records == [records[0]]
     assert records[0].capture_id == "abandoned"
-    assert json.loads((partial / "recovery.json").read_text())["capture_status"] == "INCOMPLETE"
+    assert json.loads((partial / "recovery.json").read_text()) == {
+        "capture_status": "INCOMPLETE",
+        "incomplete": True,
+        "reason": "WRAPPER_INTERRUPTED_OR_CRASHED",
+    }
+    assert json.loads((partial / "manifest.json").read_text()) == {
+        "capture_id": "abandoned",
+        "capture_status": "INCOMPLETE",
+        "incomplete": True,
+        "command": {"final_status": "UNKNOWN", "exit_code": None, "signal": None},
+        "termination": {
+            "reason": "WRAPPER_INTERRUPTED_OR_CRASHED",
+            "caller_cancelled": None,
+            "timed_out": None,
+            "signals_sent": [],
+        },
+    }

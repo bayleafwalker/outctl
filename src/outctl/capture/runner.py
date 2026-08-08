@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from outctl.capture.recovery import write_incomplete_manifest
 from outctl.capture.storage import StreamWriter, private_dir, write_json
 
 _CHUNK_SIZE = 64 * 1024
@@ -157,6 +158,7 @@ async def capture_command(
     timed_out = False
     cancelled = False
     signals_sent: tuple[int, ...] = ()
+    cancellation_error: asyncio.CancelledError | None = None
     try:
         await asyncio.wait_for(process.wait(), timeout=timeout)
     except TimeoutError:
@@ -164,12 +166,12 @@ async def capture_command(
         signals_sent = (signal.SIGKILL,)
         _kill_group(process)
         await process.wait()
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as error:
         cancelled = True
+        cancellation_error = error
         signals_sent = (signal.SIGKILL,)
         _kill_group(process)
         await process.wait()
-        raise
     finally:
         await asyncio.gather(*drainers)
         stdout.close()
@@ -177,6 +179,21 @@ async def capture_command(
         event_file.flush()
         os.fsync(event_file.fileno())
         event_file.close()
+
+    if cancellation_error is not None:
+        # Preserve observable bytes in a partial spool, but deliberately do
+        # not convert the post-cancellation return code into a command result:
+        # the caller owns cancellation and the command's final outcome is not
+        # an authoritative result of this capture.
+        write_incomplete_manifest(
+            partial,
+            capture_id,
+            reason="CALLER_CANCELLED",
+            signals_sent=signals_sent,
+            caller_cancelled=True,
+            timed_out=False,
+        )
+        raise cancellation_error
 
     returncode = process.returncode
     command_result = CommandResult(
@@ -198,6 +215,12 @@ async def capture_command(
             "capture_id": capture_id,
             "capture_status": capture_status,
             "command": command_result.__dict__,
+            "termination": {
+                "reason": "TIMEOUT" if timed_out else "COMPLETED",
+                "caller_cancelled": False,
+                "timed_out": timed_out,
+                "signals_sent": list(signals_sent),
+            },
             "streams": {
                 "stdout": {"bytes": stdout.retained_bytes, "sha256": stdout.sha256},
                 "stderr": {"bytes": stderr.retained_bytes, "sha256": stderr.sha256},
