@@ -347,7 +347,10 @@ def _preflight(kubeconfig: Path, context: str, namespace: str) -> None:
                 ],
                 capture_output=True, text=True, check=False,
             )
-            if allowed.returncode or allowed.stdout.strip().lower() != "no":
+            # ``kubectl auth can-i`` returns status 1 for the expected answer
+            # ``no``. Its stdout is the authoritative result; an invocation
+            # error has no affirmative ``no`` output and still fails closed.
+            if allowed.stdout.strip().lower() != "no":
                 raise PilotError(f"mutation RBAC must be denied for {verb} {resource}")
 
 
