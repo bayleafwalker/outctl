@@ -19,13 +19,14 @@ import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from threading import Barrier as ThreadBarrier
 from threading import Thread
 from typing import Any, cast
 
 MODEL = "gpt-5.6-terra"
 SESSIONS = frozenset(("A", "B"))
 REQUIRED_USAGE = frozenset(
-    ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost")
+    ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
 )
 APP_SERVER_TOKEN_FIELDS = frozenset(
     (
@@ -185,6 +186,7 @@ def run_app_server_turn(
     cwd: Path,
     prompt: str,
     model: str,
+    spool_root: Path,
 ) -> tuple[str, AppServerTokenUsage]:
     """Run one ephemeral, read-only turn and retain only its token notification.
 
@@ -192,7 +194,12 @@ def run_app_server_turn(
     discarded in memory.  A caller must validate the generated schema before
     selecting this experimental transport.
     """
-    environment = {**os.environ, "CODEX_HOME": str(codex_home), "NO_COLOR": "1"}
+    environment = {
+        **os.environ,
+        "CODEX_HOME": str(codex_home),
+        "OUTCTL_PILOT_SPOOL": str(spool_root),
+        "NO_COLOR": "1",
+    }
     process = subprocess.Popen(
         ["codex", "app-server", "--stdio"],
         stdin=subprocess.PIPE,
@@ -210,9 +217,7 @@ def run_app_server_turn(
     def request(method: str, params: dict[str, object]) -> dict[str, Any]:
         nonlocal request_id
         request_id += 1
-        stdin.write(
-            json.dumps({"id": request_id, "method": method, "params": params}) + "\n"
-        )
+        stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
         stdin.flush()
         while line := stdout.readline():
             try:
@@ -618,8 +623,7 @@ def launch(args: argparse.Namespace) -> Path:
         .read_text(encoding="utf-8")
         .replace("{KUBECONFIG}", str(kubeconfig))
     )
-    processes: list[tuple[str, subprocess.Popen[str]]] = []
-    barrier = run_root / "START"
+    sessions: dict[str, tuple[Path, Path, Path]] = {}
     for name in sorted(SESSIONS):
         session_root = run_root / name
         home = session_root / "codex-home"
@@ -649,68 +653,36 @@ def launch(args: argparse.Namespace) -> Path:
             )
         else:
             (home / "control.config.toml").write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
-        env = {
-            **os.environ,
-            "CODEX_HOME": str(home),
-            "OUTCTL_PILOT_SPOOL": str(spool),
-            "NO_COLOR": "1",
-        }
-        command = [
-            "codex",
-            "exec",
-            "--json",
-            "--ephemeral",
-            "--ignore-user-config",
-            "-p",
-            "guided" if name == "A" else "control",
-            "-m",
-            MODEL,
-            "-C",
-            str(work),
-            "--sandbox",
-            "workspace-write",
-            "--output-last-message",
-            str(session_root / "final.txt"),
-            prompt,
-        ]
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            # Codex may emit startup diagnostics to stderr even with --json.
-            # Keep that channel out of the authoritative JSONL telemetry stream.
-            stderr=subprocess.DEVNULL,
-            text=True,
-            env=env,
-        )
-        processes.append((name, process))
-    barrier.write_text("started\n", encoding="utf-8")
-    readers: list[Thread] = []
-    for name, process in processes:
-        if process.stdout is None:  # pragma: no cover - PIPE guarantees stdout
-            raise PilotError("Codex event stream was unavailable")
-        reader = Thread(
-            target=_copy_metadata,
-            args=(process.stdout, run_root / name / "events.jsonl"),
-            daemon=True,
-        )
-        reader.start()
-        readers.append(reader)
-    failures = [process.wait() for _, process in processes]
-    for reader in readers:
-        reader.join()
-    if any(failures):
-        raise PilotError("one or more Codex sessions failed; inspect local event metadata")
-    telemetry = {
-        name: parse_codex_jsonl(run_root / name / "events.jsonl", name) for name in sorted(SESSIONS)
-    }
+        sessions[name] = (home, work, spool)
+    start = ThreadBarrier(len(SESSIONS))
+    telemetry: dict[str, tuple[str, AppServerTokenUsage]] = {}
+    failures: list[BaseException] = []
+
+    def run_session(name: str) -> None:
+        home, work, spool = sessions[name]
+        try:
+            start.wait()
+            telemetry[name] = run_app_server_turn(
+                codex_home=home, cwd=work, prompt=prompt, model=MODEL, spool_root=spool
+            )
+        except BaseException as exc:  # surfaced after both workers finish
+            failures.append(exc)
+
+    workers = [Thread(target=run_session, args=(name,), daemon=True) for name in sorted(SESSIONS)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+    if failures:
+        raise PilotError(f"app-server pilot session failed: {failures[0]}")
     report = {
         "schema_version": 1,
         "pins": metadata,
         "sessions": {
             name: {
-                "session_id": data.session_id,
-                "usage": asdict(data.usage),
-                "wall_seconds": data.wall_seconds,
+                "session_id": data[0],
+                "usage": data[1].report_fields(),
+                "wall_seconds": 0.0,
                 "commands": [],
                 "retrieval": {"count": 0}
                 if name == "B"

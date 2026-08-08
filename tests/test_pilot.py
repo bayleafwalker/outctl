@@ -74,7 +74,10 @@ def test_jsonl_parser_rejects_mixed_sessions(tmp_path: Path) -> None:
             "mixed or duplicate",
         ),
         (lambda value: value["sessions"]["A"]["commands"][0]["argv"].append("delete"), "mutation"),
-        (lambda value: value["sessions"]["A"]["usage"].pop("cost"), "telemetry-incomplete"),
+        (
+            lambda value: value["sessions"]["A"]["usage"].pop("cache_write_tokens"),
+            "telemetry-incomplete",
+        ),
     ],
 )
 def test_report_rejects_unsafe_or_incomplete_evidence(mutate: object, message: str) -> None:
