@@ -490,7 +490,6 @@ def _build_codex_command(
     codex_bin: str,
     model: str,
     sandbox: str,
-    approval: str,
     worktree: Path,
     schema: Path,
     final_path: Path,
@@ -506,8 +505,6 @@ def _build_codex_command(
         model,
         "--sandbox",
         sandbox,
-        "--ask-for-approval",
-        approval,
         "--cd",
         str(worktree),
         "--output-schema",
@@ -1488,7 +1485,6 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--model", default="gpt-5.6-terra")
     parser.add_argument("--sandbox", default="danger-full-access")
-    parser.add_argument("--approval", default="never")
     parser.add_argument("--reasoning-effort", default=None)
     parser.add_argument("--pairs", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
@@ -1670,7 +1666,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 codex_bin=args.codex_bin,
                 model=args.model,
                 sandbox=args.sandbox,
-                approval=args.approval,
                 worktree=worktree_a,
                 schema=schema_path,
                 final_path=arm_dir_a / "final.json",
@@ -1680,7 +1675,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 codex_bin=args.codex_bin,
                 model=args.model,
                 sandbox=args.sandbox,
-                approval=args.approval,
                 worktree=worktree_b,
                 schema=schema_path,
                 final_path=arm_dir_b / "final.json",
@@ -1842,7 +1836,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "model_requested": args.model,
                     "codex_version": _codex_version(args.codex_bin),
                     "sandbox": args.sandbox,
-                    "approval": args.approval,
+                    "approval": "cli-default (no unsupported override)",
                     "reasoning_effort": args.reasoning_effort,
                     "pairs_requested": args.pairs,
                     "prompt_template_sha256": _sha256_file(prompt_path),
