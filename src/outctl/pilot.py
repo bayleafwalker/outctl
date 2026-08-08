@@ -136,7 +136,13 @@ class CommandApprovalPolicy:
         # even when it parses to a superficially plausible argv.
         if command != shlex.join(argv):
             return "decline"
-        if argv in self.corpus and argv not in self.approved_corpus:
+        # The corpus is deliberately serial.  Without a successful completion
+        # between approvals, capture-event order cannot prove which wrapped
+        # command created the oversized fourth capture.
+        if any(item_id not in self.completed_items for item_id in self.approved_items):
+            return "decline"
+        expected_index = len(self.approved_corpus)
+        if expected_index < len(self.corpus) and argv == self.corpus[expected_index]:
             self.approved_corpus.add(argv)
             self.approved_items[item_id] = argv
             return "accept"

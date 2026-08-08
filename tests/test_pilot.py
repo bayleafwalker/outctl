@@ -234,8 +234,20 @@ def test_app_server_approval_allows_only_exact_control_corpus(tmp_path: Path) ->
         session="B", thread_id="thread", turn_id="turn", cwd=Path("/tmp"), corpus=entries,
         spool_root=tmp_path
     )
-    for number, argv in enumerate(entries):
+    assert policy.decision(_approval_params(shlex.join(entries[0]), "item-0")) == "accept"
+    assert policy.decision(_approval_params(shlex.join(entries[1]), "too-early")) == "decline"
+    policy.record_completion(
+        {"threadId": "thread", "turnId": "turn", "item": {
+            "id": "item-0", "type": "commandExecution", "status": "completed",
+            "exitCode": 0, "command": shlex.join(entries[0])}}
+    )
+    for number, argv in enumerate(entries[1:], start=1):
         assert policy.decision(_approval_params(shlex.join(argv), f"item-{number}")) == "accept"
+        policy.record_completion(
+            {"threadId": "thread", "turnId": "turn", "item": {
+                "id": f"item-{number}", "type": "commandExecution", "status": "completed",
+                "exitCode": 0, "command": shlex.join(argv)}}
+        )
     assert policy.decision(_approval_params(shlex.join(entries[0]), "extra")) == "decline"
     assert policy.decision(_approval_params("kubectl get pods -A; id", "shell")) == "decline"
     assert policy.decision(_approval_params("sh -c 'kubectl get pods'", "shell-2")) == "decline"
@@ -243,12 +255,6 @@ def test_app_server_approval_allows_only_exact_control_corpus(tmp_path: Path) ->
         policy.decision({"threadId": "other", "turnId": "turn", "command": "kubectl get pods"})
         == "decline"
     )
-    for number, argv in enumerate(entries):
-        policy.record_completion(
-            {"threadId": "thread", "turnId": "turn", "item": {
-                "id": f"item-{number}", "type": "commandExecution", "status": "completed",
-                "exitCode": 0, "command": shlex.join(argv)}}
-        )
     policy.assert_complete()
 
 
