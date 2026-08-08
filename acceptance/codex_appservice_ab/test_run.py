@@ -470,7 +470,7 @@ class EndToEndTests(unittest.TestCase):
                 0o600,
             )
             self.assertFalse((output / "private" / "pair-001" / "codex-home-A").exists())
-            self.assertEqual(report["experiment"]["preflight"]["required_permissions_verified"], 6)
+            self.assertEqual(report["experiment"]["preflight"]["required_permissions_verified"], 5)
             self.assertEqual(report["experiment"]["preflight"]["prohibited_permissions_denied"], 6)
 
 

@@ -5,7 +5,7 @@ Run each of these six kubectl argv exactly once, without shell pipelines, substi
 1. `kubectl version -o json`
 2. `kubectl get nodes -o wide`
 3. `kubectl get pods -A -o wide`
-4. `kubectl -n flux-system get kustomizations`
+4. `kubectl -n flux-system get pods -o wide`
 5. `kubectl -n gatus get deployments,persistentvolumeclaims`
 6. `kubectl -n gatus get events --sort-by=.lastTimestamp`
 
