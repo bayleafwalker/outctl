@@ -89,6 +89,39 @@ capture/retrieval evidence, zero B outctl usage, bounded start skew, and
 read-only command compliance before a pair is valid. Invalid pairs remain in
 the report and are excluded from aggregate efficacy calculations.
 
+## Required remediations from review
+
+These are implementation requirements for the imported reference harness, not
+post-run polish:
+
+1. **No premature efficacy claim.** The README/report language must state that
+   fake JSONL and synthetic manifests validate only the apparatus. Do not claim
+   context, cost, or health-quality benefit until a valid real read-only pair
+   has completed and its private artifacts have been manually reconciled with
+   the metadata report.
+2. **Strengthen deterministic quality coverage.** Extend the final structured
+   health-result schema and comparison checks with required, bounded coverage
+   fields for `cluster_api`, `nodes`, `workloads`, `gitops`, `storage`, and
+   `events`. Require explicit agreement on any `critical`/`high` finding IDs
+   or classifications in addition to equal overall status and evidence Jaccard
+   overlap. Keep this deterministic and small; do not add an LLM semantic
+   grader.
+3. **Treat cache as confounded.** Reports and README must identify backend
+   prompt-cache sharing as a limitation. Decision emphasis is total input,
+   uncached-read input, model-visible command-output bytes, and weighted
+   credits; raw cache-token deltas are descriptive only. Preserve sequential
+   matched pairs and alternating local start order.
+4. **Fix the report query contract.** The reference emits
+   `.comparison.pair_valid` and `.comparison.flags`; documentation must not
+   direct users to nonexistent `.comparison.valid` or
+   `.comparison.validity_flags`. Add a fixture assertion for the documented
+   `jq` projection or provide a repository-owned report-view command.
+5. **Stage the first live operation.** The post-implementation runbook must
+   require: dry run and blind-baseline inspection; one separately authorized,
+   scoped-credential wiring pair; manual comparison of private JSONL/capture
+   artifacts with public metadata; then three sequential matched pairs only
+   after the wiring pair passes. Devbox has no authority for those live steps.
+
 ## Implementation sequence
 
 1. Unpack the transferred ZIP to a temporary review path and compare every
