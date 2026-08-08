@@ -141,10 +141,12 @@ part of this handoff. Durable references: none. Retention: retain the Git
 history until this pilot work is integrated or intentionally superseded; the
 temporary transport bundle may be discarded after both replicas verify it.
 
-Verified replica: devbox-vm `/tmp/outctl-devbox-pilot-implementation` at
-commit `706046780f1c02474f254d583d86c8ac83844379`, checked out from branch
-`devbox-pilot-implementation`. The transfer bundle SHA-256 was
-`825d9d5ed31a7bcf48653f0bc4a23bf215c0163bd2a62c9a897cf55747be520e` and was
-verified before the remote worktree was created. This replica is
-host-persistent but not durable-authoritative; it remains unpublished Git
-state until a separately authorized review and push.
+Verified replica: devbox-vm `/tmp/outctl-devbox-pilot-implementation`, checked
+out from branch `devbox-pilot-implementation`. It was created at commit
+`706046780f1c02474f254d583d86c8ac83844379` after verifying transfer bundle
+SHA-256 `825d9d5ed31a7bcf48653f0bc4a23bf215c0163bd2a62c9a897cf55747be520e`,
+then fast-forwarded to `cd0620ae1f5c8aa86e114f512132c8fbd4c19eed` after
+verifying follow-up bundle SHA-256
+`06025fa48259735f021ba18f907dded688e5acf3bb4f0c600605f9340c96d8a4`. This
+replica is host-persistent but not durable-authoritative; it remains
+unpublished Git state until a separately authorized review and push.
