@@ -117,8 +117,8 @@ session aggregate.
    exact `--context`. Before either model starts, the harness verifies the
    fixed health-check corpus permissions and rejects any identity that can
    mutate, read Secrets, exec, port-forward, or inject ephemeral containers.
-   It injects the kubeconfig after `direnv` so the canonical environment cannot
-   replace it.
+   It injects the kubeconfig directly so neither arm can inherit or replace it
+   through user-local environment setup.
 4. Optionally pass appservice's `bin/cluster-status.sh` with
    `--health-checker`. The launcher runs it once with `TALOSCONFIG` cleared,
    retains its raw capture privately, and gives both arms the same bounded

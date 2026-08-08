@@ -130,6 +130,36 @@ def test_cli_run_uses_literal_argv_and_safe_envelope(
     assert str(tmp_path) not in json.dumps(payload)
 
 
+def test_cli_run_honors_explicit_projection_limits(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        main(
+            [
+                "run",
+                "--spool-root",
+                str(tmp_path / "spool"),
+                "--max-projection-bytes",
+                "48",
+                "--max-projection-lines",
+                "2",
+                "--max-projection-tokens",
+                "12",
+                "--",
+                sys.executable,
+                "-c",
+                "print('alpha\\nbeta\\ngamma\\ndelta')",
+            ]
+        )
+        == 0
+    )
+    envelope = _payload(capsys)["envelope"]  # type: ignore[assignment]
+    projection = envelope["projection"]  # type: ignore[index]
+    assert projection["bytes"] <= 48  # type: ignore[index]
+    assert projection["lines"] <= 2  # type: ignore[index]
+    assert projection["estimated_tokens"] <= 12  # type: ignore[index]
+
+
 def test_cli_run_preserves_wrapped_command_exit_status(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

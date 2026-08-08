@@ -64,6 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--policy-ref", default="interactive-default-v1")
     run.add_argument("--policy-digest", default="sha256:" + "0" * 64)
     run.add_argument("--max-capture-bytes", type=int, default=16 * 1024 * 1024)
+    run.add_argument("--max-projection-bytes", type=int, default=_DEFAULT_MAX_BYTES)
+    run.add_argument("--max-projection-lines", type=int, default=2_000)
+    run.add_argument("--max-projection-tokens", type=int, default=16_000)
     run.add_argument("--timeout", type=float)
     run.add_argument("--cwd", type=Path)
     run.add_argument("argv", nargs=argparse.REMAINDER, help="command after --")
@@ -315,6 +318,11 @@ def _run_payload(args: argparse.Namespace) -> tuple[dict[str, object], int]:
                 cwd=args.cwd,
                 timeout=args.timeout,
                 max_capture_bytes=args.max_capture_bytes,
+                projection_limits=ProjectionLimits(
+                    args.max_projection_bytes,
+                    args.max_projection_lines,
+                    args.max_projection_tokens,
+                ),
             )
         )
     )

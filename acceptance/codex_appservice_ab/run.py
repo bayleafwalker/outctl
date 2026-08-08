@@ -285,7 +285,6 @@ def _preflight_readonly_kubeconfig(
         ("list", "events", "gatus", None),
         ("list", "persistentvolumeclaims", "gatus", None),
         ("list", "kustomizations.kustomize.toolkit.fluxcd.io", "flux-system", None),
-        ("list", "gitrepositories.source.toolkit.fluxcd.io", "flux-system", None),
     )
     deny_checks = (
         ("create", "pods", "gatus", None),
@@ -1879,7 +1878,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{execution_prefix} run "
         f'--mode enforce --spool-root "$OUTCTL_AB_SPOOL_ROOT" '
         f"--policy-ref {shlex.quote(args.policy_ref)} "
-        f"--policy-digest {shlex.quote(args.policy_digest)} --"
+        f"--policy-digest {shlex.quote(args.policy_digest)} "
+        "--max-projection-bytes 4096 --max-projection-lines 120 "
+        "--max-projection-tokens 1024 --"
     )
 
     prompt_template = prompt_path.read_text(encoding="utf-8")
