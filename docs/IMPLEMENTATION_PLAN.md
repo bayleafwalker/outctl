@@ -47,8 +47,10 @@ compact receipt emission. The adapter consumes runner-owned cancellation and
 identity; it creates no action lifecycle or audit authority.
 
 Falsifying gates: acceptance H01–H03 and I01–I04, a fresh-clone installation,
-and a measured local pilot comparing raw bytes, exposed bytes, token estimate,
-retrieval count, wall time, and wrapper overhead.
+and a qualitative paired Codex-or-Claude appservice health-check pilot. The
+pilot records raw/exposed/retrieved bytes and token estimates, retrieval count,
+wall time, wrapper overhead, policy digest, and observed direction of impact;
+these metrics are decision evidence rather than release-blocking thresholds.
 
 ## Stop conditions
 

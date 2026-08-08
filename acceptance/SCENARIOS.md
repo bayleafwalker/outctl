@@ -318,3 +318,94 @@ Expected:
 - model-facing projection total drops by at least 50%;
 - report includes raw/exposed/retrieved estimates and policy digests;
 - all retrievals use existing captures rather than reruns.
+
+## H. Pilot adapter modes
+
+### H01 — bypass preserves the existing path
+
+Run the selected Codex or Claude harness pilot with bypass selected.
+
+Expected:
+
+- the harness uses its ordinary pre-wrapper command path;
+- no new capture or receipt is created by the adapter;
+- existing captures remain inspectable and eligible for dry-run GC;
+- no action, sprint, or audit state is created or migrated.
+
+### H02 — shadow measures without changing the ordinary result
+
+Run the selected harness with shadow selected for the same command corpus.
+
+Expected:
+
+- command semantics and the harness's ordinary result remain equivalent to the
+  bypass run;
+- capture/projection metrics are available locally under the pinned policy;
+- command and capture outcomes remain distinct;
+- shadow does not retry commands or determine action/audit outcomes.
+
+### H03 — enforce exposes bounded evidence
+
+Run the selected harness with enforce selected for an output-heavy command.
+
+Expected:
+
+- model-facing output is a bounded, redacted projection plus opaque retrieval
+  capability/reference, never raw capture bytes or paths;
+- capture-required behavior remains independent from command outcome;
+- omitted evidence can be retrieved from the existing capture without rerun.
+
+## I. Pilot integration evidence
+
+### I01 — caller-owned context and authority
+
+Run the adapter with pinned policy reference/digest, cwd, host/harness identity,
+and caller-provided action, sprint, session, and correlation bindings.
+
+Expected:
+
+- supplied context appears unchanged in the envelope/receipt as appropriate;
+- the adapter does not create workflow state, retry commands, or determine
+  action/audit terminal outcomes;
+- runner-owned cancellation remains distinct from timeout.
+
+### I02 — cancellation and incomplete evidence
+
+Cancel an active adapter invocation with a child process group.
+
+Expected:
+
+- the child group is terminated according to runner policy and observed pipes
+  are drained;
+- recovery records explicit incomplete evidence and does not invent a final
+  command/action outcome;
+- timeout metadata is distinguishable from caller cancellation.
+
+### I03 — bounded no-rerun retrieval bridge
+
+Use an enforced output that omits a known middle marker, then retrieve it by
+capture reference through the selected harness boundary.
+
+Expected:
+
+- retrieval returns bounded/redacted evidence from the existing capture;
+- the fixture invocation count remains exactly one;
+- no generic command executor or wrapped command rerun is invoked.
+
+### I04 — qualitative Codex/Claude appservice health-check pilot
+
+Run a paired baseline and opt-in pilot through Codex or Claude using an
+appservice health-check workflow based on `kubectl` output. Select the command
+corpus from representative local session evidence without storing raw session
+or command output in Git.
+
+Expected:
+
+- the report records policy digest, command class, raw/exposed/retrieved byte
+  and token estimates, retrieval count, wall time, and wrapper overhead;
+- it states the observed direction of context reduction and operational impact,
+  including failures/truncations/bypasses, without a release-blocking numeric
+  threshold;
+- raw output remains outside Git, sprintctl, kctl, auditctl, and the report;
+- a fresh clone can install the selected adapter/pilot path and reproduce the
+  local evidence fixture.
