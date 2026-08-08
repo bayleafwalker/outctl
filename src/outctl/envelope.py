@@ -65,6 +65,12 @@ def build_result_envelope(
     )
     projection_id = projection_id or f"sha256:{projection.sha256}"
     raw_bytes = capture.stdout_bytes + capture.stderr_bytes
+    redaction_metadata = {
+        "rules": [
+            {"id": rule.identifier, "count": rule.count}
+            for rule in projection.redaction_rules
+        ]
+    }
     return CommandResultEnvelope(
         capture_ref=capture_ref,
         capture_id=capture.capture_id,
@@ -107,6 +113,9 @@ def build_result_envelope(
             sha256=projection.sha256,
             inline_text=projection.text,
             token_estimator="utf8-bytes-div-4-v1",
+            # The schema intentionally permits projection extensions.  This
+            # metadata identifies rules and match counts only: never values.
+            extra={"redaction": redaction_metadata},
         ),
         retrieval=CommandResultRetrieval(
             available=True,

@@ -194,13 +194,41 @@ def _load_manifest(
     return RetrievalStatus.AVAILABLE, parsed, None
 
 
+def _authorize_workspace(
+    manifest: Mapping[str, object], expected_workspace_id: str | None
+) -> tuple[RetrievalStatus, str | None]:
+    """Authorize a resolved capture against its manifest workspace identity."""
+    if expected_workspace_id is None:
+        return RetrievalStatus.AVAILABLE, None
+    source = manifest.get("source")
+    workspace_id = source.get("workspace_id") if isinstance(source, dict) else None
+    if not isinstance(workspace_id, str) or workspace_id != expected_workspace_id:
+        return RetrievalStatus.DENIED, "workspace authorization denied"
+    return RetrievalStatus.AVAILABLE, None
+
+
+def _authorized_manifest(
+    resolved: _ResolvedCapture, expected_workspace_id: str | None
+) -> tuple[RetrievalStatus, Mapping[str, object] | None, str | None]:
+    status, manifest, detail = _load_manifest(resolved)
+    if manifest is None:
+        return status, None, detail
+    authorization, authorization_detail = _authorize_workspace(manifest, expected_workspace_id)
+    if authorization is not RetrievalStatus.AVAILABLE:
+        return authorization, None, authorization_detail
+    return status, manifest, detail
+
+
 def _stream_path(
-    resolved: _ResolvedCapture, stream: str
+    resolved: _ResolvedCapture, stream: str, expected_workspace_id: str | None
 ) -> tuple[RetrievalStatus, Path | None, str | None]:
     if stream not in _STREAMS:
         raise ValueError("stream must be 'stdout' or 'stderr'")
     if resolved.status is not RetrievalStatus.AVAILABLE:
         return resolved.status, None, resolved.detail
+    status, _manifest, detail = _authorized_manifest(resolved, expected_workspace_id)
+    if status is not RetrievalStatus.AVAILABLE:
+        return status, None, detail
     assert resolved.path is not None
     path = resolved.path / f"{stream}.raw"
     if not _safe_file(path):
@@ -214,10 +242,12 @@ def _read_range(path: Path, start: int, end: int) -> bytes:
         return file.read(end - start)
 
 
-def inspect_capture(spool_root: Path, capture_id: str) -> InspectionResult:
+def inspect_capture(
+    spool_root: Path, capture_id: str, *, expected_workspace_id: str | None = None
+) -> InspectionResult:
     """Read a capture manifest without opening raw streams."""
     resolved = _resolve_capture(spool_root, capture_id)
-    status, manifest, detail = _load_manifest(resolved)
+    status, manifest, detail = _authorized_manifest(resolved, expected_workspace_id)
     capture_status = manifest.get("capture_status") if manifest is not None else None
     if capture_status is not None and not isinstance(capture_status, str):
         return InspectionResult(
@@ -234,6 +264,7 @@ def slice_stream(
     end: int,
     *,
     max_bytes: int = _DEFAULT_MAX_BYTES,
+    expected_workspace_id: str | None = None,
 ) -> SliceResult:
     """Return one bounded half-open byte range from an existing stream."""
     if start < 0 or end < start:
@@ -241,7 +272,7 @@ def slice_stream(
     if max_bytes <= 0 or end - start > max_bytes:
         raise ValueError("slice range exceeds max_bytes")
     resolved = _resolve_capture(spool_root, capture_id)
-    status, path, detail = _stream_path(resolved, stream)
+    status, path, detail = _stream_path(resolved, stream, expected_workspace_id)
     if path is None:
         return SliceResult(status, capture_id, stream, start, end, detail=detail)
     try:
@@ -262,6 +293,7 @@ def tail_stream(
     *,
     lines: int | None = None,
     max_bytes: int = _DEFAULT_MAX_BYTES,
+    expected_workspace_id: str | None = None,
 ) -> TailResult:
     """Return a byte-bounded suffix, optionally selecting its final lines."""
     if lines is not None and lines < 0:
@@ -269,7 +301,7 @@ def tail_stream(
     if max_bytes <= 0:
         raise ValueError("max_bytes must be positive")
     resolved = _resolve_capture(spool_root, capture_id)
-    status, path, detail = _stream_path(resolved, stream)
+    status, path, detail = _stream_path(resolved, stream, expected_workspace_id)
     if path is None:
         return TailResult(status, capture_id, stream, detail=detail)
     try:
@@ -300,6 +332,7 @@ def search_stream(
     regex: bool = False,
     context_bytes: int = 80,
     max_matches: int = 100,
+    expected_workspace_id: str | None = None,
 ) -> SearchResult:
     """Search an existing stream, returning only byte-bounded match windows.
 
@@ -317,7 +350,7 @@ def search_stream(
     except re.error as error:
         raise ValueError(f"invalid regex: {error}") from error
     resolved = _resolve_capture(spool_root, capture_id)
-    status, path, detail = _stream_path(resolved, stream)
+    status, path, detail = _stream_path(resolved, stream, expected_workspace_id)
     if path is None:
         return SearchResult(status, capture_id, stream, detail=detail)
     try:
@@ -371,10 +404,12 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def verify_capture(spool_root: Path, capture_id: str) -> VerificationResult:
+def verify_capture(
+    spool_root: Path, capture_id: str, *, expected_workspace_id: str | None = None
+) -> VerificationResult:
     """Verify finalized stream and event-index digests against its manifest."""
     resolved = _resolve_capture(spool_root, capture_id)
-    status, manifest, detail = _load_manifest(resolved)
+    status, manifest, detail = _authorized_manifest(resolved, expected_workspace_id)
     if manifest is None:
         return VerificationResult(status, capture_id, detail=detail)
     streams = manifest.get("streams")

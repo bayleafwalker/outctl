@@ -10,7 +10,7 @@ from __future__ import annotations
 import codecs
 import hashlib
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 OMISSION_MARKER = "[... output omitted ...]"
@@ -50,6 +50,7 @@ class ProjectionResult:
     redacted: bool
     sha256: str
     gap_marker: str | None
+    redaction_rules: tuple[RedactionRule, ...] = ()
 
     @property
     def digest(self) -> str:
@@ -62,14 +63,41 @@ class ProjectionResult:
         return self.gap_marker is not None
 
 
+@dataclass(frozen=True)
+class RedactionRule:
+    """An applied redaction rule, deliberately without a matched value."""
+
+    identifier: str
+    count: int
+
+
 class _ExactRedactor:
     """Streaming byte redactor with deterministic longest-match precedence."""
 
-    def __init__(self, values: Iterable[bytes], replacement: bytes) -> None:
-        unique = set(values)
-        if any(not value for value in unique):
+    def __init__(
+        self, rules: Iterable[tuple[str, bytes]], replacement: bytes
+    ) -> None:
+        values_by_rule: dict[bytes, str] = {}
+        for identifier, value in rules:
+            if not identifier:
+                raise ValueError("redaction rule identifiers must not be empty")
+            if not value:
+                raise ValueError("exact redaction values must not be empty")
+            existing = values_by_rule.get(value)
+            # Identical values in separate rules are assigned deterministically
+            # without retaining or emitting the sensitive value.
+            if existing is None or identifier < existing:
+                values_by_rule[value] = identifier
+        if any(not value for value in values_by_rule):
             raise ValueError("exact redaction values must not be empty")
-        self._values = tuple(sorted(unique, key=lambda value: (-len(value), value)))
+        self._values = tuple(
+            sorted(
+                values_by_rule,
+                key=lambda value: (-len(value), value, values_by_rule[value]),
+            )
+        )
+        self._rule_for_value = values_by_rule
+        self._counts: dict[str, int] = {}
         self._max_length = max((len(value) for value in self._values), default=1)
         self._replacement = replacement
         self._pending = bytearray()
@@ -93,6 +121,8 @@ class _ExactRedactor:
                 output.extend(self._replacement)
                 cursor += len(match)
                 self.redacted = True
+                identifier = self._rule_for_value[match]
+                self._counts[identifier] = self._counts.get(identifier, 0) + 1
             else:
                 output.append(data[cursor])
                 cursor += 1
@@ -100,6 +130,14 @@ class _ExactRedactor:
         self._pending.extend(data[cursor:])
 
         return bytes(output)
+
+    @property
+    def rules(self) -> tuple[RedactionRule, ...]:
+        """Return applied rule identifiers and counts in stable order."""
+        return tuple(
+            RedactionRule(identifier, count)
+            for identifier, count in sorted(self._counts.items())
+        )
 
 
 def _neutralize_controls(text: str) -> tuple[str, bool]:
@@ -388,11 +426,23 @@ def _coerce_values(values: Iterable[bytes | str]) -> tuple[bytes, ...]:
     )
 
 
+def _coerce_rules(
+    rules: Mapping[str, Iterable[bytes | str]],
+) -> tuple[tuple[str, bytes], ...]:
+    """Convert named exact-match rules without retaining names in output text."""
+    converted: list[tuple[str, bytes]] = []
+    for identifier in sorted(rules):
+        values = rules[identifier]
+        converted.extend((identifier, value) for value in _coerce_values(values))
+    return tuple(converted)
+
+
 def project_bytes(
     chunks: bytes | Iterable[bytes],
     *,
     exact_values: Iterable[bytes | str] = (),
     exact_secrets: Iterable[bytes | str] | None = None,
+    exact_redaction_rules: Mapping[str, Iterable[bytes | str]] | None = None,
     replacement: bytes | str = b"[REDACTED]",
     limits: ProjectionLimits | None = None,
     max_bytes: int = 65_536,
@@ -410,10 +460,13 @@ def project_bytes(
     elif (max_bytes, max_lines, max_estimated_tokens) != (65_536, 2_000, 16_000):
         raise ValueError("pass either limits or individual limit arguments, not both")
 
+    values = tuple(exact_values)
     if exact_secrets is not None:
-        if tuple(exact_values):
+        if values:
             raise ValueError("pass either exact_values or exact_secrets, not both")
-        exact_values = exact_secrets
+        values = tuple(exact_secrets)
+    if exact_redaction_rules is not None and values:
+        raise ValueError("pass exact_redaction_rules or exact values, not both")
     replacement_bytes = (
         replacement.encode("utf-8")
         if isinstance(replacement, str)
@@ -422,7 +475,12 @@ def project_bytes(
     if not replacement_bytes:
         raise ValueError("replacement must not be empty")
 
-    redactor = _ExactRedactor(_coerce_values(exact_values), replacement_bytes)
+    rules = (
+        _coerce_rules(exact_redaction_rules)
+        if exact_redaction_rules is not None
+        else tuple(("exact-value", value) for value in _coerce_values(values))
+    )
+    redactor = _ExactRedactor(rules, replacement_bytes)
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     collector = _PrefixCollector(limits)
     normalizer = _ProjectionNormalizer(collector, limits)
@@ -459,6 +517,7 @@ def project_bytes(
         redacted=redactor.redacted,
         sha256=hashlib.sha256(output).hexdigest(),
         gap_marker=gap_marker,
+        redaction_rules=redactor.rules,
     )
 
 

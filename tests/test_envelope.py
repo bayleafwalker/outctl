@@ -43,3 +43,34 @@ def test_build_result_envelope_roundtrips_existing_capture_metadata(tmp_path: Pa
         (Path(__file__).parents[1] / "schemas/command-result-envelope.schema.json").read_text()
     )
     jsonschema.Draft202012Validator(schema).validate(envelope.to_dict())
+
+
+def test_envelope_carries_redaction_metadata_without_the_registered_value(tmp_path: Path) -> None:
+    capture = asyncio.run(
+        capture_command([sys.executable, "-c", "pass"], tmp_path, max_bytes=1024)
+    )
+    protected = "registered" + "-envelope"
+    projection = project_bytes(
+        [b"value=reg", b"istered-envelope\n"],
+        exact_redaction_rules={"credential-registry": (protected,)},
+    )
+    envelope = build_result_envelope(
+        capture,
+        projection,
+        CommandResultInvocation(
+            argv_display=["python", "-c", "pass"],
+            shell=False,
+            cwd=str(tmp_path),
+            host_id="test-host",
+            harness="pytest",
+            started_at="2026-08-08T00:00:00Z",
+        ),
+        policy_ref="test-policy",
+        policy_digest="sha256:" + "0" * 64,
+    )
+
+    serialized = __import__("json").dumps(envelope.to_dict(), sort_keys=True)
+    assert serialized.find(protected) == -1
+    assert envelope.projection.extra == {
+        "redaction": {"rules": [{"id": "credential-registry", "count": 1}]}
+    }

@@ -182,6 +182,35 @@ def test_receipt_is_json_safe_and_excludes_output_and_raw_paths(tmp_path: Path) 
     assert str(tmp_path.resolve()) not in serialized
     assert "inline_text" not in serialized
     assert "stdout.raw" not in serialized
+    assert result.receipt["source"] == {
+        "availability": "local-only",
+        "host_id": "test-host",
+    }
+
+
+def test_receipt_carries_named_redaction_counts_without_sensitive_value(tmp_path: Path) -> None:
+    protected = "registered" + "-output"
+    result = run(
+        request(
+            AdapterMode.ENFORCE,
+            tmp_path,
+            f"print({protected!r})",
+            exact_redaction_rules={"credential-registry": (protected,)},
+        )
+    )
+
+    assert result.envelope is not None
+    assert result.receipt is not None
+    serialized_projection = json.dumps(result.envelope.to_dict()["projection"], sort_keys=True)
+    serialized_receipt = json.dumps(result.receipt, sort_keys=True)
+    assert serialized_projection.find(protected) == -1
+    assert serialized_receipt.find(protected) == -1
+    assert result.envelope.projection.extra == {
+        "redaction": {"rules": [{"id": "credential-registry", "count": 1}]}
+    }
+    assert result.receipt["projection"]["redaction"] == {
+        "rules": [{"id": "credential-registry", "count": 1}]
+    }
 
 
 def test_timeout_and_cwd_are_forwarded(tmp_path: Path) -> None:

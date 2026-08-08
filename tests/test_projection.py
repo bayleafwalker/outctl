@@ -7,6 +7,7 @@ from outctl.projection import (
     LINE_CLIPPED_MARKER,
     OMISSION_MARKER,
     ProjectionLimits,
+    RedactionRule,
     project_bytes,
 )
 
@@ -27,6 +28,18 @@ def test_exact_redaction_crosses_input_chunk_boundaries() -> None:
     assert result.text == "token=[REDACTED] done\n"
     assert result.redacted is True
     assert b"secret-value" not in result.output
+
+
+def test_named_redaction_metadata_records_rule_and_count_without_value() -> None:
+    protected = b"registered" + b"-value"
+    result = project_bytes(
+        [b"prefix=reg", b"istered-value suffix\n"],
+        exact_redaction_rules={"credential-registry": (protected,)},
+    )
+
+    assert result.redaction_rules == (RedactionRule("credential-registry", 1),)
+    # Keep assertion output safe if this ever regresses.
+    assert result.output.find(protected) == -1
 
 
 def test_ansi_and_controls_are_neutralized() -> None:

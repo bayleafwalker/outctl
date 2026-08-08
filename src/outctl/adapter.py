@@ -56,6 +56,7 @@ class AdapterRequest:
         default_factory=lambda: ProjectionLimits(65_536, 2_000, 16_000)
     )
     exact_values: Sequence[bytes | str] = ()
+    exact_redaction_rules: Mapping[str, Sequence[bytes | str]] | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.argv, (str, bytes)) or not self.argv:
@@ -70,6 +71,15 @@ class AdapterRequest:
         object.__setattr__(self, "argv", argv)
         object.__setattr__(self, "bindings", dict(self.bindings))
         object.__setattr__(self, "exact_values", tuple(self.exact_values))
+        if self.exact_redaction_rules is not None:
+            object.__setattr__(
+                self,
+                "exact_redaction_rules",
+                {
+                    identifier: tuple(values)
+                    for identifier, values in self.exact_redaction_rules.items()
+                },
+            )
 
 
 @dataclass(frozen=True)
@@ -158,6 +168,10 @@ def _receipt(
             "stdout_bytes": capture.stdout_bytes,
             "stderr_bytes": capture.stderr_bytes,
         },
+        "source": {
+            "availability": envelope.capture.source.availability,
+            "host_id": envelope.capture.source.host_id,
+        },
         "projection": {
             "id": envelope.projection.projection_id,
             "sha256": envelope.projection.sha256,
@@ -166,6 +180,9 @@ def _receipt(
             "estimated_tokens": envelope.projection.estimated_tokens,
             "lossy": envelope.projection.lossy,
             "redacted": envelope.projection.redacted,
+            "redaction": envelope.projection.extra["redaction"]
+            if envelope.projection.extra is not None
+            else {"rules": []},
         },
     }
 
@@ -191,6 +208,7 @@ async def run_adapter(request: AdapterRequest) -> AdapterResult:
     projection = project_bytes(
         _capture_chunks(capture),
         exact_values=request.exact_values,
+        exact_redaction_rules=request.exact_redaction_rules,
         limits=request.projection_limits,
     )
     invocation = CommandResultInvocation(

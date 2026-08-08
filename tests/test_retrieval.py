@@ -18,7 +18,9 @@ from outctl.retrieval import (
 )
 
 
-def _capture(root: Path, capture_id: str = "capture-1") -> Path:
+def _capture(
+    root: Path, capture_id: str = "capture-1", *, workspace_id: str | None = None
+) -> Path:
     path = root / "captures" / capture_id
     path.mkdir(parents=True)
     stdout = b"alpha\nbeta marker\ngamma\n"
@@ -36,6 +38,8 @@ def _capture(root: Path, capture_id: str = "capture-1") -> Path:
         },
         "event_index": {"events": 1, "sha256": hashlib.sha256(events).hexdigest()},
     }
+    if workspace_id is not None:
+        manifest["source"] = {"workspace_id": workspace_id}
     (path / "manifest.json").write_text(json.dumps(manifest))
     os.chmod(path / "manifest.json", 0o600)
     return path
@@ -110,6 +114,47 @@ def test_retrieval_never_invokes_the_command_runner(
     monkeypatch.setattr(outctl.capture.runner, "capture_command", fail_if_called)
     assert slice_stream(tmp_path, "capture-1", "stdout", 0, 5).status is RetrievalStatus.AVAILABLE
     assert invoked is False
+
+
+def test_workspace_authorization_denies_known_capture_in_another_workspace(tmp_path: Path) -> None:
+    _capture(tmp_path, workspace_id="workspace-owned")
+
+    assert (
+        inspect_capture(
+            tmp_path, "capture-1", expected_workspace_id="workspace-other"
+        ).status
+        is RetrievalStatus.DENIED
+    )
+    assert (
+        slice_stream(
+            tmp_path, "capture-1", "stdout", 0, 5, expected_workspace_id="workspace-other"
+        ).status
+        is RetrievalStatus.DENIED
+    )
+    assert (
+        tail_stream(
+            tmp_path, "capture-1", "stdout", expected_workspace_id="workspace-other"
+        ).status
+        is RetrievalStatus.DENIED
+    )
+    assert (
+        search_stream(
+            tmp_path, "capture-1", "stdout", b"marker", expected_workspace_id="workspace-other"
+        ).status
+        is RetrievalStatus.DENIED
+    )
+    assert (
+        verify_capture(
+            tmp_path, "capture-1", expected_workspace_id="workspace-other"
+        ).status
+        is RetrievalStatus.DENIED
+    )
+    assert (
+        inspect_capture(
+            tmp_path, "capture-1", expected_workspace_id="workspace-owned"
+        ).status
+        is RetrievalStatus.AVAILABLE
+    )
 
 
 @pytest.mark.parametrize("capture_id", ("../outside", "nested/name", ".."))
