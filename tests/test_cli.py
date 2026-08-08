@@ -156,6 +156,48 @@ def test_cli_run_preserves_wrapped_command_exit_status(
     }
 
 
+def test_cli_explicit_mode_overrides_ambient_mode_except_break_glass(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OUTCTL_MODE", "shadow")
+    assert (
+        main(
+            [
+                "run",
+                "--mode",
+                "enforce",
+                "--spool-root",
+                str(tmp_path / "spool"),
+                "--",
+                sys.executable,
+                "-c",
+                "pass",
+            ]
+        )
+        == 0
+    )
+    assert _payload(capsys)["mode"] == "enforce"
+
+    monkeypatch.setenv("OUTCTL_ENABLED", "0")
+    assert (
+        main(
+            [
+                "run",
+                "--mode",
+                "enforce",
+                "--spool-root",
+                str(tmp_path / "unused"),
+                "--",
+                sys.executable,
+                "-c",
+                "pass",
+            ]
+        )
+        == 0
+    )
+    assert _payload(capsys)["mode"] == "bypass"
+
+
 def test_cli_validates_raw_free_pilot_report(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

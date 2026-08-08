@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any
 
 from outctl import __version__
-from outctl.adapter import AdapterIdentity, AdapterMode, AdapterRequest, run_adapter
+from outctl.adapter import (
+    AdapterIdentity,
+    AdapterMode,
+    AdapterRequest,
+    resolve_adapter_mode,
+    run_adapter,
+)
 from outctl.capture import recover_partials
 from outctl.pilot import PilotReportError, validate_pilot_report
 from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
@@ -262,10 +268,7 @@ def _run_payload(args: argparse.Namespace) -> tuple[dict[str, object], int]:
     if not argv:
         raise ValueError("run requires direct argv after --")
     configured_mode = AdapterMode(args.mode) if args.mode is not None else None
-    mode = AdapterMode.from_environment(default=configured_mode or AdapterMode.ENFORCE)
-    if configured_mode is not None and mode is AdapterMode.BYPASS:
-        # OUTCTL_ENABLED=0 remains the documented break-glass override.
-        mode = AdapterMode.BYPASS
+    mode = resolve_adapter_mode(configured_mode, default=AdapterMode.ENFORCE)
     result = asyncio.run(
         run_adapter(
             AdapterRequest(
