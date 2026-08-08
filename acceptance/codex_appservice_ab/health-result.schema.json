@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "overall_status",
+    "summary",
+    "coverage",
+    "checks",
+    "findings",
+    "limitations",
+    "mutations_performed"
+  ],
+  "properties": {
+    "overall_status": {
+      "type": "string",
+      "enum": ["healthy", "degraded", "unknown"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1800
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cluster_api", "nodes", "workloads", "gitops", "storage", "events"],
+      "properties": {
+        "cluster_api": {"$ref": "#/$defs/coverage_status"},
+        "nodes": {"$ref": "#/$defs/coverage_status"},
+        "workloads": {"$ref": "#/$defs/coverage_status"},
+        "gitops": {"$ref": "#/$defs/coverage_status"},
+        "storage": {"$ref": "#/$defs/coverage_status"},
+        "events": {"$ref": "#/$defs/coverage_status"}
+      }
+    },
+    "checks": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["area", "status", "evidence"],
+        "properties": {
+          "area": {"type": "string", "minLength": 1, "maxLength": 120},
+          "status": {
+            "type": "string",
+            "enum": ["healthy", "degraded", "unknown", "not_checked"]
+          },
+          "evidence": {"type": "string", "minLength": 1, "maxLength": 1200}
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "severity", "component", "summary", "evidence"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+          "severity": {
+            "type": "string",
+            "enum": ["info", "warning", "high", "critical", "unknown"]
+          },
+          "component": {"type": "string", "minLength": 1, "maxLength": 160},
+          "summary": {"type": "string", "minLength": 1, "maxLength": 800},
+          "evidence": {"type": "string", "minLength": 1, "maxLength": 1200}
+        }
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {"type": "string", "minLength": 1, "maxLength": 800}
+    },
+    "mutations_performed": {"const": false}
+  },
+  "$defs": {
+    "coverage_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence"],
+      "properties": {
+        "status": {"type": "string", "enum": ["healthy", "degraded", "unknown", "not_checked"]},
+        "evidence": {"type": "string", "minLength": 1, "maxLength": 500}
+      }
+    }
+  }
+}
