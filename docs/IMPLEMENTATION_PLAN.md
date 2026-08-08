@@ -23,7 +23,10 @@ Deliver Linux non-PTY direct-argv execution, concurrent stream drainage,
 process-group timeout/cancellation, bounded capture writes, chunk event index,
 atomic finalization, hashes, and explicit partial recovery.
 
-Falsifying gates: acceptance A01–A04, C01–C04, and D01–D04. Stress fixtures
+Falsifying gates: the capture, process-semantics, and recovery assertions of
+acceptance A01–A04, C01–C04, and D01–D03. Projection, retrieval, and
+verification assertions embedded in A01, A03, A04, and D04 are owned by Pass
+3, because those capabilities are not delivered by this pass. Stress fixtures
 must exceed pipe capacity on both streams and prove no leaked child remains.
 
 ## Pass 3 — projection and retrieval
@@ -32,7 +35,9 @@ Deliver deterministic normalization, redaction, selection, hard budgets, gap
 markers, repeat/progress collapse, binary-safe handling, result envelopes, and
 `inspect`, `slice`, `tail`, `search`, `verify`, `recover`, and `gc --dry-run`.
 
-Falsifying gates: acceptance A05, B01–B05, D05, E01–E08, F01–F03, and G01–G04.
+Falsifying gates: the deferred projection, retrieval, and verification
+assertions of A01, A03, A04, and D04; acceptance A05, B01–B05, D05, E01–E08,
+F01–F03, and G01–G04.
 All retrieval tests prove the original fixture executed exactly once.
 
 ## Pass 4 — pilot adapter
@@ -52,4 +57,3 @@ disagree; if implementation requires a daemon, database, PTY, remote executor,
 cluster access, or LLM; if a test needs mutable external state; if command and
 capture outcomes cannot remain distinct; or if a secret can enter model-facing
 output under a supported policy.
-
