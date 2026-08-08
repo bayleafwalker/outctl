@@ -8,9 +8,11 @@ import pytest
 from outctl.pilot import (
     PilotError,
     PilotReportError,
+    parse_app_server_token_usage,
     parse_codex_jsonl,
     review_verdict,
     smoke,
+    validate_app_server_schema,
     validate_pilot_report,
     validate_report,
 )
@@ -133,3 +135,69 @@ def test_preserves_qualitative_pilot_validator() -> None:
     value["stdout"] = "forbidden"
     with pytest.raises(PilotReportError, match="forbidden"):
         validate_pilot_report(value)
+
+
+def test_app_server_token_usage_is_complete_and_does_not_double_count_cache() -> None:
+    event = {
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": "a",
+            "turnId": "turn-a",
+            "tokenUsage": {
+                "total": {
+                    "inputTokens": 100,
+                    "cachedInputTokens": 70,
+                    "cacheWriteInputTokens": 10,
+                    "outputTokens": 25,
+                    "reasoningOutputTokens": 5,
+                    "totalTokens": 125,
+                }
+            },
+        },
+    }
+    usage = parse_app_server_token_usage(event, "a")
+    assert usage.model_context_memory == 100
+    assert usage.aggregate_cache_tokens == 80
+    assert usage.report_fields()["reported_cost"] is None
+    assert usage.report_fields()["cost_telemetry_status"] == "provider_unavailable"
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"method": "thread/tokenUsage/updated", "params": {"threadId": "other"}},
+        {"method": "other", "params": {}},
+        {
+            "method": "thread/tokenUsage/updated",
+            "params": {"threadId": "a", "tokenUsage": {"total": {}}},
+        },
+    ],
+)
+def test_app_server_token_usage_rejects_incomplete_or_mixed_thread(event: object) -> None:
+    with pytest.raises(PilotError):
+        parse_app_server_token_usage(event, "a")
+
+
+def test_app_server_schema_requires_all_token_fields(tmp_path: Path) -> None:
+    schema = {
+        "definitions": {
+            "ThreadTokenUsageUpdatedNotification": {},
+            "TokenUsageBreakdown": {
+                "properties": {
+                    "inputTokens": {},
+                    "cachedInputTokens": {},
+                    "cacheWriteInputTokens": {},
+                    "outputTokens": {},
+                    "reasoningOutputTokens": {},
+                    "totalTokens": {},
+                }
+            },
+        }
+    }
+    path = tmp_path / "schema.json"
+    path.write_text(json.dumps(schema))
+    validate_app_server_schema(path)
+    schema["definitions"]["TokenUsageBreakdown"]["properties"].pop("cacheWriteInputTokens")
+    path.write_text(json.dumps(schema))
+    with pytest.raises(PilotError, match="required token fields"):
+        validate_app_server_schema(path)

@@ -27,6 +27,16 @@ SESSIONS = frozenset(("A", "B"))
 REQUIRED_USAGE = frozenset(
     ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost")
 )
+APP_SERVER_TOKEN_FIELDS = frozenset(
+    (
+        "inputTokens",
+        "cachedInputTokens",
+        "cacheWriteInputTokens",
+        "outputTokens",
+        "reasoningOutputTokens",
+        "totalTokens",
+    )
+)
 MUTATING_KUBECTL = frozenset(
     ("apply", "create", "delete", "patch", "replace", "edit", "scale", "rollout")
 )
@@ -51,6 +61,41 @@ class PilotReportSummary:
     baseline_exposed_tokens: int
     enforce_exposed_tokens: int
     retrieval_count: int
+
+
+@dataclass(frozen=True)
+class AppServerTokenUsage:
+    """Cumulative, per-thread token counters from the app-server protocol."""
+
+    input_tokens: int
+    cached_input_tokens: int
+    cache_write_input_tokens: int
+    output_tokens: int
+    reasoning_output_tokens: int
+    total_tokens: int
+
+    @property
+    def model_context_memory(self) -> int:
+        """Cached input is a subset of input, so do not double-count it."""
+        return self.input_tokens
+
+    @property
+    def aggregate_cache_tokens(self) -> int:
+        return self.cached_input_tokens + self.cache_write_input_tokens
+
+    def report_fields(self) -> dict[str, int | None | str]:
+        return {
+            "input_tokens": self.input_tokens,
+            "cache_read_tokens": self.cached_input_tokens,
+            "cache_write_tokens": self.cache_write_input_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_output_tokens": self.reasoning_output_tokens,
+            "total_tokens": self.total_tokens,
+            "model_context_memory": self.model_context_memory,
+            "aggregate_cache_tokens": self.aggregate_cache_tokens,
+            "reported_cost": None,
+            "cost_telemetry_status": "provider_unavailable",
+        }
 
 
 @dataclass(frozen=True)
@@ -84,6 +129,148 @@ def _number(value: object, name: str, *, integral: bool = False) -> int | float:
     if integral and int(value) != value:
         raise PilotError(f"invalid {name}")
     return int(value) if integral else float(value)
+
+
+def parse_app_server_token_usage(event: object, expected_thread_id: str) -> AppServerTokenUsage:
+    """Accept only the terminal, metadata-only token usage notification."""
+    if not isinstance(event, dict) or event.get("method") != "thread/tokenUsage/updated":
+        raise PilotError("expected thread/tokenUsage/updated notification")
+    params = event.get("params")
+    if not isinstance(params, dict) or params.get("threadId") != expected_thread_id:
+        raise PilotError("token telemetry belongs to a different thread")
+    token_usage = params.get("tokenUsage")
+    if not isinstance(token_usage, dict):
+        raise PilotError("token telemetry is missing tokenUsage")
+    total = token_usage.get("total")
+    if not isinstance(total, dict) or not total.keys() >= APP_SERVER_TOKEN_FIELDS:
+        raise PilotError("telemetry-incomplete: app-server token fields are missing")
+    values = {
+        field: int(_number(total[field], field, integral=True)) for field in APP_SERVER_TOKEN_FIELDS
+    }
+    if values["cachedInputTokens"] > values["inputTokens"]:
+        raise PilotError("cached input tokens exceed input tokens")
+    return AppServerTokenUsage(
+        input_tokens=values["inputTokens"],
+        cached_input_tokens=values["cachedInputTokens"],
+        cache_write_input_tokens=values["cacheWriteInputTokens"],
+        output_tokens=values["outputTokens"],
+        reasoning_output_tokens=values["reasoningOutputTokens"],
+        total_tokens=values["totalTokens"],
+    )
+
+
+def validate_app_server_schema(schema_path: Path) -> None:
+    """Fail closed unless the pinned schema advertises complete token telemetry."""
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PilotError("unable to read app-server schema") from exc
+    if not isinstance(schema, dict):
+        raise PilotError("invalid app-server schema")
+    definitions = schema.get("definitions")
+    if not isinstance(definitions, dict):
+        raise PilotError("app-server schema has no definitions")
+    notification = definitions.get("ThreadTokenUsageUpdatedNotification")
+    breakdown = definitions.get("TokenUsageBreakdown")
+    if not isinstance(notification, dict) or not isinstance(breakdown, dict):
+        raise PilotError("app-server schema lacks token usage notification")
+    properties = breakdown.get("properties")
+    if not isinstance(properties, dict) or not properties.keys() >= APP_SERVER_TOKEN_FIELDS:
+        raise PilotError("app-server schema lacks required token fields")
+
+
+def run_app_server_turn(
+    *,
+    codex_home: Path,
+    cwd: Path,
+    prompt: str,
+    model: str,
+) -> tuple[str, AppServerTokenUsage]:
+    """Run one ephemeral, read-only turn and retain only its token notification.
+
+    JSON-RPC item, message, and command-output notifications are intentionally
+    discarded in memory.  A caller must validate the generated schema before
+    selecting this experimental transport.
+    """
+    environment = {**os.environ, "CODEX_HOME": str(codex_home), "NO_COLOR": "1"}
+    process = subprocess.Popen(
+        ["codex", "app-server", "--stdio"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=environment,
+    )
+    if process.stdin is None or process.stdout is None:  # pragma: no cover
+        raise PilotError("app-server stdio was unavailable")
+    stdin = process.stdin
+    stdout = process.stdout
+    request_id = 0
+
+    def request(method: str, params: dict[str, object]) -> dict[str, Any]:
+        nonlocal request_id
+        request_id += 1
+        stdin.write(
+            json.dumps({"id": request_id, "method": method, "params": params}) + "\n"
+        )
+        stdin.flush()
+        while line := stdout.readline():
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise PilotError("app-server emitted malformed JSON") from exc
+            if not isinstance(message, dict):
+                raise PilotError("app-server emitted a non-object message")
+            if message.get("id") == request_id:
+                result = message.get("result")
+                if not isinstance(result, dict):
+                    raise PilotError(f"app-server {method} did not return an object")
+                return result
+        raise PilotError(f"app-server closed during {method}")
+
+    try:
+        request("initialize", {"clientInfo": {"name": "outctl-pilot", "version": "1"}})
+        started = request(
+            "thread/start",
+            {
+                "cwd": str(cwd),
+                "model": model,
+                "sandbox": "read-only",
+                "ephemeral": True,
+                "approvalPolicy": "never",
+            },
+        )
+        thread = started.get("thread")
+        if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
+            raise PilotError("app-server did not return a thread id")
+        thread_id = thread["id"]
+        turn = request(
+            "turn/start",
+            {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
+        )
+        turn_value = turn.get("turn")
+        if not isinstance(turn_value, dict) or not isinstance(turn_value.get("id"), str):
+            raise PilotError("app-server did not return a turn id")
+        latest: AppServerTokenUsage | None = None
+        while line := stdout.readline():
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise PilotError("app-server emitted malformed JSON") from exc
+            if not isinstance(message, dict):
+                raise PilotError("app-server emitted a non-object message")
+            if message.get("method") == "thread/tokenUsage/updated":
+                latest = parse_app_server_token_usage(message, thread_id)
+            if message.get("method") == "turn/completed":
+                params = message.get("params")
+                if isinstance(params, dict) and params.get("threadId") == thread_id:
+                    if latest is None:
+                        raise PilotError("telemetry-incomplete: no app-server token usage update")
+                    return thread_id, latest
+        raise PilotError("app-server closed before turn completion")
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
 
 
 def _first(mapping: dict[str, Any], keys: Iterable[str]) -> object | None:
@@ -331,10 +518,19 @@ def _preflight(kubeconfig: Path, context: str, namespace: str) -> None:
         for resource in ("deployments", "pods", "events"):
             allowed = subprocess.run(
                 [
-                    "kubectl", "--kubeconfig", str(kubeconfig), "auth", "can-i",
-                    verb, resource, "--namespace", namespace,
+                    "kubectl",
+                    "--kubeconfig",
+                    str(kubeconfig),
+                    "auth",
+                    "can-i",
+                    verb,
+                    resource,
+                    "--namespace",
+                    namespace,
                 ],
-                capture_output=True, text=True, check=False,
+                capture_output=True,
+                text=True,
+                check=False,
             )
             if allowed.returncode or allowed.stdout.strip().lower() != "yes":
                 raise PilotError(f"read-only RBAC preflight failed for {verb} {resource}")
@@ -342,10 +538,19 @@ def _preflight(kubeconfig: Path, context: str, namespace: str) -> None:
         for resource in ("deployments", "pods", "events"):
             allowed = subprocess.run(
                 [
-                    "kubectl", "--kubeconfig", str(kubeconfig), "auth", "can-i",
-                    verb, resource, "--namespace", namespace,
+                    "kubectl",
+                    "--kubeconfig",
+                    str(kubeconfig),
+                    "auth",
+                    "can-i",
+                    verb,
+                    resource,
+                    "--namespace",
+                    namespace,
                 ],
-                capture_output=True, text=True, check=False,
+                capture_output=True,
+                text=True,
+                check=False,
             )
             # ``kubectl auth can-i`` returns status 1 for the expected answer
             # ``no``. Its stdout is the authoritative result; an invocation
@@ -541,6 +746,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     subparsers.add_parser("smoke", help="validate offline fixture evidence")
     validate = subparsers.add_parser("validate", help="validate a metadata-only report")
     validate.add_argument("report", type=Path)
+    telemetry_probe = subparsers.add_parser(
+        "telemetry-probe", help="validate a pinned app-server token telemetry schema"
+    )
+    telemetry_probe.add_argument("schema", type=Path)
     launch_parser = subparsers.add_parser("launch", help="run the read-only concurrent pilot")
     launch_parser.add_argument("--appservice", required=True)
     launch_parser.add_argument("--kubeconfig", required=True)
@@ -555,6 +764,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             report = json.loads(args.report.read_text(encoding="utf-8"))
             validate_report(report)
             print(json.dumps({"status": "ok", "verdict": review_verdict(report)}, sort_keys=True))
+        elif args.command == "telemetry-probe":
+            validate_app_server_schema(args.schema)
+            print(json.dumps({"status": "ok", "telemetry": "app-server-token-usage"}))
         else:
             print(launch(args))
     except (OSError, json.JSONDecodeError, PilotError) as exc:
