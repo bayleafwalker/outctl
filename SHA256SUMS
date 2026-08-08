@@ -1,7 +1,7 @@
 64e02ac7a58eed99dbfb993f636ed73eac1ce135fd1188835a3581f1a40e0b5e  ./.agents/environment.generated.md
 2eaf03f5685d7be5f512b8fe5afc0db6fa3612bfab13da5f6c1c2f75ba3a51fa  ./.agents/overlays/outctl.boundaries.md
 f6b4463004769967bb9d68fa2feb670e6ff18a4d4f6ea31e68b735164dafee0a  ./.agents/project.generated.md
-629d5d8ca4f599cb9b0bb191fe3a70e2a0afa660b4bd17276167f515d9d9461a  ./.github/workflows/ci.yml
+3a24db84c89cccc772273ae701a501c822b5c675e93d0f92e45d285fbc28fa81  ./.github/workflows/ci.yml
 0eae962860fec24eed356088c23257e4dac49cbb03da1fb24d860396c6273c96  ./.gitignore
 9ea280e4c89d3f302c1e8b3e5e7db91c46bec0fe761356ae90f32aaf0dbe0e8b  ./.python-version
 b702dbbd841a7db1d67dacc0409ab1a95b614edbf6cd3fd9ca1c139c83ccb8bc  ./AGENTS.md
