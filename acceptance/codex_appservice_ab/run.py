@@ -1479,6 +1479,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Canonical directory whose direnv environment provides kubeconfig/access",
     )
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--kubeconfig",
+        type=Path,
+        default=None,
+        help="Explicit read-only kubeconfig required for live runs; dry-runs need none",
+    )
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--model", default="gpt-5.6-terra")
     parser.add_argument("--sandbox", default="danger-full-access")
@@ -1513,6 +1519,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     source = args.appservice.resolve()
     canonical = args.canonical_appservice.resolve()
+    kubeconfig = args.kubeconfig.resolve() if args.kubeconfig is not None else None
     prompt_path = args.prompt.resolve()
     schema_path = args.schema.resolve()
     for path, name in ((source, "appservice"), (canonical, "canonical appservice")):
@@ -1520,6 +1527,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ExperimentError(f"{name} directory does not exist: {path}")
     if not prompt_path.is_file() or not schema_path.is_file():
         raise ExperimentError("prompt/schema file is missing")
+    if not args.dry_run and (kubeconfig is None or not kubeconfig.is_file()):
+        raise ExperimentError("live runs require an explicit readable --kubeconfig")
     try:
         schema_value = json.loads(schema_path.read_text(encoding="utf-8"))
         Draft202012Validator.check_schema(schema_value)
@@ -1564,10 +1573,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     launcher = shlex.split(args.outctl_cmd)
     if not launcher:
         raise ExperimentError("--outctl-cmd resolved to an empty command")
-    retrieval_prefix = f"direnv exec {shlex.quote(str(canonical))} {shlex.join(launcher)}"
+    kubeconfig_env = (
+        f"KUBECONFIG={shlex.quote(str(kubeconfig))} " if kubeconfig is not None else ""
+    )
+    retrieval_prefix = (
+        f"direnv exec {shlex.quote(str(canonical))} env {kubeconfig_env}{shlex.join(launcher)}"
+    )
     execution_prefix = (
         f"direnv exec {shlex.quote(str(canonical))} "
-        f"env OUTCTL_ENABLED=1 OUTCTL_MODE=enforce {shlex.join(launcher)}"
+        f"env {kubeconfig_env}OUTCTL_ENABLED=1 OUTCTL_MODE=enforce {shlex.join(launcher)}"
     )
     wrapper = (
         f"{execution_prefix} run "

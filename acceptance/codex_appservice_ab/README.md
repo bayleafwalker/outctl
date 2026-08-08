@@ -113,7 +113,10 @@ session aggregate.
    Prefer a clean committed revision. Use `--allow-dirty` only deliberately;
    use `--include-untracked` only when you have reviewed every untracked file.
 2. `outctl run` works from the canonical appservice direnv environment.
-3. Set an approved policy reference and its real SHA-256 digest. Do not use a
+3. For every live run, pass an explicit dedicated read-only kubeconfig with
+   `--kubeconfig`; the harness refuses a live run without one and injects it
+   after `direnv` so the canonical environment cannot replace it.
+4. Set an approved policy reference and its real SHA-256 digest. Do not use a
    decorative all-zero digest merely because the CLI accepts one.
 4. Codex authentication is available through `$CODEX_HOME/auth.json` or
    `CODEX_API_KEY`.
@@ -179,6 +182,7 @@ cd /projects/dev/outctl
 uv run python acceptance/codex_appservice_ab/run.py \
   --appservice /projects/dev/appservice \
   --canonical-appservice /projects/dev/appservice \
+  --kubeconfig /path/to/read-only.kubeconfig \
   --outctl-cmd 'uv run --project /projects/dev/outctl outctl' \
   --policy-ref "$OUTCTL_POLICY_REF" \
   --policy-digest "$OUTCTL_POLICY_DIGEST" \

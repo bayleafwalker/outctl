@@ -345,6 +345,8 @@ class EndToEndTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_codex.chmod(0o755)
+            kubeconfig = root / "read-only.kubeconfig"
+            kubeconfig.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
             output = root / "result"
             env = os.environ.copy()
             env["CODEX_HOME"] = str(fake_home)
@@ -355,6 +357,8 @@ class EndToEndTests(unittest.TestCase):
                     str(repo),
                     "--canonical-appservice",
                     str(repo),
+                    "--kubeconfig",
+                    str(kubeconfig),
                     "--output",
                     str(output),
                     "--codex-bin",
