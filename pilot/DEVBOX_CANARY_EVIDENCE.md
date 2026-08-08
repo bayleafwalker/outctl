@@ -1,6 +1,6 @@
 # Devbox app-server no-cluster canary
 
-Date: 2026-08-08  
+Date: 2026-08-08
 Checkout: `482705a` before the local remediation commit
 
 The local pinned Codex CLI was `codex-cli 0.145.0`. Its generated app-server
