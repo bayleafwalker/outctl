@@ -129,3 +129,17 @@ authorized. Source host: workstation. Source path: `/projects/dev/outctl`.
 Classification: host-persistent Git worktree plus a host-local reference ZIP;
 neither is durable-authoritative. Raw command/model output is not part of this
 handoff.
+
+Verified devbox replica prepared for implementation:
+
+```text
+worktree: /tmp/outctl-devbox-exec-jsonl-harness
+branch:   devbox-exec-jsonl-harness
+source:   dbab21daac4165a8b662f32dce4d5bd8cb2e4c0d
+ZIP:      /tmp/outctl-codex-appservice-ab.zip
+ZIP SHA-256: 0ba4b0e09956e335046b27354193730057b2f3dfdd229b48b74f7a8fb07a4652
+```
+
+The Git bundle and ZIP were SHA-256 verified before the worktree was created.
+This is a host-persistent, unpublished replica; it is not a durable authority
+and contains no raw session artifact.
