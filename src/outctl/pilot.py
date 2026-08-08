@@ -25,6 +25,8 @@ from threading import Barrier as ThreadBarrier
 from threading import Thread
 from typing import Any, cast
 
+from .retrieval import RetrievalStatus, verify_capture
+
 MODEL = "gpt-5.6-terra"
 SESSIONS = frozenset(("A", "B"))
 REQUIRED_USAGE = frozenset(
@@ -40,6 +42,7 @@ APP_SERVER_TOKEN_FIELDS = frozenset(
         "totalTokens",
     )
 )
+_MAX_APP_SERVER_MESSAGE_BYTES = 64 * 1024
 MUTATING_KUBECTL = frozenset(
     ("apply", "create", "delete", "patch", "replace", "edit", "scale", "rollout")
 )
@@ -70,9 +73,13 @@ class CommandApprovalPolicy:
     session: str
     thread_id: str
     turn_id: str
+    cwd: Path
     corpus: tuple[tuple[str, ...], ...]
     spool_root: Path
     approved_corpus: set[tuple[str, ...]]
+    approved_items: dict[str, tuple[str, ...]]
+    completed_items: set[str]
+    retrieval_item_id: str | None = None
     retrieval_approved: bool = False
 
     @classmethod
@@ -82,6 +89,7 @@ class CommandApprovalPolicy:
         session: str,
         thread_id: str,
         turn_id: str,
+        cwd: Path,
         corpus: Sequence[Sequence[str]],
         spool_root: Path,
     ) -> CommandApprovalPolicy:
@@ -102,13 +110,20 @@ class CommandApprovalPolicy:
                 )
                 for entry in entries
             )
-        return cls(session, thread_id, turn_id, entries, spool_root, set())
+        return cls(
+            session, thread_id, turn_id, cwd.resolve(), entries, spool_root, set(), {}, set()
+        )
 
     def decision(self, params: object) -> str:
         """Return the only two approval decisions the pilot ever emits."""
         if not isinstance(params, dict):
             return "decline"
         if params.get("threadId") != self.thread_id or params.get("turnId") != self.turn_id:
+            return "decline"
+        if params.get("cwd") != str(self.cwd):
+            return "decline"
+        item_id = params.get("itemId")
+        if not isinstance(item_id, str) or not item_id or item_id in self.approved_items:
             return "decline"
         command = params.get("command")
         if not isinstance(command, str):
@@ -123,28 +138,75 @@ class CommandApprovalPolicy:
             return "decline"
         if argv in self.corpus and argv not in self.approved_corpus:
             self.approved_corpus.add(argv)
+            self.approved_items[item_id] = argv
             return "accept"
         if self.session == "A" and self._is_bounded_retrieval(argv):
             self.retrieval_approved = True
+            self.retrieval_item_id = item_id
+            self.approved_items[item_id] = argv
             return "accept"
         return "decline"
 
+    def record_completion(self, params: object) -> None:
+        """Accept completion only for the exact command that was approved."""
+        if not isinstance(params, dict):
+            return
+        if params.get("threadId") != self.thread_id or params.get("turnId") != self.turn_id:
+            return
+        item = params.get("item")
+        if not isinstance(item, dict):
+            return
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or item_id not in self.approved_items:
+            return
+        if (
+            item.get("type") != "commandExecution"
+            or item.get("status") != "completed"
+            or item.get("exitCode") != 0
+            or item.get("command") != shlex.join(self.approved_items[item_id])
+        ):
+            return
+        self.completed_items.add(item_id)
+
     def _is_bounded_retrieval(self, argv: tuple[str, ...]) -> bool:
-        if self.retrieval_approved or len(argv) != 8:
+        if self.retrieval_approved or len(argv) != 8 or len(self.completed_items) != 4:
             return False
         prefix = ("outctl", "tail", "--spool-root", str(self.spool_root))
         if argv[:4] != prefix or argv[5:] != ("stdout", "--lines", "20"):
             return False
         capture_id = argv[4]
-        # A retrieval is only eligible once a capture exists.  This prevents a
-        # synthetic ID or an implicit command rerun from being approved.
-        return (self.spool_root / "captures" / capture_id / "manifest.json").is_file()
+        # Retrieval is bound to corpus command four only.  The capture must
+        # already exist and pass local digest verification, so tail never
+        # becomes a disguised rerun or an arbitrary capture read.
+        try:
+            commands = _read_event_log(self.spool_root / "command-events.jsonl")
+        except PilotError:
+            return False
+        if len(commands) != 4 or commands[3].get("capture_id") != capture_id:
+            return False
+        return verify_capture(self.spool_root, capture_id).status is RetrievalStatus.AVAILABLE
 
     def assert_complete(self) -> None:
-        if self.approved_corpus != set(self.corpus):
+        if self.approved_corpus != set(self.corpus) or len(self.completed_items) < 4:
             raise PilotError("app-server did not execute every frozen corpus command exactly once")
-        if self.session == "A" and not self.retrieval_approved:
+        if self.session == "A" and (
+            not self.retrieval_approved
+            or self.retrieval_item_id is None
+            or self.retrieval_item_id not in self.completed_items
+        ):
             raise PilotError("guided app-server session did not perform its bounded retrieval")
+
+    def completed_corpus_metadata(self) -> list[dict[str, object]]:
+        """Return raw-free direct-command proof for the control arm."""
+        result: list[dict[str, object]] = []
+        for ordinal, argv in enumerate(self.corpus):
+            item_ids = [
+                item_id for item_id, approved in self.approved_items.items() if approved == argv
+            ]
+            if len(item_ids) != 1 or item_ids[0] not in self.completed_items:
+                raise PilotError("corpus command completion evidence is incomplete")
+            result.append({"ordinal": ordinal, "argv": [argv[0]], "command_status": 0})
+        return result
 
 
 @dataclass(frozen=True)
@@ -190,6 +252,40 @@ class AppServerTokenUsage:
             "reported_cost": None,
             "cost_telemetry_status": "provider_unavailable",
         }
+
+
+def _structured_conclusion(params: object, thread_id: str, turn_id: str) -> dict[str, str] | None:
+    """Accept only the bounded final JSON object, never free-form model text."""
+    if (
+        not isinstance(params, dict)
+        or params.get("threadId") != thread_id
+        or params.get("turnId") != turn_id
+    ):
+        return None
+    item = params.get("item")
+    if not isinstance(item, dict) or item.get("type") != "agentMessage":
+        return None
+    text = item.get("text")
+    if not isinstance(text, str) or len(text) > 3 * 1024:
+        raise PilotError("pilot conclusion is absent or exceeds its bounded schema")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise PilotError("pilot conclusion is not valid structured JSON") from exc
+    required = {
+        "health_conclusion": 512,
+        "evidence_statement": 1024,
+        "retrieval_statement": 512,
+    }
+    if not isinstance(value, dict) or set(value) != set(required):
+        raise PilotError("pilot conclusion does not match the required schema")
+    result: dict[str, str] = {}
+    for key, maximum in required.items():
+        field = value.get(key)
+        if not isinstance(field, str) or not field or len(field) > maximum:
+            raise PilotError("pilot conclusion has invalid bounded fields")
+        result[key] = field
+    return result
 
 
 @dataclass(frozen=True)
@@ -283,7 +379,8 @@ def run_app_server_turn(
     developer_instructions: str,
     session: str,
     corpus: Sequence[Sequence[str]],
-) -> tuple[str, AppServerTokenUsage]:
+    outctl_bin_dir: Path,
+) -> tuple[str, AppServerTokenUsage, CommandApprovalPolicy, dict[str, str]]:
     """Run one ephemeral, read-only turn and retain only its token notification.
 
     JSON-RPC item, message, and command-output notifications are intentionally
@@ -294,6 +391,7 @@ def run_app_server_turn(
         **os.environ,
         "CODEX_HOME": str(codex_home),
         "OUTCTL_PILOT_SPOOL": str(spool_root),
+        "PATH": str(outctl_bin_dir) + os.pathsep + os.environ.get("PATH", ""),
         "NO_COLOR": "1",
     }
     process = subprocess.Popen(
@@ -356,20 +454,44 @@ def run_app_server_turn(
             decline_request(message)
         return True
 
+    conclusion: dict[str, str] | None = None
+
+    def observe_notification(message: dict[str, object]) -> None:
+        """Retain only completion state; never retain command/model bodies."""
+        nonlocal conclusion
+        if approval is not None and message.get("method") == "item/completed":
+            params = message.get("params")
+            approval.record_completion(params)
+            observed = _structured_conclusion(params, approval.thread_id, approval.turn_id)
+            if observed is not None:
+                conclusion = observed
+
+    def read_message() -> dict[str, object]:
+        # Command completion can include aggregated output.  Bound the protocol
+        # frame before decoding it, then immediately discard all non-metadata.
+        line = stdout.readline(_MAX_APP_SERVER_MESSAGE_BYTES + 1)
+        if not line:
+            raise PilotError("app-server closed unexpectedly")
+        if len(line) > _MAX_APP_SERVER_MESSAGE_BYTES or not line.endswith("\n"):
+            raise PilotError("app-server emitted an oversized protocol message")
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise PilotError("app-server emitted malformed JSON") from exc
+        if not isinstance(message, dict):
+            raise PilotError("app-server emitted a non-object message")
+        return cast(dict[str, object], message)
+
     def request(method: str, params: dict[str, object]) -> dict[str, Any]:
         nonlocal request_id
         request_id += 1
         stdin.write(json.dumps({"id": request_id, "method": method, "params": params}) + "\n")
         stdin.flush()
-        while line := stdout.readline():
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise PilotError("app-server emitted malformed JSON") from exc
-            if not isinstance(message, dict):
-                raise PilotError("app-server emitted a non-object message")
+        while True:
+            message = read_message()
             if handle_server_request(message):
                 continue
+            observe_notification(message)
             if message.get("id") == request_id:
                 result = message.get("result")
                 if not isinstance(result, dict):
@@ -389,7 +511,7 @@ def run_app_server_turn(
                 "model": model,
                 "sandbox": "read-only",
                 "ephemeral": True,
-                "approvalPolicy": "never",
+                "approvalPolicy": "untrusted",
                 "developerInstructions": developer_instructions,
             },
         )
@@ -399,7 +521,24 @@ def run_app_server_turn(
         thread_id = thread["id"]
         turn = request(
             "turn/start",
-            {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
+            {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": prompt}],
+                "outputSchema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "health_conclusion",
+                        "evidence_statement",
+                        "retrieval_statement",
+                    ],
+                    "properties": {
+                        "health_conclusion": {"type": "string", "maxLength": 512},
+                        "evidence_statement": {"type": "string", "maxLength": 1024},
+                        "retrieval_statement": {"type": "string", "maxLength": 512},
+                    },
+                },
+            },
         )
         turn_value = turn.get("turn")
         if not isinstance(turn_value, dict) or not isinstance(turn_value.get("id"), str):
@@ -408,19 +547,16 @@ def run_app_server_turn(
             session=session,
             thread_id=thread_id,
             turn_id=turn_value["id"],
+            cwd=cwd,
             corpus=corpus,
             spool_root=spool_root,
         )
         latest: AppServerTokenUsage | None = None
-        while line := stdout.readline():
-            try:
-                message = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise PilotError("app-server emitted malformed JSON") from exc
-            if not isinstance(message, dict):
-                raise PilotError("app-server emitted a non-object message")
+        while True:
+            message = read_message()
             if handle_server_request(message):
                 continue
+            observe_notification(message)
             if message.get("method") == "thread/tokenUsage/updated":
                 latest = parse_app_server_token_usage(message, thread_id)
             if message.get("method") == "turn/completed":
@@ -428,8 +564,11 @@ def run_app_server_turn(
                 if isinstance(params, dict) and params.get("threadId") == thread_id:
                     if latest is None:
                         raise PilotError("telemetry-incomplete: no app-server token usage update")
+                    assert approval is not None
                     approval.assert_complete()
-                    return thread_id, latest
+                    if conclusion is None:
+                        raise PilotError("pilot did not return a bounded structured conclusion")
+                    return thread_id, latest, approval, conclusion
         raise PilotError("app-server closed before turn completion")
     finally:
         process.terminate()
@@ -543,8 +682,22 @@ def validate_report(report: dict[str, Any]) -> None:
             raise PilotError(f"telemetry-incomplete for {name}")
         for key in REQUIRED_USAGE:
             _number(usage[key], key, integral=key != "cost")
+        conclusion = item.get("conclusion")
+        if not isinstance(conclusion, dict):
+            raise PilotError(f"missing bounded conclusion for {name}")
+        limits = {
+            "health_conclusion": 512,
+            "evidence_statement": 1024,
+            "retrieval_statement": 512,
+        }
+        if set(conclusion) != set(limits):
+            raise PilotError(f"invalid bounded conclusion fields for {name}")
+        for key, maximum in limits.items():
+            value = conclusion.get(key)
+            if not isinstance(value, str) or not value or len(value) > maximum:
+                raise PilotError(f"invalid bounded conclusion value for {name}")
         commands = item.get("commands")
-        if not isinstance(commands, list):
+        if not isinstance(commands, list) or len(commands) != 4:
             raise PilotError(f"missing command metadata for {name}")
         for command in commands:
             if not isinstance(command, dict):
@@ -654,6 +807,19 @@ def _repo_commit(path: Path) -> str:
     return result.stdout.strip()
 
 
+def _require_clean_checkout(path: Path) -> str:
+    commit = _repo_commit(path)
+    status = subprocess.run(
+        ["git", "-C", str(path), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if status.returncode or status.stdout:
+        raise PilotError(f"pilot requires a clean pinned Git checkout: {path}")
+    return commit
+
+
 def _mode(path: Path, mode: int) -> None:
     path.chmod(mode)
 
@@ -677,58 +843,45 @@ def _preflight(kubeconfig: Path, context: str, namespace: str) -> None:
     )
     if current.returncode or current.stdout.strip() != context:
         raise PilotError("explicit kubeconfig/context preflight failed")
-    for verb in ("get", "list"):
-        for resource in ("deployments", "pods", "events"):
-            allowed = subprocess.run(
-                [
-                    "kubectl",
-                    "--kubeconfig",
-                    str(kubeconfig),
-                    "auth",
-                    "can-i",
-                    verb,
-                    resource,
-                    "--namespace",
-                    namespace,
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if allowed.returncode or allowed.stdout.strip().lower() != "yes":
-                raise PilotError(f"read-only RBAC preflight failed for {verb} {resource}")
+    def can_i(verb: str, resource: str, *, namespaced: bool) -> str:
+        argv = ["kubectl", "--kubeconfig", str(kubeconfig), "auth", "can-i", verb, resource]
+        if namespaced:
+            argv.extend(("--namespace", namespace))
+        result = subprocess.run(argv, capture_output=True, text=True, check=False)
+        return result.stdout.strip().lower()
+
+    # This mirrors the frozen corpus plus the gatus health evidence it is
+    # intended to interpret.  Cluster-scoped checks deliberately omit a
+    # namespace so a namespaced grant cannot be mistaken for authorization.
+    for verb, resource, namespaced in (
+        ("get", "nodes", False),
+        ("list", "pods", False),
+        *(
+            (verb, resource, True)
+            for verb in ("get", "list")
+            for resource in ("deployments", "pods", "events")
+        ),
+    ):
+        allowed = can_i(verb, resource, namespaced=namespaced)
+        if allowed != "yes":
+            raise PilotError(f"read-only RBAC preflight failed for {verb} {resource}")
     for verb in ("create", "patch", "delete", "deletecollection"):
         for resource in ("deployments", "pods", "events"):
-            allowed = subprocess.run(
-                [
-                    "kubectl",
-                    "--kubeconfig",
-                    str(kubeconfig),
-                    "auth",
-                    "can-i",
-                    verb,
-                    resource,
-                    "--namespace",
-                    namespace,
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            # ``kubectl auth can-i`` returns status 1 for the expected answer
-            # ``no``. Its stdout is the authoritative result; an invocation
-            # error has no affirmative ``no`` output and still fails closed.
-            if allowed.stdout.strip().lower() != "no":
+            if can_i(verb, resource, namespaced=True) != "no":
                 raise PilotError(f"mutation RBAC must be denied for {verb} {resource}")
 
 
-def _outctl_capability() -> None:
-    help_result = subprocess.run(["outctl", "--help"], capture_output=True, text=True, check=False)
+def _outctl_capability(root: Path) -> Path:
+    executable = root / ".venv" / "bin" / "outctl"
+    if not executable.is_file():
+        raise PilotError("live pilot requires the pinned checkout's outctl environment")
+    help_result = subprocess.run(
+        [str(executable), "--help"], capture_output=True, text=True, check=False
+    )
     text = help_result.stdout + help_result.stderr
     if help_result.returncode or not all(word in text for word in ("run", "inspect")):
-        raise PilotError(
-            "live pilot requires an installed outctl with run and inspect retrieval support"
-        )
+        raise PilotError("live pilot requires run and inspect retrieval support")
+    return executable
 
 
 def _app_server_token_capability() -> str:
@@ -788,45 +941,58 @@ def _guided_evidence(spool: Path) -> tuple[list[dict[str, object]], dict[str, ob
     if len(commands) != 4 or any(event.get("executable") != "kubectl" for event in commands):
         raise PilotError("guided evidence requires the four captured kubectl corpus commands")
     capture_ids = [event.get("capture_id") for event in commands]
-    if not all(isinstance(capture_id, str) for capture_id in capture_ids):
+    if not all(isinstance(capture_id, str) for capture_id in capture_ids) or len(
+        set(capture_ids)
+    ) != 4:
         raise PilotError("guided command evidence lacks capture ids")
-    if len(retrievals) != 1 or retrievals[0].get("capture_id") not in capture_ids:
-        raise PilotError("guided evidence requires exactly one retrieval of a corpus capture")
+    if len(retrievals) != 1 or retrievals[0].get("capture_id") != capture_ids[3]:
+        raise PilotError("guided evidence requires retrieval of the oversized corpus capture")
     capture_id = retrievals[0]["capture_id"]
     assert isinstance(capture_id, str)
-    manifest = spool / "captures" / capture_id / "manifest.json"
-    try:
-        capture = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PilotError("guided capture manifest is unavailable") from exc
-    if not isinstance(capture, dict):
-        raise PilotError("guided capture manifest is invalid")
-    streams = capture.get("streams")
-    stdout = streams.get("stdout") if isinstance(streams, dict) else None
-    stderr = streams.get("stderr") if isinstance(streams, dict) else None
-    raw_bytes = sum(entry.get("bytes", 0) for entry in (stdout, stderr) if isinstance(entry, dict))
-    return (
-        [
+    evidence: list[dict[str, object]] = []
+    for ordinal, command_id in enumerate(capture_ids):
+        assert isinstance(command_id, str)
+        manifest = spool / "captures" / command_id / "manifest.json"
+        try:
+            capture = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PilotError("guided capture manifest is unavailable") from exc
+        if (
+            not isinstance(capture, dict)
+            or verify_capture(spool, command_id).status is not RetrievalStatus.AVAILABLE
+        ):
+            raise PilotError("guided capture is unavailable or hash verification failed")
+        command = capture.get("command")
+        streams = capture.get("streams")
+        if (
+            capture.get("capture_status") != "COMPLETE"
+            or not isinstance(command, dict)
+            or command.get("exit_code") != 0
+            or not isinstance(streams, dict)
+        ):
+            raise PilotError("guided corpus capture did not complete successfully")
+        stream_entries = tuple(streams.get(name) for name in ("stdout", "stderr"))
+        raw_bytes = 0
+        for entry in stream_entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("bytes"), int):
+                raise PilotError("guided capture stream metadata is invalid")
+            raw_bytes += cast(int, entry["bytes"])
+        evidence.append(
             {
-                "argv": ["kubectl"],
-                "command_status": capture.get("command", {}).get("exit_code")
-                if isinstance(capture.get("command"), dict)
-                else None,
-                "capture_status": capture.get("capture_status"),
+                "ordinal": ordinal,
+                "capture_id": command_id,
+                "command_status": 0,
+                "capture_status": "COMPLETE",
                 "raw_bytes": raw_bytes,
+                "hash_verified": True,
             }
-            for command in commands
-            for capture_id in [command["capture_id"]]
-            if isinstance(capture_id, str)
-            for capture in [
-                json.loads(
-                    (spool / "captures" / capture_id / "manifest.json").read_text(encoding="utf-8")
-                )
-            ]
-            if isinstance(capture, dict)
-        ],
-        {"count": 1, "from_existing_capture": True, "reran_kubectl": False},
-    )
+        )
+    return evidence, {
+        "count": 1,
+        "capture_id": capture_id,
+        "from_existing_capture": True,
+        "reran_kubectl": False,
+    }
 
 
 def _corpus_instructions(name: str, corpus: str, spool_root: Path) -> str:
@@ -853,15 +1019,18 @@ def launch(args: argparse.Namespace) -> Path:
     appservice = Path(args.appservice).resolve()
     kubeconfig = Path(args.kubeconfig).resolve()
     run_root = Path(args.output).resolve() / f"terra-ab-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+    outctl_executable = _outctl_capability(root)
+    outctl_commit = _require_clean_checkout(root)
+    appservice_commit = _require_clean_checkout(appservice)
     _preflight(kubeconfig, args.context, args.namespace)
-    _outctl_capability()
     codex_version = _app_server_token_capability()
     run_root.mkdir(parents=True, mode=0o700)
     _mode(run_root, 0o700)
     metadata = {
         "model": MODEL,
-        "outctl_commit": _repo_commit(root),
-        "appservice_commit": _repo_commit(appservice),
+        "outctl_commit": outctl_commit,
+        "appservice_commit": appservice_commit,
+        "outctl_executable": str(outctl_executable),
         "codex_version": codex_version,
     }
     (run_root / "pins.json").write_text(
@@ -907,11 +1076,6 @@ def launch(args: argparse.Namespace) -> Path:
                 root / "pilot" / "guided" / "skills" / "outctl-health-check" / "SKILL.md",
                 skill_target / "SKILL.md",
             )
-            rules = home / "rules"
-            rules.mkdir()
-            shutil.copy2(
-                root / "pilot" / "guided" / "rules" / "kubectl.rules", rules / "default.rules"
-            )
             (home / "guided.config.toml").write_text(
                 'model = "gpt-5.6-terra"\n[features]\nskills = true\n', encoding="utf-8"
             )
@@ -919,14 +1083,19 @@ def launch(args: argparse.Namespace) -> Path:
             (home / "control.config.toml").write_text('model = "gpt-5.6-terra"\n', encoding="utf-8")
         sessions[name] = (home, work, spool)
     start = ThreadBarrier(len(SESSIONS))
-    telemetry: dict[str, tuple[str, AppServerTokenUsage]] = {}
+    telemetry: dict[
+        str, tuple[str, AppServerTokenUsage, CommandApprovalPolicy, dict[str, str], float]
+    ] = {}
+    barrier_starts: dict[str, float] = {}
     failures: list[BaseException] = []
 
     def run_session(name: str) -> None:
         home, work, spool = sessions[name]
         try:
             start.wait()
-            telemetry[name] = run_app_server_turn(
+            started_at = time.monotonic()
+            barrier_starts[name] = started_at
+            thread_id, usage, approval, conclusion = run_app_server_turn(
                 codex_home=home,
                 cwd=work,
                 prompt=prompt,
@@ -935,6 +1104,14 @@ def launch(args: argparse.Namespace) -> Path:
                 developer_instructions=_corpus_instructions(name, corpus, spool),
                 session=name,
                 corpus=corpus_commands,
+                outctl_bin_dir=outctl_executable.parent,
+            )
+            telemetry[name] = (
+                thread_id,
+                usage,
+                approval,
+                conclusion,
+                time.monotonic() - started_at,
             )
         except BaseException as exc:  # surfaced after both workers finish
             failures.append(exc)
@@ -946,21 +1123,32 @@ def launch(args: argparse.Namespace) -> Path:
         worker.join()
     if failures:
         raise PilotError(f"app-server pilot session failed: {failures[0]}")
+    if len(barrier_starts) != len(SESSIONS):
+        raise PilotError("pilot barrier did not start both sessions")
+    start_skew_ms = (max(barrier_starts.values()) - min(barrier_starts.values())) * 1000
+    if start_skew_ms > 500:
+        raise PilotError("pilot barrier start skew exceeded 500 ms")
     guided_commands, guided_retrieval = _guided_evidence(sessions["A"][2])
     report = {
         "schema_version": 1,
         "pins": metadata,
+        "barrier_start_skew_ms": start_skew_ms,
         "sessions": {
             name: {
                 "session_id": data[0],
                 "usage": data[1].report_fields(),
-                "wall_seconds": 0.0,
-                "commands": [] if name == "B" else guided_commands,
+                "conclusion": data[3],
+                "wall_seconds": data[4],
+                "commands": data[2].completed_corpus_metadata() if name == "B" else guided_commands,
                 "retrieval": {"count": 0} if name == "B" else guided_retrieval,
             }
             for name, data in telemetry.items()
         },
-        "review": {"health_conclusion_preserved": False},
+        "review": {
+            "health_conclusion_preserved": (
+                telemetry["A"][3]["health_conclusion"] == telemetry["B"][3]["health_conclusion"]
+            )
+        },
     }
     report["verdict"] = review_verdict(report)
     (run_root / "report.json").write_text(

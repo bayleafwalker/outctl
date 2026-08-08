@@ -93,10 +93,9 @@ def test_guided_bundle_and_control_are_isolated() -> None:
     guided = ROOT / "pilot" / "guided"
     guidance = (guided / "AGENTS.md").read_text()
     skill = (guided / "skills" / "outctl-health-check" / "SKILL.md").read_text()
-    guard = (guided / "rules" / "kubectl.rules").read_text()
     assert "outctl run --mode enforce" in guidance
     assert "outctl run --mode enforce" in skill
-    assert 'pattern=["kubectl"]' in guard
+    assert not (guided / "rules" / "kubectl.rules").exists()
     assert (
         "outctl"
         not in "\n".join(
@@ -208,8 +207,14 @@ def test_app_server_schema_requires_all_token_fields(tmp_path: Path) -> None:
         validate_app_server_schema(path)
 
 
-def _approval_params(command: str) -> dict[str, str]:
-    return {"threadId": "thread", "turnId": "turn", "command": command}
+def _approval_params(command: str, item_id: str = "item") -> dict[str, str]:
+    return {
+        "threadId": "thread",
+        "turnId": "turn",
+        "cwd": str(Path("/tmp").resolve()),
+        "itemId": item_id,
+        "command": command,
+    }
 
 
 def test_app_server_approval_allows_only_exact_control_corpus(tmp_path: Path) -> None:
@@ -218,24 +223,32 @@ def test_app_server_approval_allows_only_exact_control_corpus(tmp_path: Path) ->
     # duplicate check before testing an independently spelled four-route corpus.
     with pytest.raises(PilotError, match="distinct"):
         CommandApprovalPolicy.for_session(
-            session="B", thread_id="thread", turn_id="turn", corpus=corpus, spool_root=tmp_path
+            session="B", thread_id="thread", turn_id="turn", cwd=Path("/tmp"), corpus=corpus,
+            spool_root=tmp_path
         )
     entries = tuple(
         ("kubectl", "get", resource)
         for resource in ("nodes", "pods", "events", "deployments")
     )
     policy = CommandApprovalPolicy.for_session(
-        session="B", thread_id="thread", turn_id="turn", corpus=entries, spool_root=tmp_path
+        session="B", thread_id="thread", turn_id="turn", cwd=Path("/tmp"), corpus=entries,
+        spool_root=tmp_path
     )
-    for argv in entries:
-        assert policy.decision(_approval_params(shlex.join(argv))) == "accept"
-    assert policy.decision(_approval_params(shlex.join(entries[0]))) == "decline"
-    assert policy.decision(_approval_params("kubectl get pods -A; id")) == "decline"
-    assert policy.decision(_approval_params("sh -c 'kubectl get pods'")) == "decline"
+    for number, argv in enumerate(entries):
+        assert policy.decision(_approval_params(shlex.join(argv), f"item-{number}")) == "accept"
+    assert policy.decision(_approval_params(shlex.join(entries[0]), "extra")) == "decline"
+    assert policy.decision(_approval_params("kubectl get pods -A; id", "shell")) == "decline"
+    assert policy.decision(_approval_params("sh -c 'kubectl get pods'", "shell-2")) == "decline"
     assert (
         policy.decision({"threadId": "other", "turnId": "turn", "command": "kubectl get pods"})
         == "decline"
     )
+    for number, argv in enumerate(entries):
+        policy.record_completion(
+            {"threadId": "thread", "turnId": "turn", "item": {
+                "id": f"item-{number}", "type": "commandExecution", "status": "completed",
+                "exitCode": 0, "command": shlex.join(argv)}}
+        )
     policy.assert_complete()
 
 
@@ -247,20 +260,25 @@ def test_app_server_approval_requires_existing_capture_for_one_guided_retrieval(
         for resource in ("nodes", "pods", "events", "deployments")
     )
     policy = CommandApprovalPolicy.for_session(
-        session="A", thread_id="thread", turn_id="turn", corpus=entries, spool_root=tmp_path
+        session="A", thread_id="thread", turn_id="turn", cwd=Path("/tmp"), corpus=entries,
+        spool_root=tmp_path
     )
     wrapped = policy.corpus[0]
     assert wrapped[:7] == (
         "outctl", "run", "--mode", "enforce", "--spool-root", str(tmp_path), "--"
     )
-    for argv in policy.corpus:
-        assert policy.decision(_approval_params(shlex.join(argv))) == "accept"
+    for number, argv in enumerate(policy.corpus):
+        assert policy.decision(_approval_params(shlex.join(argv), f"item-{number}")) == "accept"
+        policy.record_completion(
+            {"threadId": "thread", "turnId": "turn", "item": {
+                "id": f"item-{number}", "type": "commandExecution", "status": "completed",
+                "exitCode": 0, "command": shlex.join(argv)}}
+        )
     capture = tmp_path / "captures" / "capture-1"
     capture.mkdir(parents=True)
+    # A deliberately incomplete capture is not eligible for retrieval.
     (capture / "manifest.json").write_text("{}")
     retrieval = (
         "outctl", "tail", "--spool-root", str(tmp_path), "capture-1", "stdout", "--lines", "20"
     )
-    assert policy.decision(_approval_params(shlex.join(retrieval))) == "accept"
-    assert policy.decision(_approval_params(shlex.join(retrieval))) == "decline"
-    policy.assert_complete()
+    assert policy.decision(_approval_params(shlex.join(retrieval), "tail")) == "decline"

@@ -8,8 +8,10 @@ directory, preflights an explicit appservice kubeconfig and read-only RBAC, and
 then starts the guided and control sessions from one barrier. It fails closed
 when the selected namespace permits deployment, pod, or event mutation.
 
-The guided session uses the accompanying skill and execpolicy rule. The control
-session receives the same prompt and corpus but none of those A-only surfaces.
+The guided session uses the accompanying skill. Exact command approval is
+owned by the app-server client and is not delegated to a static execpolicy
+rule; the control session receives the same prompt and corpus but none of
+those A-only surfaces.
 Codex is sandboxed to each disposable session work directory and receives no
 write access to the appservice checkout. Both runs must report all token
 counters and a provider-reported cost; pricing is deliberately not estimated.
