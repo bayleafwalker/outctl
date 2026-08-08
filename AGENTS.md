@@ -57,3 +57,10 @@ They may not push, open or merge pull requests, mutate sprint/action/audit
 state, publish packages, or access production systems unless a task explicitly
 grants that authority.
 
+<!-- agentops-project-pointer:start -->
+See `.agents/project.generated.md` for cross-repo project context (agentops-managed; do not hand-edit).
+<!-- agentops-project-pointer:end -->
+
+<!-- agentops-environment-pointer:start -->
+See `.agents/environment.generated.md` for the active Vuoro environment's constraints and runbooks (agentops-managed; do not hand-edit).
+<!-- agentops-environment-pointer:end -->

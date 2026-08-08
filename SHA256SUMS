@@ -1,8 +1,10 @@
+64e02ac7a58eed99dbfb993f636ed73eac1ce135fd1188835a3581f1a40e0b5e  ./.agents/environment.generated.md
 2eaf03f5685d7be5f512b8fe5afc0db6fa3612bfab13da5f6c1c2f75ba3a51fa  ./.agents/overlays/outctl.boundaries.md
+f6b4463004769967bb9d68fa2feb670e6ff18a4d4f6ea31e68b735164dafee0a  ./.agents/project.generated.md
 629d5d8ca4f599cb9b0bb191fe3a70e2a0afa660b4bd17276167f515d9d9461a  ./.github/workflows/ci.yml
 0eae962860fec24eed356088c23257e4dac49cbb03da1fb24d860396c6273c96  ./.gitignore
 9ea280e4c89d3f302c1e8b3e5e7db91c46bec0fe761356ae90f32aaf0dbe0e8b  ./.python-version
-d510f1dc20c2a13507bead8758d4f3d8769970ece8eaa1e238bd43c650243037  ./AGENTS.md
+b702dbbd841a7db1d67dacc0409ab1a95b614edbf6cd3fd9ca1c139c83ccb8bc  ./AGENTS.md
 c13a222bce7d75b7cbee1c9c0d37de2343a23f42159c3193447b2d499fa3809e  ./IMPLEMENTATION_HANDOFF.md
 e1220d84193ed8920d08778ee7da8d42a72fa8d1d6ce70470ec1a79a0a9c12aa  ./README.md
 18a5f4e680cbef0d6bcc60a9ab69b62c2f45b706750b52237d4ab3595250a1be  ./acceptance/SCENARIOS.md
