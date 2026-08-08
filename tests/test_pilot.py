@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
 
 from outctl.pilot import (
+    CommandApprovalPolicy,
     PilotError,
     PilotReportError,
     parse_app_server_token_usage,
@@ -204,3 +206,61 @@ def test_app_server_schema_requires_all_token_fields(tmp_path: Path) -> None:
     path.write_text(json.dumps(schema))
     with pytest.raises(PilotError, match="required token fields"):
         validate_app_server_schema(path)
+
+
+def _approval_params(command: str) -> dict[str, str]:
+    return {"threadId": "thread", "turnId": "turn", "command": command}
+
+
+def test_app_server_approval_allows_only_exact_control_corpus(tmp_path: Path) -> None:
+    corpus = (("kubectl", "get", "pods", "-A"),) * 4
+    # The actual pilot corpus is distinct; exercise the constructor's fail-closed
+    # duplicate check before testing an independently spelled four-route corpus.
+    with pytest.raises(PilotError, match="distinct"):
+        CommandApprovalPolicy.for_session(
+            session="B", thread_id="thread", turn_id="turn", corpus=corpus, spool_root=tmp_path
+        )
+    entries = tuple(
+        ("kubectl", "get", resource)
+        for resource in ("nodes", "pods", "events", "deployments")
+    )
+    policy = CommandApprovalPolicy.for_session(
+        session="B", thread_id="thread", turn_id="turn", corpus=entries, spool_root=tmp_path
+    )
+    for argv in entries:
+        assert policy.decision(_approval_params(shlex.join(argv))) == "accept"
+    assert policy.decision(_approval_params(shlex.join(entries[0]))) == "decline"
+    assert policy.decision(_approval_params("kubectl get pods -A; id")) == "decline"
+    assert policy.decision(_approval_params("sh -c 'kubectl get pods'")) == "decline"
+    assert (
+        policy.decision({"threadId": "other", "turnId": "turn", "command": "kubectl get pods"})
+        == "decline"
+    )
+    policy.assert_complete()
+
+
+def test_app_server_approval_requires_existing_capture_for_one_guided_retrieval(
+    tmp_path: Path,
+) -> None:
+    entries = tuple(
+        ("kubectl", "get", resource)
+        for resource in ("nodes", "pods", "events", "deployments")
+    )
+    policy = CommandApprovalPolicy.for_session(
+        session="A", thread_id="thread", turn_id="turn", corpus=entries, spool_root=tmp_path
+    )
+    wrapped = policy.corpus[0]
+    assert wrapped[:7] == (
+        "outctl", "run", "--mode", "enforce", "--spool-root", str(tmp_path), "--"
+    )
+    for argv in policy.corpus:
+        assert policy.decision(_approval_params(shlex.join(argv))) == "accept"
+    capture = tmp_path / "captures" / "capture-1"
+    capture.mkdir(parents=True)
+    (capture / "manifest.json").write_text("{}")
+    retrieval = (
+        "outctl", "tail", "--spool-root", str(tmp_path), "capture-1", "stdout", "--lines", "20"
+    )
+    assert policy.decision(_approval_params(shlex.join(retrieval))) == "accept"
+    assert policy.decision(_approval_params(shlex.join(retrieval))) == "decline"
+    policy.assert_complete()

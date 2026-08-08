@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -53,6 +54,97 @@ class PilotError(ValueError):
 
 class PilotReportError(ValueError):
     """Raised when a qualitative report is incomplete or contains bodies."""
+
+
+@dataclass
+class CommandApprovalPolicy:
+    """One-turn, exact-argv approval cache for the frozen pilot corpus.
+
+    The app-server transports command requests as a shell-shaped string.  This
+    class does *not* turn that into a general shell allowlist: it accepts only
+    the canonical ``shlex.join`` spelling of the launcher-provided argv.  A
+    request with quoting, expansion, redirection, chaining, or an extra token
+    is therefore declined before Codex can execute it.
+    """
+
+    session: str
+    thread_id: str
+    turn_id: str
+    corpus: tuple[tuple[str, ...], ...]
+    spool_root: Path
+    approved_corpus: set[tuple[str, ...]]
+    retrieval_approved: bool = False
+
+    @classmethod
+    def for_session(
+        cls,
+        *,
+        session: str,
+        thread_id: str,
+        turn_id: str,
+        corpus: Sequence[Sequence[str]],
+        spool_root: Path,
+    ) -> CommandApprovalPolicy:
+        entries = tuple(tuple(entry) for entry in corpus)
+        if len(entries) != 4 or len(set(entries)) != len(entries):
+            raise PilotError("pilot corpus must contain four distinct commands")
+        if session == "A":
+            entries = tuple(
+                (
+                    "outctl",
+                    "run",
+                    "--mode",
+                    "enforce",
+                    "--spool-root",
+                    str(spool_root),
+                    "--",
+                    *entry,
+                )
+                for entry in entries
+            )
+        return cls(session, thread_id, turn_id, entries, spool_root, set())
+
+    def decision(self, params: object) -> str:
+        """Return the only two approval decisions the pilot ever emits."""
+        if not isinstance(params, dict):
+            return "decline"
+        if params.get("threadId") != self.thread_id or params.get("turnId") != self.turn_id:
+            return "decline"
+        command = params.get("command")
+        if not isinstance(command, str):
+            return "decline"
+        try:
+            argv = tuple(shlex.split(command, posix=True))
+        except ValueError:
+            return "decline"
+        # Equality with the canonical representation rejects shell grammar
+        # even when it parses to a superficially plausible argv.
+        if command != shlex.join(argv):
+            return "decline"
+        if argv in self.corpus and argv not in self.approved_corpus:
+            self.approved_corpus.add(argv)
+            return "accept"
+        if self.session == "A" and self._is_bounded_retrieval(argv):
+            self.retrieval_approved = True
+            return "accept"
+        return "decline"
+
+    def _is_bounded_retrieval(self, argv: tuple[str, ...]) -> bool:
+        if self.retrieval_approved or len(argv) != 8:
+            return False
+        prefix = ("outctl", "tail", "--spool-root", str(self.spool_root))
+        if argv[:4] != prefix or argv[5:] != ("stdout", "--lines", "20"):
+            return False
+        capture_id = argv[4]
+        # A retrieval is only eligible once a capture exists.  This prevents a
+        # synthetic ID or an implicit command rerun from being approved.
+        return (self.spool_root / "captures" / capture_id / "manifest.json").is_file()
+
+    def assert_complete(self) -> None:
+        if self.approved_corpus != set(self.corpus):
+            raise PilotError("app-server did not execute every frozen corpus command exactly once")
+        if self.session == "A" and not self.retrieval_approved:
+            raise PilotError("guided app-server session did not perform its bounded retrieval")
 
 
 @dataclass(frozen=True)
@@ -189,6 +281,8 @@ def run_app_server_turn(
     model: str,
     spool_root: Path,
     developer_instructions: str,
+    session: str,
+    corpus: Sequence[Sequence[str]],
 ) -> tuple[str, AppServerTokenUsage]:
     """Run one ephemeral, read-only turn and retain only its token notification.
 
@@ -216,6 +310,52 @@ def run_app_server_turn(
     stdout = process.stdout
     request_id = 0
 
+    def respond(message: dict[str, object], result: dict[str, object]) -> None:
+        request = message.get("id")
+        if not isinstance(request, int | str) or isinstance(request, bool):
+            raise PilotError("app-server approval request has no valid id")
+        stdin.write(json.dumps({"id": request, "result": result}) + "\n")
+        stdin.flush()
+
+    def decline_request(message: dict[str, object]) -> None:
+        """Explicitly deny all non-command permission paths.
+
+        File changes use the same decision shape.  Permission escalation has a
+        different response schema, so a JSON-RPC error is the least-privilege
+        reply: it cannot accidentally grant a filesystem or network overlay.
+        """
+        method = message.get("method")
+        if method == "item/fileChange/requestApproval":
+            respond(message, {"decision": "decline"})
+            return
+        request = message.get("id")
+        if not isinstance(request, int | str) or isinstance(request, bool):
+            raise PilotError("app-server request has no valid id")
+        stdin.write(
+            json.dumps(
+                {
+                    "id": request,
+                    "error": {"code": -32001, "message": "pilot policy denies this request"},
+                }
+            )
+            + "\n"
+        )
+        stdin.flush()
+
+    approval: CommandApprovalPolicy | None = None
+
+    def handle_server_request(message: dict[str, object]) -> bool:
+        """Handle server-initiated JSON-RPC approval calls without retaining them."""
+        method = message.get("method")
+        if not isinstance(method, str) or "id" not in message:
+            return False
+        if method == "item/commandExecution/requestApproval":
+            decision = "decline" if approval is None else approval.decision(message.get("params"))
+            respond(message, {"decision": decision})
+        else:
+            decline_request(message)
+        return True
+
     def request(method: str, params: dict[str, object]) -> dict[str, Any]:
         nonlocal request_id
         request_id += 1
@@ -228,6 +368,8 @@ def run_app_server_turn(
                 raise PilotError("app-server emitted malformed JSON") from exc
             if not isinstance(message, dict):
                 raise PilotError("app-server emitted a non-object message")
+            if handle_server_request(message):
+                continue
             if message.get("id") == request_id:
                 result = message.get("result")
                 if not isinstance(result, dict):
@@ -262,6 +404,13 @@ def run_app_server_turn(
         turn_value = turn.get("turn")
         if not isinstance(turn_value, dict) or not isinstance(turn_value.get("id"), str):
             raise PilotError("app-server did not return a turn id")
+        approval = CommandApprovalPolicy.for_session(
+            session=session,
+            thread_id=thread_id,
+            turn_id=turn_value["id"],
+            corpus=corpus,
+            spool_root=spool_root,
+        )
         latest: AppServerTokenUsage | None = None
         while line := stdout.readline():
             try:
@@ -270,6 +419,8 @@ def run_app_server_turn(
                 raise PilotError("app-server emitted malformed JSON") from exc
             if not isinstance(message, dict):
                 raise PilotError("app-server emitted a non-object message")
+            if handle_server_request(message):
+                continue
             if message.get("method") == "thread/tokenUsage/updated":
                 latest = parse_app_server_token_usage(message, thread_id)
             if message.get("method") == "turn/completed":
@@ -277,6 +428,7 @@ def run_app_server_turn(
                 if isinstance(params, dict) and params.get("threadId") == thread_id:
                     if latest is None:
                         raise PilotError("telemetry-incomplete: no app-server token usage update")
+                    approval.assert_complete()
                     return thread_id, latest
         raise PilotError("app-server closed before turn completion")
     finally:
@@ -677,13 +829,13 @@ def _guided_evidence(spool: Path) -> tuple[list[dict[str, object]], dict[str, ob
     )
 
 
-def _corpus_instructions(name: str, corpus: str) -> str:
+def _corpus_instructions(name: str, corpus: str, spool_root: Path) -> str:
     """Keep the shared user prompt equal while pinning each arm's tool route."""
     if name == "A":
-        route = 'outctl run --mode enforce --spool-root "$OUTCTL_PILOT_SPOOL" -- kubectl'
+        route = f"outctl run --mode enforce --spool-root {spool_root} -- kubectl"
         retrieval = (
             "After the oversized command, run exactly one `outctl tail --spool-root "
-            '"$OUTCTL_PILOT_SPOOL" <capture-id> stdout --lines 20` for that capture.'
+            f"{spool_root} <capture-id> stdout --lines 20` for that capture."
         )
     else:
         route = "kubectl"
@@ -722,6 +874,19 @@ def launch(args: argparse.Namespace) -> Path:
         .read_text(encoding="utf-8")
         .replace("{KUBECONFIG}", str(kubeconfig))
     )
+    try:
+        corpus_value = json.loads(corpus)
+        corpus_commands = corpus_value["commands"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise PilotError("checked-in pilot corpus is invalid") from exc
+    if not (
+        isinstance(corpus_commands, list)
+        and all(
+            isinstance(command, list) and all(isinstance(token, str) for token in command)
+            for command in corpus_commands
+        )
+    ):
+        raise PilotError("checked-in pilot corpus commands are invalid")
     sessions: dict[str, tuple[Path, Path, Path]] = {}
     for name in sorted(SESSIONS):
         session_root = run_root / name
@@ -767,7 +932,9 @@ def launch(args: argparse.Namespace) -> Path:
                 prompt=prompt,
                 model=MODEL,
                 spool_root=spool,
-                developer_instructions=_corpus_instructions(name, corpus),
+                developer_instructions=_corpus_instructions(name, corpus, spool),
+                session=name,
+                corpus=corpus_commands,
             )
         except BaseException as exc:  # surfaced after both workers finish
             failures.append(exc)
