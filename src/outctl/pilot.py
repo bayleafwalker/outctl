@@ -1176,6 +1176,56 @@ def smoke() -> dict[str, Any]:
     return {"status": "ok", "verdict": "continue"}
 
 
+def approval_canary() -> dict[str, str | int]:
+    """Prove the pinned app-server requests and completes exact safe commands.
+
+    This is intentionally a pilot-local runtime compatibility check.  It uses
+    no kubeconfig, creates no outctl capture, and retains neither model nor
+    tool bodies.  A failure is a launch blocker rather than a reason to loosen
+    the approval gate.
+    """
+    root = Path(__file__).parents[2]
+    outctl_executable = _outctl_capability(root)
+    codex_version = _app_server_token_capability()
+    source_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+    corpus = tuple(("printf", f"outctl-canary-{ordinal}") for ordinal in range(1, 5))
+    with tempfile.TemporaryDirectory(prefix="outctl-approval-canary-") as directory:
+        session_root = Path(directory)
+        home = session_root / "codex-home"
+        work = session_root / "work"
+        spool = work / "spool"
+        for path in (home, work, spool):
+            path.mkdir(mode=0o700)
+            _mode(path, 0o700)
+        _copy_auth(source_home, home)
+        _, _, approval, _ = run_app_server_turn(
+            codex_home=home,
+            cwd=work,
+            prompt=(
+                "Run each of the four supplied direct argv commands exactly once, in order. "
+                "Do not run any other command or use a shell. Then return the required JSON "
+                "with concise statements that the canary completed."
+            ),
+            model=MODEL,
+            spool_root=spool,
+            developer_instructions=(
+                "This is a no-cluster approval canary. Execute only the four direct argv "
+                "commands in the frozen corpus, one at a time and in order. Do not use a shell, "
+                "read files, write files, use a network, or run any other command."
+            ),
+            session="B",
+            corpus=corpus,
+            outctl_bin_dir=outctl_executable.parent,
+        )
+        approval.assert_complete()
+    return {
+        "status": "ok",
+        "canary": "command-approval-and-completion",
+        "command_completions": 4,
+        "codex_version": codex_version,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="outctl pilot")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1186,6 +1236,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "telemetry-probe", help="validate a pinned app-server token telemetry schema"
     )
     telemetry_probe.add_argument("schema", type=Path)
+    subparsers.add_parser(
+        "approval-canary",
+        help="prove app-server approval and completion callbacks with harmless direct argv",
+    )
     launch_parser = subparsers.add_parser("launch", help="run the read-only concurrent pilot")
     launch_parser.add_argument("--appservice", required=True)
     launch_parser.add_argument("--kubeconfig", required=True)
@@ -1203,6 +1257,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "telemetry-probe":
             validate_app_server_schema(args.schema)
             print(json.dumps({"status": "ok", "telemetry": "app-server-token-usage"}))
+        elif args.command == "approval-canary":
+            print(json.dumps(approval_canary(), sort_keys=True))
         else:
             print(launch(args))
     except (OSError, json.JSONDecodeError, PilotError) as exc:

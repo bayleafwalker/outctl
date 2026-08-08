@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import outctl.pilot as pilot
 from outctl.pilot import (
     CommandApprovalPolicy,
     PilotError,
@@ -31,6 +32,41 @@ def test_offline_smoke_and_complete_usage() -> None:
     telemetry = parse_codex_jsonl(ROOT / "tests" / "fixtures" / "pilot-A.jsonl", "A")
     assert telemetry.usage.model_context_memory == 110
     assert telemetry.usage.aggregate_cache_tokens == 15
+
+
+def test_approval_canary_uses_disposable_safe_corpus(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    class FakeApproval:
+        def assert_complete(self) -> None:
+            seen["complete"] = True
+
+    def fake_run_app_server_turn(
+        **kwargs: object,
+    ) -> tuple[str, object, FakeApproval, dict[str, str]]:
+        seen.update(kwargs)
+        return "thread", object(), FakeApproval(), {
+            "health_conclusion": "complete",
+            "evidence_statement": "four commands",
+            "retrieval_statement": "none",
+        }
+
+    monkeypatch.setattr(pilot, "_outctl_capability", lambda _: Path("/tmp/outctl"))
+    monkeypatch.setattr(pilot, "_app_server_token_capability", lambda: "codex-cli test")
+    monkeypatch.setattr(pilot, "_copy_auth", lambda *_: None)
+    monkeypatch.setattr(pilot, "run_app_server_turn", fake_run_app_server_turn)
+
+    result = pilot.approval_canary()
+
+    assert result == {
+        "status": "ok",
+        "canary": "command-approval-and-completion",
+        "command_completions": 4,
+        "codex_version": "codex-cli test",
+    }
+    assert seen["session"] == "B"
+    assert seen["corpus"] == tuple(("printf", f"outctl-canary-{item}") for item in range(1, 5))
+    assert seen["complete"] is True
 
 
 @pytest.mark.parametrize(
