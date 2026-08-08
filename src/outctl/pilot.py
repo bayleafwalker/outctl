@@ -421,7 +421,7 @@ def launch(args: argparse.Namespace) -> Path:
         work = session_root / "work"
         spool = work / "spool"
         for directory in (home, spool, work):
-            directory.mkdir(parents=True, mode=0o700)
+            directory.mkdir(parents=True, mode=0o700, exist_ok=True)
             _mode(directory, 0o700)
         _copy_auth(source_home, home)
         (work / "CORPUS.json").write_text(corpus, encoding="utf-8")
