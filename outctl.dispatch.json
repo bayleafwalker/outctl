@@ -15,7 +15,7 @@
   },
   "skills": {
     "template_root": "/projects/dev/agentops/templates/dispatch/skills",
-    "selected": ["dispatch-plan", "dispatch-build", "dispatch-review", "code-change-verification", "backlog-refinement", "item-done", "verify-state-protocols", "reconcile-project-contracts"],
+    "selected": ["dispatch-plan", "dispatch-wave", "dispatch-build", "dispatch-review", "code-change-verification", "backlog-refinement", "item-done", "verify-state-protocols", "reconcile-project-contracts"],
     "overlays": [".agents/overlays/outctl.boundaries.md"]
   },
   "scope": {
@@ -50,4 +50,3 @@
   },
   "hooks": {"level": "verification", "publishers": ["git", "dispatcher-gate", "github"]}
 }
-
