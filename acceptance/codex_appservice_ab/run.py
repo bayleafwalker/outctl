@@ -363,7 +363,7 @@ def _run_shared_health_checker(
         value = json.loads(result.stdout)
         envelope = value.get("envelope") if isinstance(value, Mapping) else None
         projection = envelope.get("projection") if isinstance(envelope, Mapping) else None
-        text = projection.get("text") if isinstance(projection, Mapping) else None
+        text = projection.get("inline_text") if isinstance(projection, Mapping) else None
         receipt = value.get("receipt") if isinstance(value, Mapping) else None
         if not isinstance(text, str) or not isinstance(receipt, Mapping):
             raise ValueError("bounded projection or receipt is missing")
