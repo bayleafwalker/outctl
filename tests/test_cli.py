@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -102,3 +103,54 @@ def test_cli_recover_and_gc_dry_run(tmp_path: Path, capsys: pytest.CaptureFixtur
     }
     assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before_gc
     assert before != before_gc  # recovery is intentionally the only mutation in this test.
+
+
+def test_cli_run_uses_literal_argv_and_safe_envelope(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        main(
+            [
+                "run",
+                "--spool-root",
+                str(tmp_path / "spool"),
+                "--",
+                sys.executable,
+                "-c",
+                "import sys; print(sys.argv[1])",
+                "$(not-a-shell)",
+            ]
+        )
+        == 0
+    )
+    payload = _payload(capsys)
+    assert payload["mode"] == "enforce"
+    envelope = payload["envelope"]  # type: ignore[assignment]
+    assert "$(not-a-shell)" in envelope["projection"]["inline_text"]  # type: ignore[index]
+    assert str(tmp_path) not in json.dumps(payload)
+
+
+def test_cli_run_preserves_wrapped_command_exit_status(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        main(
+            [
+                "run",
+                "--spool-root",
+                str(tmp_path / "spool"),
+                "--",
+                sys.executable,
+                "-c",
+                "raise SystemExit(7)",
+            ]
+        )
+        == 7
+    )
+    payload = _payload(capsys)
+    assert payload["command"] == {
+        "cancelled": False,
+        "exit_code": 7,
+        "signal": None,
+        "timed_out": False,
+    }

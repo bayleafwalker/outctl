@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import socket
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from outctl import __version__
+from outctl.adapter import AdapterIdentity, AdapterMode, AdapterRequest, run_adapter
 from outctl.capture import recover_partials
 from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
 from outctl.retrieval import (
@@ -46,6 +49,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command")
+
+    run = commands.add_parser("run", help="run direct argv with an opt-in capture boundary")
+    _spool_argument(run)
+    run.add_argument("--mode", choices=tuple(mode.value for mode in AdapterMode))
+    run.add_argument("--policy-ref", default="interactive-default-v1")
+    run.add_argument("--policy-digest", default="sha256:" + "0" * 64)
+    run.add_argument("--max-capture-bytes", type=int, default=16 * 1024 * 1024)
+    run.add_argument("--timeout", type=float)
+    run.add_argument("--cwd", type=Path)
+    run.add_argument("argv", nargs=argparse.REMAINDER, help="command after --")
 
     inspect = commands.add_parser("inspect", help="inspect capture metadata")
     _spool_argument(inspect)
@@ -230,11 +243,63 @@ def _gc_candidates(root: Path) -> list[str]:
         return []
 
 
+def _command_exit_code(exit_code: int | None, signal_number: int | None) -> int:
+    if exit_code is not None:
+        return exit_code
+    return 128 + signal_number if signal_number is not None else 1
+
+
+def _run_payload(args: argparse.Namespace) -> tuple[dict[str, object], int]:
+    argv = list(args.argv)
+    if argv[:1] == ["--"]:
+        argv.pop(0)
+    if not argv:
+        raise ValueError("run requires direct argv after --")
+    configured_mode = AdapterMode(args.mode) if args.mode is not None else None
+    mode = AdapterMode.from_environment(default=configured_mode or AdapterMode.ENFORCE)
+    if configured_mode is not None and mode is AdapterMode.BYPASS:
+        # OUTCTL_ENABLED=0 remains the documented break-glass override.
+        mode = AdapterMode.BYPASS
+    result = asyncio.run(
+        run_adapter(
+            AdapterRequest(
+                mode=mode,
+                argv=argv,
+                policy_ref=args.policy_ref,
+                policy_digest=args.policy_digest,
+                identity=AdapterIdentity(host_id=socket.gethostname(), harness="outctl-cli"),
+                spool_root=args.spool_root,
+                cwd=args.cwd,
+                timeout=args.timeout,
+                max_capture_bytes=args.max_capture_bytes,
+            )
+        )
+    )
+    payload: dict[str, object] = {
+        "mode": result.mode.value,
+        "command": {
+            "exit_code": result.command.exit_code,
+            "signal": result.command.signal,
+            "timed_out": result.command.timed_out,
+            "cancelled": result.command.cancelled,
+        },
+    }
+    if result.envelope is not None:
+        payload["envelope"] = result.envelope.to_dict()
+    if result.receipt is not None:
+        payload["receipt"] = result.receipt
+    return payload, _command_exit_code(result.command.exit_code, result.command.signal)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command is None:
         return 0
     try:
+        if args.command == "run":
+            payload, exit_code = _run_payload(args)
+            _json(payload)
+            return exit_code
         if args.command == "inspect":
             inspection = inspect_capture(args.spool_root, args.capture_id)
             _json(_inspection_payload(inspection))
