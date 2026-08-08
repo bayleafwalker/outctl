@@ -50,6 +50,7 @@ def build_result_envelope(
     bindings: Mapping[str, str | None] | None = None,
     projection_id: str | None = None,
     capture_ref: str | None = None,
+    source_path: str | None = None,
     deduplicated: bool = False,
     replicas: list[dict[str, object]] | None = None,
 ) -> CommandResultEnvelope:
@@ -95,7 +96,10 @@ def build_result_envelope(
             source=CommandResultCaptureSource(
                 availability="local-only",
                 host_id=invocation.host_id,
-                path=str(capture.path),
+                # The core envelope keeps its historic local-path default for
+                # local operators.  A harness adapter can instead supply an
+                # opaque locator before handing this object to model context.
+                path=source_path if source_path is not None else str(capture.path),
             ),
         ),
         projection=CommandResultProjection(

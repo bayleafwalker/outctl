@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -14,6 +15,9 @@ from outctl.adapter import (
     AdapterIdentity,
     AdapterMode,
     AdapterRequest,
+    RetrievalStatus,
+    resolve_adapter_mode,
+    retrieve_adapter_slice,
     run_adapter,
 )
 from outctl.projection import ProjectionLimits
@@ -109,7 +113,15 @@ def run_local_pilot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
         )
         for mode, measurement in measurements.items()
     }
-    return report
+    return {
+        **report,
+        # This is deliberately a qualitative pilot note, not a release
+        # threshold.  It records authority boundaries alongside the metrics.
+        "qualitative_assessment": {
+            "harness_managed": "direct command execution and ordinary command outcome",
+            "outctl_adds": "bounded projection, local capture metrics, and no-rerun retrieval",
+        },
+    }
 
 
 def request(mode: AdapterMode, tmp_path: Path, code: str, **kwargs: object) -> AdapterRequest:
@@ -141,10 +153,24 @@ def test_bypass_executes_directly_without_creating_capture_root(tmp_path: Path) 
     assert not (tmp_path / "spool").exists()
 
 
+def test_mode_resolution_supports_config_and_documented_environment_flags() -> None:
+    assert AdapterMode.from_environment({}) is AdapterMode.BYPASS
+    assert AdapterMode.from_environment({"OUTCTL_MODE": "shadow"}) is AdapterMode.SHADOW
+    assert resolve_adapter_mode(AdapterMode.ENFORCE, environ={}) is AdapterMode.ENFORCE
+    assert resolve_adapter_mode("enforce", environ={"OUTCTL_MODE": "shadow"}) is AdapterMode.ENFORCE
+    assert (
+        resolve_adapter_mode(AdapterMode.ENFORCE, environ={"OUTCTL_ENABLED": "0"})
+        is AdapterMode.BYPASS
+    )
+    with pytest.raises(ValueError, match="OUTCTL_MODE"):
+        AdapterMode.from_environment({"OUTCTL_MODE": "unknown"})
+
+
 def test_shadow_returns_command_outcome_and_observation(tmp_path: Path) -> None:
     result = run(request(AdapterMode.SHADOW, tmp_path, "print('observed'); raise SystemExit(7)"))
 
     assert result.command.exit_code == 7
+    assert result.ordinary_result is result.command
     assert result.capture is not None
     assert result.capture.capture_status == "COMPLETE"
     assert result.envelope is not None
@@ -152,6 +178,19 @@ def test_shadow_returns_command_outcome_and_observation(tmp_path: Path) -> None:
     assert result.envelope.projection.inline_text == "observed\n"
     assert result.receipt is not None
     assert result.receipt["mode"] == "shadow"
+
+
+def test_enforce_envelope_exposes_only_opaque_capture_location(tmp_path: Path) -> None:
+    result = run(request(AdapterMode.ENFORCE, tmp_path, "print('bounded')"))
+
+    assert result.envelope is not None
+    serialized = json.dumps(result.envelope.to_dict(), sort_keys=True)
+    assert result.envelope.capture.source.path == (
+        f"outctl://capture/{result.envelope.capture_id}"
+    )
+    assert str(tmp_path.resolve()) not in serialized
+    assert "stdout.raw" not in serialized
+    assert "bounded\n" in (result.envelope.projection.inline_text or "")
 
 
 def test_enforce_keeps_command_and_capture_status_distinct(tmp_path: Path) -> None:
@@ -234,8 +273,13 @@ def test_timeout_and_cwd_are_forwarded(tmp_path: Path) -> None:
     assert timeout_result.command.signal == 9
 
 
-def test_action_and_audit_bindings_are_passed_through_only(tmp_path: Path) -> None:
-    bindings = {"action_id": "action-7", "audit_id": "audit-9"}
+def test_caller_bindings_are_passed_through_only(tmp_path: Path) -> None:
+    bindings = {
+        "action_id": "action-7",
+        "sprint_id": "sprint-3",
+        "session_id": "session-11",
+        "correlation_id": "corr-13",
+    }
     result = run(request(AdapterMode.SHADOW, tmp_path, "pass", bindings=bindings))
 
     assert result.envelope is not None
@@ -243,7 +287,98 @@ def test_action_and_audit_bindings_are_passed_through_only(tmp_path: Path) -> No
     assert result.receipt is not None
     assert result.receipt["bindings"] == bindings
     assert list(tmp_path.rglob("*action*")) == []
-    assert list(tmp_path.rglob("*audit*")) == []
+    assert list(tmp_path.rglob("*sprint*")) == []
+    assert list(tmp_path.rglob("*session*")) == []
+
+
+def test_adapter_cancellation_terminates_group_and_leaves_incomplete_evidence(
+    tmp_path: Path,
+) -> None:
+    child_pid_file = tmp_path / "child-pid"
+    code = (
+        "from pathlib import Path; import subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        f"Path({str(child_pid_file)!r}).write_text(str(child.pid)); "
+        "time.sleep(60)"
+    )
+
+    async def cancel_running_adapter() -> None:
+        task = asyncio.create_task(
+            run_adapter(request(AdapterMode.ENFORCE, tmp_path, code, timeout=30))
+        )
+        for _ in range(100):
+            if child_pid_file.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert child_pid_file.exists()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(cancel_running_adapter())
+
+    child_pid = int(child_pid_file.read_text())
+    for _ in range(100):
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("adapter cancellation leaked a child process")
+
+    manifests = list((tmp_path / "spool" / "partial").glob("*/manifest.json"))
+    assert len(manifests) == 1
+    manifest = json.loads(manifests[0].read_text())
+    assert manifest["capture_status"] == "INCOMPLETE"
+    assert manifest["command"]["final_status"] == "UNKNOWN"
+    assert manifest["termination"] == {
+        "reason": "CALLER_CANCELLED",
+        "caller_cancelled": True,
+        "timed_out": False,
+        "signals_sent": [9],
+    }
+
+
+def test_enforced_retrieval_bridge_is_bounded_redacted_and_never_reruns(tmp_path: Path) -> None:
+    executions = tmp_path / "fixture-invocations"
+    secret = "registered-retrieval-secret"
+    prefix = "ordinary output record\n"
+    middle = f"known-middle-marker secret={secret}\n"
+    suffix = "ordinary output record\n"
+    code = (
+        "from pathlib import Path; import sys; "
+        f"marker = Path({str(executions)!r}); "
+        "marker.write_text(str(int(marker.read_text()) + 1) if marker.exists() else '1'); "
+        f"sys.stdout.write({prefix!r} * 80 + {middle!r} + {suffix!r} * 80)"
+    )
+    adapter_request = request(
+        AdapterMode.ENFORCE,
+        tmp_path,
+        code,
+        projection_limits=ProjectionLimits(96, 4, 24),
+        exact_redaction_rules={"fixture-secret": (secret,)},
+    )
+    result = run(adapter_request)
+
+    assert result.envelope is not None
+    assert "known-middle-marker" not in (result.envelope.projection.inline_text or "")
+    start = len(prefix.encode()) * 80
+    retrieved = retrieve_adapter_slice(
+        adapter_request,
+        result.envelope.capture_ref,
+        stream="stdout",
+        start=start,
+        end=start + len(middle.encode()),
+        max_bytes=256,
+    )
+
+    assert retrieved.status is RetrievalStatus.AVAILABLE
+    assert "known-middle-marker" in (retrieved.inline_text or "")
+    assert secret not in (retrieved.inline_text or "")
+    assert retrieved.redacted is True
+    assert retrieved.projection_bytes <= adapter_request.projection_limits.max_bytes
+    assert executions.read_text() == "1"
 
 
 def test_local_pilot_reports_bypass_shadow_and_enforce_metrics(
@@ -251,7 +386,7 @@ def test_local_pilot_reports_bypass_shadow_and_enforce_metrics(
 ) -> None:
     report = run_local_pilot(tmp_path, monkeypatch)
 
-    assert set(report) == {"bypass", "shadow", "enforce"}
+    assert set(report) == {"bypass", "shadow", "enforce", "qualitative_assessment"}
     bypass = report["bypass"]
     shadow = report["shadow"]
     enforce = report["enforce"]
@@ -269,6 +404,10 @@ def test_local_pilot_reports_bypass_shadow_and_enforce_metrics(
         assert measurement["retrieval_count"] == 0
         assert measurement["wall_time_ms"] >= 0
     assert shadow["retrieval_count"] == enforce["retrieval_count"] == 0
+    assert report["qualitative_assessment"] == {
+        "harness_managed": "direct command execution and ordinary command outcome",
+        "outctl_adds": "bounded projection, local capture metrics, and no-rerun retrieval",
+    }
 
 
 def test_g01_long_session_pilot_bounds_exposure_without_retrieval_or_rerun(
