@@ -96,6 +96,10 @@ class HarnessValidationTests(unittest.TestCase):
             run._write_codex_home(
                 home,
                 worktree=worktree,
+                canonical=worktree,
+                outctl_project=worktree,
+                spool_root=root / "spool",
+                kubernetes_api_host="192.0.2.10",
                 auth_source=None,
                 reasoning_effort="high",
             )
@@ -108,6 +112,22 @@ class HarnessValidationTests(unittest.TestCase):
             self.assertIn("multi_agent_v2 = false", config)
             self.assertIn("apps = false", config)
             self.assertIn("plugins = false", config)
+            self.assertIn('default_permissions = "outctl-ab-readonly"', config)
+            self.assertIn('extends = ":read-only"', config)
+            self.assertIn('"192.0.2.10" = "allow"', config)
+            self.assertNotIn("sandbox_mode", config)
+
+    def test_codex_command_uses_permission_profile_not_sandbox_flag(self) -> None:
+        command = run._build_codex_command(
+            codex_bin="codex",
+            model="gpt-5.6-terra",
+            worktree=Path("/tmp/worktree"),
+            schema=Path("/tmp/schema.json"),
+            final_path=Path("/tmp/final.json"),
+            prompt="test",
+        )
+        self.assertNotIn("--sandbox", command)
+        self.assertIn("--ephemeral", command)
 
     def test_full_schema_validation_catches_constraint_violation(self) -> None:
         schema = json.loads(
@@ -345,6 +365,30 @@ class EndToEndTests(unittest.TestCase):
                 encoding="utf-8",
             )
             fake_codex.chmod(0o755)
+            fake_kubectl = root / "kubectl"
+            fake_kubectl.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import sys
+                    args = sys.argv[1:]
+                    if "current-context" in args:
+                        print("readonly")
+                    elif "jsonpath={.clusters[0].cluster.server}" in args:
+                        print("https://192.0.2.10:6443")
+                    elif args[-4:-2] == ["auth", "can-i"] or "can-i" in args:
+                        blocked = any(value in args for value in (
+                            "create", "delete", "secrets", "pods/exec",
+                            "pods/portforward", "pods/ephemeralcontainers",
+                        ))
+                        print("no" if blocked else "yes")
+                    else:
+                        raise SystemExit(2)
+                    """
+                ),
+                encoding="utf-8",
+            )
+            fake_kubectl.chmod(0o755)
             kubeconfig = root / "read-only.kubeconfig"
             kubeconfig.write_text("apiVersion: v1\nkind: Config\n", encoding="utf-8")
             output = root / "result"
@@ -359,6 +403,10 @@ class EndToEndTests(unittest.TestCase):
                     str(repo),
                     "--kubeconfig",
                     str(kubeconfig),
+                    "--context",
+                    "readonly",
+                    "--kubectl-bin",
+                    str(fake_kubectl),
                     "--output",
                     str(output),
                     "--codex-bin",
@@ -380,6 +428,7 @@ class EndToEndTests(unittest.TestCase):
             planned = json.loads((output / "planned-commands.json").read_text(encoding="utf-8"))
             self.assertIn("--dangerously-bypass-hook-trust", planned[0]["A"])
             self.assertIn("--ephemeral", planned[0]["B"])
+            self.assertNotIn("--sandbox", planned[0]["A"])
             pair = report["pairs"][0]
             self.assertIn("pair_valid", pair["comparison"])
             self.assertIn("flags", pair["comparison"])
@@ -401,6 +450,8 @@ class EndToEndTests(unittest.TestCase):
                 0o600,
             )
             self.assertFalse((output / "private" / "pair-001" / "codex-home-A").exists())
+            self.assertEqual(report["experiment"]["preflight"]["required_permissions_verified"], 7)
+            self.assertEqual(report["experiment"]["preflight"]["prohibited_permissions_denied"], 6)
 
 
 if __name__ == "__main__":

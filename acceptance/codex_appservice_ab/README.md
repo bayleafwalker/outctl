@@ -113,9 +113,12 @@ session aggregate.
    Prefer a clean committed revision. Use `--allow-dirty` only deliberately;
    use `--include-untracked` only when you have reviewed every untracked file.
 2. `outctl run` works from the canonical appservice direnv environment.
-3. For every live run, pass an explicit dedicated read-only kubeconfig with
-   `--kubeconfig`; the harness refuses a live run without one and injects it
-   after `direnv` so the canonical environment cannot replace it.
+3. For every live run, pass an explicit dedicated read-only kubeconfig and its
+   exact `--context`. Before either model starts, the harness verifies the
+   fixed health-check corpus permissions and rejects any identity that can
+   mutate, read Secrets, exec, port-forward, or inject ephemeral containers.
+   It injects the kubeconfig after `direnv` so the canonical environment cannot
+   replace it.
 4. Set an approved policy reference and its real SHA-256 digest. Do not use a
    decorative all-zero digest merely because the CLI accepts one.
 4. Codex authentication is available through `$CODEX_HOME/auth.json` or
@@ -183,6 +186,7 @@ uv run python acceptance/codex_appservice_ab/run.py \
   --appservice /projects/dev/appservice \
   --canonical-appservice /projects/dev/appservice \
   --kubeconfig /path/to/read-only.kubeconfig \
+  --context outctl-pilot-readonly@appservice \
   --outctl-cmd 'uv run --project /projects/dev/outctl outctl' \
   --policy-ref "$OUTCTL_POLICY_REF" \
   --policy-digest "$OUTCTL_POLICY_DIGEST" \
@@ -201,6 +205,10 @@ with `--pairs 3` for the sequential matched evaluation. The launcher uses:
 - web search, apps/plugins, persistent and imported memories, multi-agent
   execution, goals, and fast mode disabled;
 - `--ephemeral` sessions;
+- a generated least-privilege Codex permission profile, rather than a broad
+  `--sandbox` override: model commands are read-only, A can write only its
+  private outctl spool, and sandboxed network access is limited to the one API
+  endpoint resolved from the explicit kubeconfig;
 - `--dangerously-bypass-hook-trust` only for the generated experiment-local
   hook definitions, which are reviewed in the dry run;
 - an experiment-only `hooks.json` in each detached worktree; any existing

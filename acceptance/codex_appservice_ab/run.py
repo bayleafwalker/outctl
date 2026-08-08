@@ -32,6 +32,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
@@ -56,6 +57,7 @@ START_BARRIER_TIMEOUT_SECONDS = 15
 REQUIRED_COVERAGE_AREAS = frozenset(
     ("cluster_api", "nodes", "workloads", "gitops", "storage", "events")
 )
+PERMISSION_PROFILE_NAME = "outctl-ab-readonly"
 
 
 class ExperimentError(RuntimeError):
@@ -229,6 +231,97 @@ def _toml_string(value: str) -> str:
 def _validate_policy_digest(value: str) -> None:
     if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", value):
         raise ExperimentError("--policy-digest must be sha256:<64 hex characters>")
+
+
+def _kubectl_output(
+    kubectl_bin: str,
+    kubeconfig: Path,
+    context: str,
+    *args: str,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run a metadata-only launcher preflight with the explicit credential."""
+    env = os.environ.copy()
+    env["KUBECONFIG"] = str(kubeconfig)
+    env.pop("KUBECTL_PLUGINS_CALLER", None)
+    return subprocess.run(
+        [kubectl_bin, "--kubeconfig", str(kubeconfig), "--context", context, *args],
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+
+
+def _preflight_readonly_kubeconfig(
+    *, kubectl_bin: str, kubeconfig: Path, context: str
+) -> dict[str, Any]:
+    """Verify the exact, minimum corpus permissions before model execution.
+
+    Do not retain command output: Kubernetes responses can include operator
+    context.  The public report contains only booleans and a context digest.
+    """
+    current = _kubectl_output(kubectl_bin, kubeconfig, context, "config", "current-context")
+    current_context = current.stdout.decode("utf-8", errors="replace").strip()
+    if current.returncode != 0 or current_context != context:
+        raise ExperimentError("explicit kubeconfig/context validation failed")
+
+    server = _kubectl_output(
+        kubectl_bin,
+        kubeconfig,
+        context,
+        "config",
+        "view",
+        "--minify",
+        "-o",
+        "jsonpath={.clusters[0].cluster.server}",
+    )
+    parsed_server = urlparse(server.stdout.decode("utf-8", errors="replace").strip())
+    if server.returncode != 0 or not parsed_server.hostname:
+        raise ExperimentError("explicit kubeconfig does not expose a valid API endpoint")
+
+    allow_checks = (
+        ("get", "nodes", None, None),
+        ("list", "pods", None, "--all-namespaces"),
+        ("list", "deployments", "gatus", None),
+        ("list", "events", "gatus", None),
+        ("list", "persistentvolumeclaims", "gatus", None),
+        ("list", "kustomizations.kustomize.toolkit.fluxcd.io", "flux-system", None),
+        ("list", "gitrepositories.source.toolkit.fluxcd.io", "flux-system", None),
+    )
+    deny_checks = (
+        ("create", "pods", "gatus", None),
+        ("delete", "deployments", "gatus", None),
+        ("get", "secrets", "gatus", None),
+        ("create", "pods/exec", "gatus", None),
+        ("create", "pods/portforward", "gatus", None),
+        ("create", "pods/ephemeralcontainers", "gatus", None),
+    )
+
+    def can_i(verb: str, resource: str, namespace: str | None, scope: str | None) -> bool:
+        args = ["auth", "can-i", verb, resource]
+        if namespace is not None:
+            args.extend(("--namespace", namespace))
+        if scope is not None:
+            args.append(scope)
+        result = _kubectl_output(kubectl_bin, kubeconfig, context, *args)
+        answer = result.stdout.decode("utf-8", errors="replace").strip()
+        return result.returncode == 0 and answer == "yes"
+
+    allowed = [can_i(*check) for check in allow_checks]
+    denied = [not can_i(*check) for check in deny_checks]
+    if not all(allowed):
+        raise ExperimentError("read-only kubeconfig lacks a required fixed-corpus permission")
+    if not all(denied):
+        raise ExperimentError(
+            "read-only kubeconfig has prohibited mutation or sensitive-read authority"
+        )
+    return {
+        "context_sha256": _sha256_text(context),
+        "api_host_sha256": _sha256_text(parsed_server.hostname),
+        "required_permissions_verified": len(allowed),
+        "prohibited_permissions_denied": len(denied),
+        # Kept private to the launch config; the public report only has its digest.
+        "_api_host": parsed_server.hostname,
+    }
 
 
 def _copy_untracked(source: Path, destination: Path) -> int:
@@ -441,6 +534,10 @@ def _write_codex_home(
     target: Path,
     *,
     worktree: Path,
+    canonical: Path,
+    outctl_project: Path,
+    spool_root: Path | None,
+    kubernetes_api_host: str | None,
     auth_source: Path | None,
     reasoning_effort: str | None,
 ) -> None:
@@ -451,8 +548,11 @@ def _write_codex_home(
         shutil.copy2(auth_source, destination)
         destination.chmod(0o600)
 
+    workspace_roots = tuple(dict.fromkeys((worktree, canonical, outctl_project)))
     lines = [
         'web_search = "disabled"',
+        'approval_policy = "never"',
+        f"default_permissions = {_toml_string(PERMISSION_PROFILE_NAME)}",
         "",
         "[features]",
         "hooks = true",
@@ -470,7 +570,42 @@ def _write_codex_home(
         "",
         f"[projects.{_toml_string(str(worktree))}]",
         'trust_level = "trusted"',
+        "",
+        f"[permissions.{PERMISSION_PROFILE_NAME}]",
+        'description = "Experiment-local read-only appservice health-check profile"',
+        'extends = ":read-only"',
+        "",
+        f"[permissions.{PERMISSION_PROFILE_NAME}.workspace_roots]",
+        *(f"{_toml_string(str(path))} = true" for path in workspace_roots),
+        "",
+        f"[permissions.{PERMISSION_PROFILE_NAME}.filesystem]",
+        '":minimal" = "read"',
+        "",
+        f"[permissions.{PERMISSION_PROFILE_NAME}.filesystem.\":workspace_roots\"]",
+        '"." = "read"',
     ]
+    if spool_root is not None:
+        lines.extend(
+            (
+                "",
+                f"[permissions.{PERMISSION_PROFILE_NAME}.filesystem.{_toml_string(str(spool_root))}]",
+                '"." = "write"',
+            )
+        )
+    if kubernetes_api_host is not None:
+        lines.extend(
+            (
+                "",
+                f"[permissions.{PERMISSION_PROFILE_NAME}.network]",
+                "enabled = true",
+                # The API endpoint is private by design.  This does not open a
+                # wildcard: the sole allow entry below remains authoritative.
+                "allow_local_binding = true",
+                "",
+                f"[permissions.{PERMISSION_PROFILE_NAME}.network.domains]",
+                f"{_toml_string(kubernetes_api_host)} = \"allow\"",
+            )
+        )
     if reasoning_effort:
         lines = [
             f"model_reasoning_effort = {_toml_string(reasoning_effort)}",
@@ -489,7 +624,6 @@ def _build_codex_command(
     *,
     codex_bin: str,
     model: str,
-    sandbox: str,
     worktree: Path,
     schema: Path,
     final_path: Path,
@@ -503,8 +637,6 @@ def _build_codex_command(
         "--json",
         "--model",
         model,
-        "--sandbox",
-        sandbox,
         "--cd",
         str(worktree),
         "--output-schema",
@@ -1520,9 +1652,14 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=None,
         help="Explicit read-only kubeconfig required for live runs; dry-runs need none",
     )
+    parser.add_argument(
+        "--context",
+        default=None,
+        help="Explicit context in --kubeconfig, required for live runs",
+    )
+    parser.add_argument("--kubectl-bin", default="kubectl")
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--model", default="gpt-5.6-terra")
-    parser.add_argument("--sandbox", default="danger-full-access")
     parser.add_argument("--reasoning-effort", default=None)
     parser.add_argument("--pairs", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
@@ -1561,14 +1698,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ExperimentError(f"{name} directory does not exist: {path}")
     if not prompt_path.is_file() or not schema_path.is_file():
         raise ExperimentError("prompt/schema file is missing")
-    if not args.dry_run and (kubeconfig is None or not kubeconfig.is_file()):
-        raise ExperimentError("live runs require an explicit readable --kubeconfig")
+    if not args.dry_run and (kubeconfig is None or not kubeconfig.is_file() or not args.context):
+        raise ExperimentError("live runs require an explicit readable --kubeconfig and --context")
     try:
         schema_value = json.loads(schema_path.read_text(encoding="utf-8"))
         Draft202012Validator.check_schema(schema_value)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, SchemaError) as exc:
         raise ExperimentError(f"output schema is not a valid Draft 2020-12 schema: {exc}") from exc
     validator = Draft202012Validator(schema_value)
+    preflight: dict[str, Any] | None = None
+    if not args.dry_run:
+        assert kubeconfig is not None and args.context is not None
+        preflight = _preflight_readonly_kubeconfig(
+            kubectl_bin=args.kubectl_bin, kubeconfig=kubeconfig, context=args.context
+        )
+    kubernetes_api_host = preflight.pop("_api_host") if preflight is not None else None
 
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output = (
@@ -1689,12 +1833,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             _write_codex_home(
                 home_a,
                 worktree=worktree_a,
+                canonical=canonical,
+                outctl_project=Path(__file__).resolve().parents[2],
+                spool_root=pair_dir / "outctl-spool-A",
+                kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
             )
             _write_codex_home(
                 home_b,
                 worktree=worktree_b,
+                canonical=canonical,
+                outctl_project=Path(__file__).resolve().parents[2],
+                spool_root=None,
+                kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
             )
@@ -1703,7 +1855,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             command_a = _build_codex_command(
                 codex_bin=args.codex_bin,
                 model=args.model,
-                sandbox=args.sandbox,
                 worktree=worktree_a,
                 schema=schema_path,
                 final_path=arm_dir_a / "final.json",
@@ -1712,7 +1863,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             command_b = _build_codex_command(
                 codex_bin=args.codex_bin,
                 model=args.model,
-                sandbox=args.sandbox,
                 worktree=worktree_b,
                 schema=schema_path,
                 final_path=arm_dir_b / "final.json",
@@ -1877,8 +2027,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "included_untracked_files": untracked_counts,
                     "model_requested": args.model,
                     "codex_version": _codex_version(args.codex_bin),
-                    "sandbox": args.sandbox,
-                    "approval": "cli-default (no unsupported override)",
+                    "permissions": {
+                        "profile": PERMISSION_PROFILE_NAME,
+                        "approval_policy": "never",
+                        "sandbox_override": None,
+                        "network": "one verified Kubernetes API host per run",
+                    },
+                    "preflight": preflight,
                     "reasoning_effort": args.reasoning_effort,
                     "pairs_requested": args.pairs,
                     "prompt_template_sha256": _sha256_file(prompt_path),
