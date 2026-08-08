@@ -231,7 +231,10 @@ def run_app_server_turn(
             if message.get("id") == request_id:
                 result = message.get("result")
                 if not isinstance(result, dict):
-                    raise PilotError(f"app-server {method} did not return an object")
+                    error = message.get("error")
+                    code = error.get("code") if isinstance(error, dict) else None
+                    suffix = f" (error code {code})" if isinstance(code, int) else ""
+                    raise PilotError(f"app-server {method} did not return an object{suffix}")
                 return result
         raise PilotError(f"app-server closed during {method}")
 
@@ -242,7 +245,7 @@ def run_app_server_turn(
             {
                 "cwd": str(cwd),
                 "model": model,
-                "sandbox": {"type": "readOnly"},
+                "sandbox": "read-only",
                 "ephemeral": True,
                 "approvalPolicy": "never",
                 "developerInstructions": developer_instructions,
