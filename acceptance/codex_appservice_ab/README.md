@@ -119,6 +119,10 @@ session aggregate.
    mutate, read Secrets, exec, port-forward, or inject ephemeral containers.
    It injects the kubeconfig after `direnv` so the canonical environment cannot
    replace it.
+4. Optionally pass appservice's `bin/cluster-status.sh` with
+   `--health-checker`. The launcher runs it once with `TALOSCONFIG` cleared,
+   retains its raw capture privately, and gives both arms the same bounded
+   projection. It is shared context, not a treatment-side command.
 4. Set an approved policy reference and its real SHA-256 digest. Do not use a
    decorative all-zero digest merely because the CLI accepts one.
 4. Codex authentication is available through `$CODEX_HOME/auth.json` or
@@ -187,6 +191,7 @@ uv run python acceptance/codex_appservice_ab/run.py \
   --canonical-appservice /projects/dev/appservice \
   --kubeconfig /path/to/read-only.kubeconfig \
   --context outctl-pilot-readonly@appservice \
+  --health-checker /projects/dev/appservice/bin/cluster-status.sh \
   --outctl-cmd 'uv run --project /projects/dev/outctl outctl' \
   --policy-ref "$OUTCTL_POLICY_REF" \
   --policy-digest "$OUTCTL_POLICY_DIGEST" \

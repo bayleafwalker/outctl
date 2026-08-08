@@ -324,6 +324,59 @@ def _preflight_readonly_kubeconfig(
     }
 
 
+def _run_shared_health_checker(
+    *,
+    launcher: Sequence[str],
+    checker: Path,
+    cwd: Path,
+    kubeconfig: Path,
+    spool_root: Path,
+    policy_ref: str,
+    policy_digest: str,
+) -> tuple[str, dict[str, Any]]:
+    """Run the appservice checker once and return only its bounded projection."""
+    env = os.environ.copy()
+    env["KUBECONFIG"] = str(kubeconfig)
+    # The scoped identity deliberately has no Talos authority.
+    env.pop("TALOSCONFIG", None)
+    command = [
+        *launcher,
+        "run",
+        "--mode",
+        "enforce",
+        "--spool-root",
+        str(spool_root),
+        "--policy-ref",
+        policy_ref,
+        "--policy-digest",
+        policy_digest,
+        "--cwd",
+        str(cwd),
+        "--",
+        "bash",
+        str(checker),
+    ]
+    result = subprocess.run(command, env=env, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise ExperimentError("shared appservice health checker did not complete")
+    try:
+        value = json.loads(result.stdout)
+        envelope = value.get("envelope") if isinstance(value, Mapping) else None
+        projection = envelope.get("projection") if isinstance(envelope, Mapping) else None
+        text = projection.get("text") if isinstance(projection, Mapping) else None
+        receipt = value.get("receipt") if isinstance(value, Mapping) else None
+        if not isinstance(text, str) or not isinstance(receipt, Mapping):
+            raise ValueError("bounded projection or receipt is missing")
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise ExperimentError("shared health checker returned an invalid bounded receipt") from exc
+    return text, {
+        "capture_id": receipt.get("capture_id"),
+        "projection_sha256": _sha256_text(text),
+        "projection_bytes": len(text.encode("utf-8")),
+        "spool_root": str(spool_root),
+    }
+
+
 def _copy_untracked(source: Path, destination: Path) -> int:
     raw = _git(source, "ls-files", "--others", "--exclude-standard", "-z")
     paths = [item for item in raw.decode("utf-8").split("\0") if item]
@@ -1697,6 +1750,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--model", default="gpt-5.6-terra")
     parser.add_argument("--reasoning-effort", default=None)
+    parser.add_argument(
+        "--health-checker",
+        type=Path,
+        default=None,
+        help="Optional appservice read-only checker run once as shared bounded context",
+    )
     parser.add_argument("--pairs", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--prompt", type=Path, default=here / "prompt.md")
@@ -1736,11 +1795,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     prompt_path = args.prompt.resolve()
     output_schema_path = args.output_schema.resolve()
     schema_path = args.schema.resolve()
+    health_checker = args.health_checker.resolve() if args.health_checker is not None else None
     for path, name in ((source, "appservice"), (canonical, "canonical appservice")):
         if not path.is_dir():
             raise ExperimentError(f"{name} directory does not exist: {path}")
     if not prompt_path.is_file() or not output_schema_path.is_file() or not schema_path.is_file():
         raise ExperimentError("prompt/output-schema/validator schema file is missing")
+    if health_checker is not None and not health_checker.is_file():
+        raise ExperimentError(f"--health-checker file is missing: {health_checker}")
     if not args.dry_run and (kubeconfig is None or not kubeconfig.is_file() or not args.context):
         raise ExperimentError("live runs require an explicit readable --kubeconfig and --context")
     try:
@@ -1831,6 +1893,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ExperimentError(f"no Codex auth found at {auth_candidate} and CODEX_API_KEY is unset")
 
     started_at = _utc_now()
+    shared_checker: dict[str, Any] | None = None
+    if health_checker is not None:
+        if args.dry_run:
+            shared_checker = {"planned": True, "path": str(health_checker)}
+        else:
+            assert kubeconfig is not None
+            text, shared_checker = _run_shared_health_checker(
+                launcher=launcher,
+                checker=health_checker,
+                cwd=canonical,
+                kubeconfig=kubeconfig,
+                spool_root=private / "shared-health-checker-spool",
+                policy_ref=args.policy_ref,
+                policy_digest=args.policy_digest,
+            )
+            prompt += "\n\nShared bounded appservice health-checker evidence:\n" + text
     pairs: list[dict[str, Any]] = []
     try:
         untracked_counts["A"] = _prepare_worktree(
@@ -2071,6 +2149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "rendered_prompt_sha256": _sha256_text(prompt),
                     "rendered_prompt_bytes": len(prompt.encode("utf-8")),
                     "model_guidance_inventory": guidance_inventory,
+                    "shared_health_checker": shared_checker,
                 }
             }
         else:
@@ -2101,6 +2180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "codex_output_schema_sha256": _sha256_file(output_schema_path),
                     "policy_ref": args.policy_ref,
                     "policy_digest": args.policy_digest,
+                    "shared_health_checker": shared_checker,
                     "baseline_native_outctl_guidance": contamination,
                     "baseline_hooks_json_sha256": baseline_hooks_sha256,
                     "model_guidance_inventory": guidance_inventory,
