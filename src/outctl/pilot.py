@@ -1189,6 +1189,7 @@ def approval_canary() -> dict[str, str | int]:
     codex_version = _app_server_token_capability()
     source_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
     corpus = tuple(("printf", f"outctl-canary-{ordinal}") for ordinal in range(1, 5))
+    commands = "; ".join(shlex.join(argv) for argv in corpus)
     with tempfile.TemporaryDirectory(prefix="outctl-approval-canary-") as directory:
         session_root = Path(directory)
         home = session_root / "codex-home"
@@ -1202,7 +1203,7 @@ def approval_canary() -> dict[str, str | int]:
             codex_home=home,
             cwd=work,
             prompt=(
-                "Run each of the four supplied direct argv commands exactly once, in order. "
+                f"Run each of these four direct argv commands exactly once, in order: {commands}. "
                 "Do not run any other command or use a shell. Then return the required JSON "
                 "with concise statements that the canary completed."
             ),
@@ -1210,8 +1211,8 @@ def approval_canary() -> dict[str, str | int]:
             spool_root=spool,
             developer_instructions=(
                 "This is a no-cluster approval canary. Execute only the four direct argv "
-                "commands in the frozen corpus, one at a time and in order. Do not use a shell, "
-                "read files, write files, use a network, or run any other command."
+                f"commands `{commands}`, one at a time and in order. Do not use a shell, read "
+                "files, write files, use a network, or run any other command."
             ),
             session="B",
             corpus=corpus,
