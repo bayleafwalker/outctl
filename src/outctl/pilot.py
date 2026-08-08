@@ -471,7 +471,9 @@ def launch(args: argparse.Namespace) -> Path:
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            # Codex may emit startup diagnostics to stderr even with --json.
+            # Keep that channel out of the authoritative JSONL telemetry stream.
+            stderr=subprocess.DEVNULL,
             text=True,
             env=env,
         )
