@@ -1803,11 +1803,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     kubeconfig_env = (
         f"KUBECONFIG={shlex.quote(str(kubeconfig))} " if kubeconfig is not None else ""
     )
-    retrieval_prefix = (
-        f"direnv exec {shlex.quote(str(canonical))} env {kubeconfig_env}{shlex.join(launcher)}"
-    )
+    # The launcher supplies the explicit scoped kubeconfig directly.  Do not
+    # invoke direnv inside the least-privilege Codex sandbox: it can touch
+    # user-local state that is unrelated to this fixed corpus.
+    retrieval_prefix = f"env {kubeconfig_env}{shlex.join(launcher)}"
     execution_prefix = (
-        f"direnv exec {shlex.quote(str(canonical))} "
         f"env {kubeconfig_env}OUTCTL_ENABLED=1 OUTCTL_MODE=enforce "
         'UV_OFFLINE=1 UV_CACHE_DIR="$OUTCTL_AB_SPOOL_ROOT/uv-cache" '
         'TMPDIR="$OUTCTL_AB_SPOOL_ROOT/tmp" '
