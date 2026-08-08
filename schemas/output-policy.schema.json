@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:output-policy:v1alpha1",
+  "title": "Vuoro outctl OutputPolicy",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "vuoro.outctl/v1alpha1"
+    },
+    "kind": {
+      "const": "OutputPolicy"
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "spec": {
+      "type": "object",
+      "required": [
+        "capture",
+        "budget",
+        "projection",
+        "redaction"
+      ],
+      "properties": {
+        "capture": {
+          "type": "object",
+          "required": [
+            "required",
+            "backend",
+            "maxBytes",
+            "onFailure",
+            "onQuotaExceeded"
+          ],
+          "properties": {
+            "required": {
+              "type": "boolean"
+            },
+            "backend": {
+              "enum": [
+                "local",
+                "hybrid",
+                "remote-only"
+              ]
+            },
+            "rawMode": {
+              "enum": [
+                "exact-local",
+                "sanitized",
+                "none"
+              ]
+            },
+            "maxBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "rawRetention": {
+              "type": "string"
+            },
+            "manifestRetention": {
+              "type": "string"
+            },
+            "onFailure": {
+              "enum": [
+                "warn",
+                "cancel-and-fail"
+              ]
+            },
+            "onQuotaExceeded": {
+              "enum": [
+                "continue-truncated",
+                "cancel-and-fail"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "budget": {
+          "type": "object",
+          "required": [
+            "maxEstimatedTokens",
+            "maxBytes",
+            "maxLines",
+            "estimator"
+          ],
+          "properties": {
+            "maxEstimatedTokens": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxLines": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "estimator": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "projection": {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "auto",
+                "full-if-small",
+                "head-tail",
+                "failure",
+                "search",
+                "line-range",
+                "structured",
+                "metadata-only"
+              ]
+            },
+            "fullIfUnderBytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "headLines": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "tailLines": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "failureContextBefore": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "failureContextAfter": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "warningContextBefore": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "warningContextAfter": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "collapseCarriageReturnProgress": {
+              "type": "boolean"
+            },
+            "maxLogicalLineBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "includeRetrievalHints": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": true
+        },
+        "redaction": {
+          "type": "object",
+          "required": [
+            "beforeModel",
+            "beforeLocalRaw",
+            "beforeReplica"
+          ],
+          "properties": {
+            "beforeModel": {
+              "type": "boolean"
+            },
+            "beforeLocalRaw": {
+              "type": "boolean"
+            },
+            "beforeReplica": {
+              "type": "boolean"
+            },
+            "exactSecretSource": {
+              "type": "string"
+            },
+            "ruleSetRef": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

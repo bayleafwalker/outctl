@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:audit-event:v1alpha1",
+  "title": "Vuoro outctl Audit Event",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_type",
+    "occurred_at",
+    "capture_ref",
+    "capture_manifest_sha256",
+    "bindings",
+    "actor"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "vuoro.outctl.audit-event/v1alpha1"
+    },
+    "event_type": {
+      "enum": [
+        "command.capture.completed",
+        "command.capture.degraded",
+        "command.capture.truncated",
+        "command.projection.exposed",
+        "command.output.retrieved",
+        "command.capture.verified",
+        "command.capture.replicated",
+        "command.capture.expired"
+      ]
+    },
+    "occurred_at": {
+      "type": "string"
+    },
+    "capture_ref": {
+      "type": "string"
+    },
+    "capture_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "projection_sha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "policy_digest": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "replica": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

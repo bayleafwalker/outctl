@@ -1,0 +1,133 @@
+apiVersion: vuoro.outctl/v1alpha1
+kind: OutputPolicySet
+metadata:
+  name: vuoro-default-output-policies
+spec:
+  defaults:
+    policy: interactive-default-v1
+
+  policies:
+    interactive-default-v1:
+      capture:
+        required: false
+        backend: local
+        rawMode: exact-local
+        maxBytes: 268435456
+        rawRetention: P7D
+        manifestRetention: P30D
+        onFailure: warn
+        onQuotaExceeded: continue-truncated
+      budget:
+        maxEstimatedTokens: 6000
+        maxBytes: 32768
+        maxLines: 600
+        estimator: utf8-bytes-div-4-v1
+      projection:
+        mode: auto
+        fullIfUnderBytes: 16384
+        headLines: 40
+        tailLines: 120
+        failureContextBefore: 8
+        failureContextAfter: 30
+        warningContextBefore: 3
+        warningContextAfter: 8
+        deduplicateConsecutive:
+          enabled: true
+          threshold: 4
+        collapseCarriageReturnProgress: true
+        maxLogicalLineBytes: 1048576
+        includeRetrievalHints: true
+      redaction:
+        beforeModel: true
+        beforeLocalRaw: false
+        beforeReplica: true
+        exactSecretSource: harness
+        ruleSetRef: default-secrets-v1
+      security:
+        spoolDirectoryMode: "0700"
+        captureFileMode: "0600"
+        allowImplicitShell: false
+      retention:
+        workspaceMaxBytes: 10737418240
+
+    failure-diagnostics-v1:
+      extends: interactive-default-v1
+      budget:
+        maxEstimatedTokens: 8000
+        maxBytes: 49152
+        maxLines: 900
+      projection:
+        mode: failure
+        headLines: 30
+        tailLines: 160
+        failureContextBefore: 12
+        failureContextAfter: 50
+
+    compact-metadata-v1:
+      extends: interactive-default-v1
+      budget:
+        maxEstimatedTokens: 4000
+        maxBytes: 24576
+        maxLines: 500
+      projection:
+        mode: full-if-small
+        fullIfUnderBytes: 24576
+        headLines: 20
+        tailLines: 80
+
+    audited-required-v1:
+      extends: failure-diagnostics-v1
+      capture:
+        required: true
+        onFailure: cancel-and-fail
+        onQuotaExceeded: cancel-and-fail
+        rawRetention: P30D
+      redaction:
+        beforeReplica: true
+      replica:
+        required: true
+        class: raw-sanitized
+        backend: configured-artifact-store
+
+  profiles:
+    - name: tests
+      match:
+        argv0Regex: "(^|/)(pytest|tox|nox|go|cargo|npm|pnpm|yarn)$"
+        argvContainsAny: ["test", "pytest"]
+      policy: failure-diagnostics-v1
+      selectors:
+        failureRegexes:
+          - "(?i)\\b(failed|failure|error|traceback|panic|assertion)\\b"
+        summaryRegexes:
+          - "(?i)([0-9]+ passed|[0-9]+ failed|test result:|tests? completed)"
+
+    - name: build
+      match:
+        argv0Regex: "(^|/)(make|ninja|cmake|cargo|go|npm|pnpm|yarn|gradle|mvn)$"
+      policy: failure-diagnostics-v1
+      selectors:
+        failureRegexes:
+          - "(?i)\\b(error|fatal|failed|undefined reference|compilation terminated)\\b"
+        warningRegexes:
+          - "(?i)\\bwarning\\b"
+
+    - name: git-status
+      match:
+        argvPrefix: ["git", "status"]
+      policy: compact-metadata-v1
+
+    - name: git-diff
+      match:
+        argvPrefix: ["git", "diff"]
+      policy: interactive-default-v1
+      projectionMode: auto
+
+    - name: kubernetes-logs
+      match:
+        argvPrefix: ["kubectl", "logs"]
+      policy: failure-diagnostics-v1
+
+    - name: structured-json
+      hintOnly: true
+      policy: interactive-default-v1
+      projectionMode: structured

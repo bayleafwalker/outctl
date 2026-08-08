@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:capture-manifest:v1alpha1",
+  "title": "Vuoro outctl CaptureManifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "capture_id",
+    "created_at",
+    "source",
+    "bindings",
+    "policy",
+    "command",
+    "capture",
+    "streams",
+    "event_index"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "vuoro.outctl.capture/v1alpha1"
+    },
+    "capture_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "finalized_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "host_id",
+        "workspace_id",
+        "cwd"
+      ],
+      "additionalProperties": true
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "policy": {
+      "type": "object",
+      "required": [
+        "name",
+        "digest"
+      ],
+      "additionalProperties": true
+    },
+    "command": {
+      "type": "object",
+      "required": [
+        "argv_display",
+        "shell",
+        "started",
+        "exit_code",
+        "signal",
+        "timed_out",
+        "cancelled"
+      ],
+      "additionalProperties": true
+    },
+    "capture": {
+      "type": "object",
+      "required": [
+        "status",
+        "required",
+        "max_bytes",
+        "truncated"
+      ],
+      "additionalProperties": true
+    },
+    "streams": {
+      "type": "object",
+      "required": [
+        "stdout",
+        "stderr"
+      ],
+      "properties": {
+        "stdout": {
+          "$ref": "#/$defs/stream"
+        },
+        "stderr": {
+          "$ref": "#/$defs/stream"
+        }
+      },
+      "additionalProperties": false
+    },
+    "event_index": {
+      "type": "object",
+      "required": [
+        "path",
+        "bytes",
+        "sha256",
+        "events"
+      ],
+      "additionalProperties": true
+    },
+    "projections": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "$defs": {
+    "stream": {
+      "type": "object",
+      "required": [
+        "path",
+        "bytes",
+        "sha256",
+        "complete"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lines": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "last_captured_offset": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

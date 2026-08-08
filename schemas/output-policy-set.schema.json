@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:output-policy-set:v1alpha1",
+  "title": "Vuoro outctl OutputPolicySet",
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "metadata",
+    "spec"
+  ],
+  "properties": {
+    "apiVersion": {
+      "const": "vuoro.outctl/v1alpha1"
+    },
+    "kind": {
+      "const": "OutputPolicySet"
+    },
+    "metadata": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "spec": {
+      "type": "object",
+      "required": [
+        "defaults",
+        "policies",
+        "profiles"
+      ],
+      "properties": {
+        "defaults": {
+          "type": "object",
+          "required": [
+            "policy"
+          ],
+          "properties": {
+            "policy": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": true
+        },
+        "policies": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "extends": {
+                "type": "string"
+              },
+              "capture": {
+                "type": "object"
+              },
+              "budget": {
+                "type": "object"
+              },
+              "projection": {
+                "type": "object"
+              },
+              "redaction": {
+                "type": "object"
+              },
+              "security": {
+                "type": "object"
+              },
+              "retention": {
+                "type": "object"
+              },
+              "replica": {
+                "type": "object"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "policy"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "policy": {
+                "type": "string"
+              },
+              "match": {
+                "type": "object"
+              },
+              "hintOnly": {
+                "type": "boolean"
+              },
+              "projectionMode": {
+                "type": "string"
+              },
+              "selectors": {
+                "type": "object"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

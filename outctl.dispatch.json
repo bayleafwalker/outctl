@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "repo_id": "f7ed132a-26e3-4fe6-b8e6-a81a58a4938d",
+  "adoption_level": "guidance-only",
+  "routing": {
+    "default_harness": "codex",
+    "default_model_alias": "fast-build",
+    "action_classes": {
+      "plan": {"enabled": true, "model_alias": "frontier-plan"},
+      "build": {"enabled": true, "model_alias": "fast-build", "review_required": true},
+      "review": {"enabled": true, "model_alias": "review-synthesis"},
+      "verify": {"enabled": true, "model_alias": "review-synthesis", "review_required": true},
+      "reconcile": {"enabled": true, "model_alias": "review-synthesis"}
+    }
+  },
+  "skills": {
+    "template_root": "/projects/dev/agentops/templates/dispatch/skills",
+    "selected": ["dispatch-plan", "dispatch-build", "dispatch-review", "code-change-verification", "backlog-refinement", "item-done", "verify-state-protocols", "reconcile-project-contracts"],
+    "overlays": [".agents/overlays/outctl.boundaries.md"]
+  },
+  "scope": {
+    "allowed_path_roots": ["src/", "tests/", "acceptance/", "config/", "docs/", "examples/", "schemas/", "verification/", ".agents/", ".github/", ".gitignore", ".python-version", "AGENTS.md", "IMPLEMENTATION_HANDOFF.md", "README.md", "pyproject.toml", "uv.lock", "outctl.dispatch.json"],
+    "out_of_scope": ["remote command execution or orchestration", "production or cluster mutation", "LLM summarization in the Phase 1 projection path", "raw command output in Git or served authority systems"]
+  },
+  "risk_surfaces": [
+    {"id": "process-semantics", "paths": ["src/outctl/**", "tests/**"], "skills": ["verify-state-protocols", "reconcile-project-contracts"], "default_depth": 2, "required_on_change": true},
+    {"id": "evidence-integrity-and-redaction", "paths": ["src/outctl/**", "schemas/**", "config/**", "acceptance/**"], "skills": ["verify-state-protocols", "reconcile-project-contracts"], "default_depth": 2, "required_on_change": true}
+  ],
+  "hybrid": {
+    "enabled": true,
+    "worker_routes": ["mechanical_bulk"],
+    "commands": {
+      "outctl.unit": "uv run pytest",
+      "outctl.quality": "uv run ruff check . && uv run mypy src",
+      "outctl.package": "uv build",
+      "outctl.suite": "uv run pytest && uv run ruff check . && uv run mypy src && uv build"
+    },
+    "protected_paths": ["schemas/**", "acceptance/**", "config/**", "docs/DESIGN.md", "docs/THREAT-MODEL.md", "outctl.dispatch.json", "AGENTS.md", ".agents/**", ".github/**", "pyproject.toml", "uv.lock"],
+    "worktree_root": "/tmp/outctl-hybrid/worktrees",
+    "max_timeout_seconds": 1800,
+    "max_cost_usd": 3.0,
+    "soft_token_ceiling": 500000,
+    "hard_token_ceiling": 1000000,
+    "notes": ["Only mechanical implementation against coordinator-frozen contracts, fixtures, and falsifying gates is worker-eligible.", "Process semantics, evidence integrity, redaction policy, schema changes, and test-oracle authorship remain coordinator-owned.", "Workers hold no Git publication, sprint, action, audit, provider, cluster, or production authority."]
+  },
+  "verification": {
+    "command_families": ["unit", "security", "process-semantics", "package", "full-suite"],
+    "targeted_first": true,
+    "commands": ["uv run pytest", "uv run ruff check .", "uv run mypy src", "uv build", "python /projects/dev/agentops/templates/dispatch/scripts/validate_verification_artifacts.py --root ."]
+  },
+  "hooks": {"level": "verification", "publishers": ["git", "dispatcher-gate", "github"]}
+}
+

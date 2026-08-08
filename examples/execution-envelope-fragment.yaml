@@ -1,0 +1,29 @@
+execution:
+  schemaVersion: vuoro.execution/v1
+  correlationId: corr-01K1EXAMPLE
+  bindings:
+    projectId: vuoro
+    workspaceId: dispatch-ready-20260802
+    sprintId: sprintctl://sprints/example-123
+    actionId: actionq://actions/example-456/attempts/1
+    auditScope: auditctl://scopes/example-456
+  runner:
+    harness: opencode
+    model: configured-by-actionq
+    hostId: devbox
+  command:
+    argv: ["pytest", "-q"]
+    cwd: /projects/dev/_projects/vuoro-dispatch-ready/outctl
+    shell: false
+    timeoutSeconds: 900
+  output:
+    policyRef:
+      name: failure-diagnostics-v1
+      digest: sha256:REPLACE_WITH_CANONICAL_POLICY_DIGEST
+    profile: tests
+    captureRequired: false
+    backend: local
+    modelBudget:
+      maxEstimatedTokens: 8000
+      maxBytes: 49152
+      maxLines: 900

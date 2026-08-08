@@ -1,0 +1,88 @@
+{
+  "schema_version": "vuoro.outctl.result/v1alpha1",
+  "capture_ref": "outctl://capture/01K1CAPTUREEXAMPLE/manifest/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "capture_id": "01K1CAPTUREEXAMPLE",
+  "bindings": {
+    "project_id": "vuoro",
+    "workspace_id": "dispatch-ready-20260802",
+    "sprint_id": "sprintctl://sprints/example-123",
+    "action_id": "actionq://actions/example-456/attempts/1",
+    "audit_scope": "auditctl://scopes/example-456",
+    "correlation_id": "corr-01K1EXAMPLE"
+  },
+  "invocation": {
+    "argv_display": [
+      "pytest",
+      "-q"
+    ],
+    "shell": false,
+    "cwd": "/projects/dev/_projects/vuoro-dispatch-ready/outctl",
+    "host_id": "devbox",
+    "harness": "opencode",
+    "started_at": "2026-08-03T18:00:00Z",
+    "ended_at": "2026-08-03T18:01:22Z",
+    "duration_ms": 82000
+  },
+  "command": {
+    "started": true,
+    "exit_code": 1,
+    "signal": null,
+    "timed_out": false,
+    "cancelled": false
+  },
+  "capture": {
+    "status": "COMPLETE",
+    "stdout_bytes": 1483021,
+    "stderr_bytes": 44192,
+    "stdout_lines": 28114,
+    "stderr_lines": 612,
+    "event_count": 402,
+    "truncated": false,
+    "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "stdout_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "stderr_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "source": {
+      "availability": "local-only",
+      "host_id": "devbox",
+      "path": "/projects/dev/_artifacts/outctl/captures/01K1CAPTUREEXAMPLE"
+    }
+  },
+  "projection": {
+    "projection_id": "01K1PROJECTIONEXAMPLE",
+    "policy_ref": "failure-diagnostics-v1",
+    "policy_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "mode": "failure",
+    "inline_text": "... bounded example projection ...",
+    "bytes": 12720,
+    "lines": 216,
+    "estimated_tokens": 3180,
+    "token_estimator": "utf8-bytes-div-4-v1",
+    "lossy": true,
+    "normalized": true,
+    "deduplicated": true,
+    "redacted": false,
+    "omitted_stdout_lines": 27898,
+    "omitted_stderr_lines": 612,
+    "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "retrieval": {
+    "available": true,
+    "capabilities": [
+      "inspect",
+      "slice",
+      "tail",
+      "search",
+      "verify"
+    ],
+    "examples": [
+      "outctl search <capture-ref> --regex 'FAILED|ERROR|Traceback' --before 10 --after 30",
+      "outctl slice <capture-ref> --stream stdout --lines 17320:17520"
+    ]
+  },
+  "replicas": [],
+  "metrics": {
+    "raw_estimated_tokens": 381803,
+    "exposed_estimated_tokens": 3180,
+    "estimated_tokens_avoided": 378623
+  }
+}
