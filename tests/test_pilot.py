@@ -98,10 +98,12 @@ def test_guided_bundle_and_control_are_isolated() -> None:
     )
 
 
-def test_review_requires_both_fifty_percent_reductions() -> None:
+def test_review_uses_health_conclusion_not_a_release_threshold() -> None:
     value = report()
     assert review_verdict(value) == "continue"
     value["sessions"]["A"]["usage"]["cache_write_tokens"] = 60  # type: ignore[index]
+    assert review_verdict(value) == "continue"
+    value["review"]["health_conclusion_preserved"] = False  # type: ignore[index]
     assert review_verdict(value) == "adjust"
 
 

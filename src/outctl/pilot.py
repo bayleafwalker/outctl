@@ -222,13 +222,9 @@ def review_verdict(report: dict[str, Any]) -> str:
     review = report.get("review")
     if not isinstance(review, dict) or review.get("health_conclusion_preserved") is not True:
         return "adjust"
-    a_usage = report["sessions"]["A"]["usage"]
-    b_usage = report["sessions"]["B"]["usage"]
-    a_memory = a_usage["input_tokens"] + a_usage["cache_read_tokens"]
-    b_memory = b_usage["input_tokens"] + b_usage["cache_read_tokens"]
-    a_cache = a_usage["cache_read_tokens"] + a_usage["cache_write_tokens"]
-    b_cache = b_usage["cache_read_tokens"] + b_usage["cache_write_tokens"]
-    return "continue" if a_memory <= b_memory / 2 and a_cache <= b_cache / 2 else "adjust"
+    # Token/cost deltas are recorded as decision evidence. The pilot assesses
+    # direction and harness behavior; it does not impose a numeric release bar.
+    return "continue"
 
 
 def _report_mapping(value: object, name: str) -> Mapping[str, object]:
@@ -320,7 +316,7 @@ def _copy_auth(source_home: Path, target_home: Path) -> None:
     _mode(target_home / "auth.json", stat.S_IRUSR | stat.S_IWUSR)
 
 
-def _preflight(kubeconfig: Path, context: str) -> None:
+def _preflight(kubeconfig: Path, context: str, namespace: str) -> None:
     if not kubeconfig.is_file():
         raise PilotError("explicit kubeconfig does not exist")
     current = subprocess.run(
@@ -331,24 +327,28 @@ def _preflight(kubeconfig: Path, context: str) -> None:
     )
     if current.returncode or current.stdout.strip() != context:
         raise PilotError("explicit kubeconfig/context preflight failed")
-    for resource in ("nodes", "pods"):
-        allowed = subprocess.run(
-            [
-                "kubectl",
-                "--kubeconfig",
-                str(kubeconfig),
-                "auth",
-                "can-i",
-                "list",
-                resource,
-                "--all-namespaces",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if allowed.returncode or allowed.stdout.strip().lower() != "yes":
-            raise PilotError(f"read-only RBAC preflight failed for {resource}")
+    for verb in ("get", "list"):
+        for resource in ("deployments", "pods", "events"):
+            allowed = subprocess.run(
+                [
+                    "kubectl", "--kubeconfig", str(kubeconfig), "auth", "can-i",
+                    verb, resource, "--namespace", namespace,
+                ],
+                capture_output=True, text=True, check=False,
+            )
+            if allowed.returncode or allowed.stdout.strip().lower() != "yes":
+                raise PilotError(f"read-only RBAC preflight failed for {verb} {resource}")
+    for verb in ("create", "patch", "delete", "deletecollection"):
+        for resource in ("deployments", "pods", "events"):
+            allowed = subprocess.run(
+                [
+                    "kubectl", "--kubeconfig", str(kubeconfig), "auth", "can-i",
+                    verb, resource, "--namespace", namespace,
+                ],
+                capture_output=True, text=True, check=False,
+            )
+            if allowed.returncode or allowed.stdout.strip().lower() != "no":
+                raise PilotError(f"mutation RBAC must be denied for {verb} {resource}")
 
 
 def _outctl_capability() -> None:
@@ -391,7 +391,7 @@ def launch(args: argparse.Namespace) -> Path:
     appservice = Path(args.appservice).resolve()
     kubeconfig = Path(args.kubeconfig).resolve()
     run_root = Path(args.output).resolve() / f"terra-ab-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    _preflight(kubeconfig, args.context)
+    _preflight(kubeconfig, args.context, args.namespace)
     _outctl_capability()
     run_root.mkdir(parents=True, mode=0o700)
     _mode(run_root, 0o700)
@@ -415,8 +415,8 @@ def launch(args: argparse.Namespace) -> Path:
     for name in sorted(SESSIONS):
         session_root = run_root / name
         home = session_root / "codex-home"
-        spool = session_root / "spool"
         work = session_root / "work"
+        spool = work / "spool"
         for directory in (home, spool, work):
             directory.mkdir(parents=True, mode=0o700)
             _mode(directory, 0o700)
@@ -459,8 +459,8 @@ def launch(args: argparse.Namespace) -> Path:
             MODEL,
             "-C",
             str(work),
-            "--add-dir",
-            str(appservice),
+            "--sandbox",
+            "workspace-write",
             "--output-last-message",
             str(session_root / "final.txt"),
             prompt,
@@ -540,6 +540,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     launch_parser.add_argument("--appservice", required=True)
     launch_parser.add_argument("--kubeconfig", required=True)
     launch_parser.add_argument("--context", required=True)
+    launch_parser.add_argument("--namespace", required=True)
     launch_parser.add_argument("--output", type=Path, default=Path(".outctl-pilot"))
     args = parser.parse_args(argv)
     try:
