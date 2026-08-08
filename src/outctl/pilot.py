@@ -14,6 +14,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
@@ -573,6 +574,24 @@ def _outctl_capability() -> None:
         )
 
 
+def _app_server_token_capability() -> str:
+    version = subprocess.run(["codex", "--version"], capture_output=True, text=True, check=False)
+    if version.returncode:
+        raise PilotError("unable to determine Codex version")
+    with tempfile.TemporaryDirectory(prefix="outctl-app-server-schema-") as directory:
+        generated = subprocess.run(
+            ["codex", "app-server", "generate-json-schema", "--out", directory],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        schema = Path(directory) / "codex_app_server_protocol.v2.schemas.json"
+        if generated.returncode:
+            raise PilotError("unable to generate app-server schema")
+        validate_app_server_schema(schema)
+    return version.stdout.strip()
+
+
 def _metadata_event(line: str) -> str:
     """Keep only usage/session metadata; never retain model/tool content."""
     try:
@@ -660,12 +679,14 @@ def launch(args: argparse.Namespace) -> Path:
     run_root = Path(args.output).resolve() / f"terra-ab-{int(time.time())}-{uuid.uuid4().hex[:8]}"
     _preflight(kubeconfig, args.context, args.namespace)
     _outctl_capability()
+    codex_version = _app_server_token_capability()
     run_root.mkdir(parents=True, mode=0o700)
     _mode(run_root, 0o700)
     metadata = {
         "model": MODEL,
         "outctl_commit": _repo_commit(root),
         "appservice_commit": _repo_commit(appservice),
+        "codex_version": codex_version,
     }
     (run_root / "pins.json").write_text(
         json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8"
