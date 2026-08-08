@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import socket
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -118,6 +119,39 @@ def build_parser() -> argparse.ArgumentParser:
 def _json(value: Mapping[str, Any]) -> None:
     """Emit ASCII JSON so metadata cannot control the caller's terminal."""
     print(json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+
+
+def _record_retrieval(spool_root: Path, capture_id: str, operation: str) -> None:
+    """Append raw-free local evidence that a retrieval read an existing capture."""
+    spool_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(spool_root, 0o700)
+    event_path = spool_root / "retrieval-events.jsonl"
+    descriptor = os.open(event_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(
+            descriptor,
+            (
+                json.dumps({"capture_id": capture_id, "operation": operation}, sort_keys=True)
+                + "\n"
+            ).encode(),
+        )
+    finally:
+        os.close(descriptor)
+
+
+def _record_command(spool_root: Path, capture_id: str, executable: str) -> None:
+    event_path = spool_root / "command-events.jsonl"
+    descriptor = os.open(event_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(
+            descriptor,
+            (
+                json.dumps({"capture_id": capture_id, "executable": executable}, sort_keys=True)
+                + "\n"
+            ).encode(),
+        )
+    finally:
+        os.close(descriptor)
 
 
 def _metadata_text(value: object) -> str | None:
@@ -249,9 +283,7 @@ def _gc_candidates(root: Path) -> list[str]:
     captures = root / "captures"
     try:
         return sorted(
-            path.name
-            for path in captures.iterdir()
-            if path.is_dir() and not path.is_symlink()
+            path.name for path in captures.iterdir() if path.is_dir() and not path.is_symlink()
         )
     except OSError:
         return []
@@ -309,6 +341,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "run":
             payload, exit_code = _run_payload(args)
+            receipt = payload.get("receipt")
+            if isinstance(receipt, dict) and isinstance(receipt.get("capture_id"), str):
+                argv = list(args.argv)
+                if argv[:1] == ["--"]:
+                    argv.pop(0)
+                if argv:
+                    _record_command(args.spool_root, receipt["capture_id"], Path(argv[0]).name)
             _json(payload)
             return exit_code
         if args.command == "inspect":
@@ -324,6 +363,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.end,
                 max_bytes=args.max_bytes,
             )
+            if sliced.status is RetrievalStatus.AVAILABLE:
+                _record_retrieval(args.spool_root, args.capture_id, "slice")
             _json(_slice_payload(sliced, args.max_bytes))
             return _status_code(sliced.status)
         if args.command == "tail":
@@ -334,6 +375,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lines=args.lines,
                 max_bytes=args.max_bytes,
             )
+            if tailed.status is RetrievalStatus.AVAILABLE:
+                _record_retrieval(args.spool_root, args.capture_id, "tail")
             _json(_tail_payload(tailed, args.max_bytes))
             return _status_code(tailed.status)
         if args.command == "search":
@@ -346,6 +389,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 context_bytes=args.context_bytes,
                 max_matches=args.max_matches,
             )
+            if searched.status is RetrievalStatus.AVAILABLE:
+                _record_retrieval(args.spool_root, args.capture_id, "search")
             _json(_search_payload(searched))
             return _status_code(searched.status)
         if args.command == "verify":

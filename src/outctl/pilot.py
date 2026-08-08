@@ -599,6 +599,60 @@ def _copy_metadata(source: Iterable[str], destination: Path) -> None:
             output.write(_metadata_event(line))
 
 
+def _read_event_log(path: Path) -> list[dict[str, object]]:
+    try:
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PilotError("pilot evidence event log is unavailable or malformed") from exc
+
+
+def _guided_evidence(spool: Path) -> tuple[list[dict[str, object]], dict[str, object]]:
+    commands = _read_event_log(spool / "command-events.jsonl")
+    retrievals = _read_event_log(spool / "retrieval-events.jsonl")
+    if len(commands) != 4 or any(event.get("executable") != "kubectl" for event in commands):
+        raise PilotError("guided evidence requires the four captured kubectl corpus commands")
+    capture_ids = [event.get("capture_id") for event in commands]
+    if not all(isinstance(capture_id, str) for capture_id in capture_ids):
+        raise PilotError("guided command evidence lacks capture ids")
+    if len(retrievals) != 1 or retrievals[0].get("capture_id") not in capture_ids:
+        raise PilotError("guided evidence requires exactly one retrieval of a corpus capture")
+    capture_id = retrievals[0]["capture_id"]
+    assert isinstance(capture_id, str)
+    manifest = spool / "captures" / capture_id / "manifest.json"
+    try:
+        capture = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PilotError("guided capture manifest is unavailable") from exc
+    if not isinstance(capture, dict):
+        raise PilotError("guided capture manifest is invalid")
+    streams = capture.get("streams")
+    stdout = streams.get("stdout") if isinstance(streams, dict) else None
+    stderr = streams.get("stderr") if isinstance(streams, dict) else None
+    raw_bytes = sum(entry.get("bytes", 0) for entry in (stdout, stderr) if isinstance(entry, dict))
+    return (
+        [
+            {
+                "argv": ["kubectl"],
+                "command_status": capture.get("command", {}).get("exit_code")
+                if isinstance(capture.get("command"), dict)
+                else None,
+                "capture_status": capture.get("capture_status"),
+                "raw_bytes": raw_bytes,
+            }
+            for command in commands
+            for capture_id in [command["capture_id"]]
+            if isinstance(capture_id, str)
+            for capture in [
+                json.loads(
+                    (spool / "captures" / capture_id / "manifest.json").read_text(encoding="utf-8")
+                )
+            ]
+            if isinstance(capture, dict)
+        ],
+        {"count": 1, "from_existing_capture": True, "reran_kubectl": False},
+    )
+
+
 def launch(args: argparse.Namespace) -> Path:
     root = Path(__file__).parents[2]
     appservice = Path(args.appservice).resolve()
@@ -675,6 +729,7 @@ def launch(args: argparse.Namespace) -> Path:
         worker.join()
     if failures:
         raise PilotError(f"app-server pilot session failed: {failures[0]}")
+    guided_commands, guided_retrieval = _guided_evidence(sessions["A"][2])
     report = {
         "schema_version": 1,
         "pins": metadata,
@@ -683,10 +738,8 @@ def launch(args: argparse.Namespace) -> Path:
                 "session_id": data[0],
                 "usage": data[1].report_fields(),
                 "wall_seconds": 0.0,
-                "commands": [],
-                "retrieval": {"count": 0}
-                if name == "B"
-                else {"count": 1, "from_existing_capture": True, "reran_kubectl": False},
+                "commands": [] if name == "B" else guided_commands,
+                "retrieval": {"count": 0} if name == "B" else guided_retrieval,
             }
             for name, data in telemetry.items()
         },
