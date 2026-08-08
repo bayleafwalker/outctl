@@ -32,6 +32,8 @@ class StreamWriter:
         self.retained_bytes += len(chunk)
 
     def close(self) -> None:
+        self._file.flush()
+        os.fsync(self._file.fileno())
         self._file.close()
 
     @property

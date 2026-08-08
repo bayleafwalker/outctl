@@ -35,7 +35,7 @@ class CaptureResult:
     capture_id: str
     path: Path
     command: CommandResult
-    capture_status: Literal["COMPLETE", "TRUNCATED"]
+    capture_status: Literal["COMPLETE", "TRUNCATED", "CAPTURE_FAILED"]
     stdout_bytes: int
     stderr_bytes: int
     stdout_sha256: str
@@ -67,6 +67,7 @@ async def capture_command(
     max_bytes: int,
     timeout: float | None = None,
     cwd: Path | None = None,
+    required_capture: bool = False,
 ) -> CaptureResult:
     """Run ``argv`` without a shell and atomically finalize a bounded spool.
 
@@ -94,11 +95,18 @@ async def capture_command(
     event_hash = hashlib.sha256()
     captured = 0
     truncated = False
+    capture_failed = False
     sequence = 0
 
     def record(stream: str, offset: int, length: int) -> None:
         nonlocal sequence
-        event = {"seq": sequence, "stream": stream, "offset": offset, "length": length}
+        event = {
+            "seq": sequence,
+            "stream": stream,
+            "monotonic_ns": time.monotonic_ns(),
+            "offset": offset,
+            "length": length,
+        }
         line = json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n"
         event_file.write(line)
         event_hash.update(line.encode("utf-8"))
@@ -118,8 +126,20 @@ async def capture_command(
         truncated = truncated or len(retained) != len(chunk)
 
     async def drain(reader: asyncio.StreamReader, writer: StreamWriter, stream: str) -> None:
+        nonlocal capture_failed
+        writable = True
         while chunk := await reader.read(_CHUNK_SIZE):
-            retain(writer, stream, chunk)
+            if not writable:
+                continue
+            try:
+                retain(writer, stream, chunk)
+            except OSError:
+                # Storage failure never permits pipe backpressure. Required
+                # capture additionally terminates the isolated child group.
+                writable = False
+                capture_failed = True
+                if required_capture:
+                    _kill_group(process)
 
     process = await asyncio.create_subprocess_exec(
         *command,
@@ -154,6 +174,8 @@ async def capture_command(
         await asyncio.gather(*drainers)
         stdout.close()
         stderr.close()
+        event_file.flush()
+        os.fsync(event_file.fileno())
         event_file.close()
 
     returncode = process.returncode
@@ -165,7 +187,11 @@ async def capture_command(
         cancelled=cancelled,
         signals_sent=signals_sent,
     )
-    capture_status: Literal["COMPLETE", "TRUNCATED"] = "TRUNCATED" if truncated else "COMPLETE"
+    capture_status: Literal["COMPLETE", "TRUNCATED", "CAPTURE_FAILED"]
+    if capture_failed:
+        capture_status = "CAPTURE_FAILED"
+    else:
+        capture_status = "TRUNCATED" if truncated else "COMPLETE"
     write_json(
         partial / "manifest.json",
         {
@@ -182,6 +208,15 @@ async def capture_command(
     )
     final = captures_root / capture_id
     os.replace(partial, final)
+    try:
+        directory_fd = os.open(captures_root, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        directory_fd = None
+    if directory_fd is not None:
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     return CaptureResult(
         capture_id=capture_id,
         path=final,

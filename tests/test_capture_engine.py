@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from outctl.capture import capture_command, recover_partials
+from outctl.capture.storage import StreamWriter
 
 
 def run(argv: list[str], root: Path, **kwargs: object):
@@ -84,6 +85,41 @@ def test_timeout_kills_the_process_group_and_preserves_result_status(tmp_path: P
     assert result.command.timed_out is True
     assert result.command.signals_sent == (9,)
     assert result.capture_status == "COMPLETE"
+
+
+def test_storage_failure_fails_open_without_stopping_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_write = StreamWriter.write
+
+    def fail_stdout(self: StreamWriter, chunk: bytes) -> None:
+        if self.path.name == "stdout.raw":
+            raise OSError("injected full disk")
+        original_write(self, chunk)
+
+    monkeypatch.setattr(StreamWriter, "write", fail_stdout)
+    result = run([sys.executable, "-c", "print('still-runs')"], tmp_path, max_bytes=1024)
+    assert result.command.exit_code == 0
+    assert result.capture_status == "CAPTURE_FAILED"
+
+
+def test_required_capture_failure_stops_child_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_write(self: StreamWriter, chunk: bytes) -> None:
+        raise OSError("injected full disk")
+
+    monkeypatch.setattr(StreamWriter, "write", fail_write)
+    result = run(
+        [sys.executable, "-c", "import sys, time; print('started', flush=True); time.sleep(60)"],
+        tmp_path,
+        max_bytes=1024,
+        required_capture=True,
+        timeout=5,
+    )
+    assert result.command.signal == 9
+    assert result.command.timed_out is False
+    assert result.capture_status == "CAPTURE_FAILED"
 
 
 def test_recovery_marks_partial_without_execution(tmp_path: Path) -> None:
