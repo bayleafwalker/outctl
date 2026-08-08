@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import hashlib
 
-from outctl.projection import OMISSION_MARKER, ProjectionLimits, project_bytes
+from outctl.fixtures import FixtureGenerator
+from outctl.projection import (
+    LINE_CLIPPED_MARKER,
+    OMISSION_MARKER,
+    ProjectionLimits,
+    project_bytes,
+)
 
 
 def test_projection_is_deterministic_and_chunk_independent() -> None:
@@ -27,7 +33,7 @@ def test_ansi_and_controls_are_neutralized() -> None:
     result = project_bytes([b"safe\x1b]0;title\x07\x1b[2J\x00\r\tend\n"])
     assert "\x1b" not in result.text
     assert "\x00" not in result.text
-    assert "\\x1b]0;title\\x07\\x1b[2J\\x00\\r\\tend" in result.text
+    assert "safe\\x1b]0;title\\x07\\x1b[2J\\x00\n\\tend" in result.text
     assert result.lossy is True
 
 
@@ -72,4 +78,44 @@ def test_limits_object_enforces_all_caps() -> None:
     assert result.bytes <= 64
     assert result.lines <= 3
     assert result.estimated_tokens <= 16
-    assert result.gap_marker is not None
+
+
+def test_acceptance_b01_collapses_10000_repeated_lines_with_exact_range() -> None:
+    fixture = FixtureGenerator(seed=1).repeated_line(count=10_000)
+
+    result = project_bytes(fixture.stdout)
+
+    assert result.text == "repeated line [line repeated 10000 times; raw lines 1-10000]\n"
+    assert result.lossy is True
+    assert result.gap_marker is None
+
+
+def test_acceptance_b02_collapses_progress_and_keeps_final_state() -> None:
+    fixture = FixtureGenerator(seed=1).carriage_return_progress(count=10_000)
+
+    result = project_bytes(fixture.stdout)
+    chunked = project_bytes(
+        fixture.stdout[index : index + 137]
+        for index in range(0, len(fixture.stdout), 137)
+    )
+
+    assert chunked == result
+    assert result.text == (
+        "progress 1/10000\n"
+        "[progress updates 2-9999 collapsed; raw updates 2-9999]\n"
+        "progress 10000/10000\n"
+        "final: success\n"
+    )
+    assert result.lossy is True
+
+
+def test_acceptance_b03_clips_a_giant_line_with_explicit_markers() -> None:
+    fixture = FixtureGenerator(seed=1).giant_line()
+
+    result = project_bytes(fixture.stdout, max_bytes=256)
+
+    assert result.bytes <= 256
+    assert result.lines == 2
+    assert LINE_CLIPPED_MARKER in result.text
+    assert result.text.endswith(OMISSION_MARKER)
+    assert result.gap_marker == OMISSION_MARKER
