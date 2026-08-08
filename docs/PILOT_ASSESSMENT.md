@@ -27,13 +27,14 @@ integration.
 ## Qualitative assessment
 
 The local evidence establishes that `outctl` can bound and recover command
-evidence at its adapter boundary. It does **not** establish how much Codex or
-Claude already manages large command context internally, because neither
-harness's native command-tool boundary is intercepted by the current library
-adapter. The expected first-pilot outcome is therefore directional: compare
+evidence at its adapter boundary. The opt-in `outctl run -- <argv>` CLI wrapper
+now makes that boundary usable from a Codex or Claude command session. It does
+**not** establish how much either harness already manages large command context
+internally, because neither harness's native command-tool boundary is
+intercepted. The expected first-pilot outcome is therefore directional: compare
 what the harness exposes in a baseline appservice health-check workflow with
-what it exposes through an opt-in outctl boundary, then judge whether the
-additional bounded projection/retrieval path is materially useful.
+what it exposes through the opt-in wrapper, then judge whether the additional
+bounded projection/retrieval path is materially useful.
 
 ## Environment observation
 
