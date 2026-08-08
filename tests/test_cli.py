@@ -154,3 +154,33 @@ def test_cli_run_preserves_wrapped_command_exit_status(
         "signal": None,
         "timed_out": False,
     }
+
+
+def test_cli_validates_raw_free_pilot_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = {
+        "pilot": {
+            "harness": "claude",
+            "command_class": "appservice-health-check",
+            "policy_digest": "sha256:" + "a" * 64,
+        },
+        "baseline": {"exposed_tokens": 300},
+        "enforce": {
+            "raw_tokens": 700,
+            "exposed_tokens": 200,
+            "retrieved_tokens": 20,
+            "retrieval_count": 1,
+            "wall_time_ms": 900,
+            "wrapper_overhead_ms": 80,
+        },
+        "assessment": {
+            "harness_native_context_management": "visible truncation",
+            "outctl_increment": "bounded range retrieval",
+            "recommendation": "continue",
+        },
+    }
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report))
+    assert main(["pilot-validate", str(path)]) == 0
+    assert _payload(capsys)["status"] == "VALID"

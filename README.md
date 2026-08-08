@@ -71,8 +71,10 @@ uv run mypy src
 uv build
 ```
 
-The checked-in CLI is intentionally only a package/version scaffold. Runtime
-commands land in the gated passes described in `docs/IMPLEMENTATION_PLAN.md`.
+The CLI supports an opt-in direct-argv wrapper via `outctl run -- <argv>`,
+bounded retrieval commands, and raw-free pilot-report validation. See
+[`docs/WORKSTATION_PILOT_RUNBOOK.md`](docs/WORKSTATION_PILOT_RUNBOOK.md) for
+the Codex/Claude appservice pilot and review procedure.
 
 ## License status
 

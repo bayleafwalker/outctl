@@ -13,6 +13,7 @@ from typing import Any
 from outctl import __version__
 from outctl.adapter import AdapterIdentity, AdapterMode, AdapterRequest, run_adapter
 from outctl.capture import recover_partials
+from outctl.pilot import PilotReportError, validate_pilot_report
 from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
 from outctl.retrieval import (
     InspectionResult,
@@ -98,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
     gc = commands.add_parser("gc", help="list garbage-collection candidates")
     _spool_argument(gc)
     gc.add_argument("--dry-run", action="store_true", required=True)
+
+    pilot_validate = commands.add_parser(
+        "pilot-validate", help="validate a raw-free qualitative pilot report"
+    )
+    pilot_validate.add_argument("report", type=Path)
     return parser
 
 
@@ -363,7 +369,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             return 0
-    except (OSError, ValueError) as error:
+        if args.command == "pilot-validate":
+            with args.report.open(encoding="utf-8") as report_file:
+                report = json.load(report_file)
+            if not isinstance(report, dict):
+                raise ValueError("pilot report must be a JSON object")
+            summary = validate_pilot_report(report)
+            _json(
+                {
+                    "status": "VALID",
+                    "harness": summary.harness,
+                    "command_class": summary.command_class,
+                    "policy_digest": summary.policy_digest,
+                    "baseline_exposed_tokens": summary.baseline_exposed_tokens,
+                    "enforce_exposed_tokens": summary.enforce_exposed_tokens,
+                    "retrieval_count": summary.retrieval_count,
+                }
+            )
+            return 0
+    except (OSError, PilotReportError, ValueError) as error:
         _json({"status": "ERROR", "detail": _metadata_text(str(error))})
         return 2
     raise AssertionError(f"unknown command {args.command!r}")
