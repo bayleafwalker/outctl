@@ -42,6 +42,36 @@ The local host has `codex`, `claude`, and `kubectl` executables available, but
 no active Kubernetes context. No production or cluster access was attempted.
 Consequently this record does not claim an appservice `kubectl` pilot result.
 
+## Validated workstation pilot
+
+An authorized paired Codex appservice health-check pilot completed on
+`acb81f69c28f27cdde8bf1ed9cc074b290bcb74f` using policy digest
+`sha256:e375fe09b170e70b4a9508a91322b7e2384a8389559ebe429dfb0520104cc773`.
+Its metadata-only report validated locally and has SHA-256
+`b3c9908e0c9485019c5cba751b54220427a7801a7410d8a5bbba7ce54250a942`.
+
+| Measure | Baseline Codex | Opt-in outctl enforce |
+|---|---:|---:|
+| Exposed token estimate | 100,030 | 15,496 |
+| Raw token estimate | n/a | 561,482 |
+| Retrieved token estimate | n/a | 44 |
+| Retrieval count | n/a | 1 |
+| Wall time | 922 ms | 2,246 ms |
+| Wrapper overhead | n/a | 1,324 ms |
+
+The enforced projection reduced exposure by approximately 97.2% from captured
+raw output and approximately 84.5% relative to the native exposed baseline.
+One omitted marker was retrieved from the existing capture without a Kubernetes
+rerun. Command and capture both completed successfully; digest verification
+passed. The review decision was **continue**: native harness truncation omitted
+middle context without a stable retrieval reference, while outctl made the loss
+explicit and recovered evidence without re-execution.
+
+The raw Kubernetes capture remains workstation-local. Only the report and a
+metadata handoff were replicated to devbox as verified semi-ephemeral local
+evidence; neither raw bytes nor session output were added to Git or a served
+authority.
+
 ## Required next evidence
 
 Run the paired baseline and opt-in pilot in an authorized environment with an
