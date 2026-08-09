@@ -35,17 +35,11 @@ def _safe_envelope(stdout: bytes) -> tuple[str, int | None, str]:
         raise ValueError("outctl response must be an object")
     receipt = value.get("receipt")
     envelope = value.get("envelope")
-    capture_id = (
-        receipt.get("capture_id")
-        if isinstance(receipt, dict)
-        else value.get("capture_id")
-    )
+    capture_id = receipt.get("capture_id") if isinstance(receipt, dict) else value.get("capture_id")
     command = value.get("command")
     exit_code = command.get("exit_code") if isinstance(command, dict) else None
     projection = (
-        envelope.get("projection")
-        if isinstance(envelope, dict)
-        else value.get("projection")
+        envelope.get("projection") if isinstance(envelope, dict) else value.get("projection")
     )
     text = (
         projection.get("inline_text", projection.get("text"))
@@ -152,6 +146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("first argument must be run, tail, or search")
     action = values.pop(0)
     parser.add_argument("--outctl-command-json", required=True)
+    parser.add_argument("--kubectl-command-json")
     parser.add_argument("--spool-root", required=True)
     parser.add_argument("--policy-ref")
     parser.add_argument("--policy-digest")
@@ -170,6 +165,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.action = action
     try:
         outctl = _outctl_command(args.outctl_command_json)
+        kubectl_prefix = (
+            _outctl_command(args.kubectl_command_json)
+            if args.kubectl_command_json is not None
+            else None
+        )
     except (ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
     if args.action == "run":
@@ -177,31 +177,67 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("run requires direct argv after --")
         if not args.policy_ref or not args.policy_digest:
             parser.error("run requires --policy-ref and --policy-digest")
-        command = [*outctl, "run", "--mode", "enforce", "--spool-root", args.spool_root,
-                   "--policy-ref", args.policy_ref, "--policy-digest", args.policy_digest,
-                   "--max-projection-bytes", "4096", "--max-projection-lines", "120",
-                   "--max-projection-tokens", "1024", "--", *command]
+        if command[0] == "kubectl" and kubectl_prefix is not None:
+            command = [*kubectl_prefix, *command[1:]]
+        command = [
+            *outctl,
+            "run",
+            "--mode",
+            "enforce",
+            "--spool-root",
+            args.spool_root,
+            "--policy-ref",
+            args.policy_ref,
+            "--policy-digest",
+            args.policy_digest,
+            "--max-projection-bytes",
+            "4096",
+            "--max-projection-lines",
+            "120",
+            "--max-projection-tokens",
+            "1024",
+            "--",
+            *command,
+        ]
     elif args.action == "tail":
         if not args.capture_id:
             parser.error("tail requires a capture identifier")
-        command = [*outctl, "tail", "--spool-root", args.spool_root, args.capture_id,
-                   "stdout", "--lines", str(args.lines), "--max-bytes", "2048"]
+        command = [
+            *outctl,
+            "tail",
+            "--spool-root",
+            args.spool_root,
+            args.capture_id,
+            "stdout",
+            "--lines",
+            str(args.lines),
+            "--max-bytes",
+            "2048",
+        ]
     else:
         if not args.capture_id or not args.pattern:
             parser.error("search requires a capture identifier and literal pattern")
         if not 1 <= args.max_matches <= 3:
             parser.error("--max-matches must be between 1 and 3")
-        command = [*outctl, "search", "--spool-root", args.spool_root, args.capture_id,
-                   "stdout", args.pattern, "--context-bytes", "160", "--max-matches",
-                   str(args.max_matches)]
+        command = [
+            *outctl,
+            "search",
+            "--spool-root",
+            args.spool_root,
+            args.capture_id,
+            "stdout",
+            args.pattern,
+            "--context-bytes",
+            "160",
+            "--max-matches",
+            str(args.max_matches),
+        ]
     if args.action == "search":
         completed = subprocess.run(
             command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
         )
         try:
-            capture_id, text = _safe_search(
-                completed.stdout, exact_redactions=_search_redactions()
-            )
+            capture_id, text = _safe_search(completed.stdout, exact_redactions=_search_redactions())
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             print(
                 "outctl router could not read a bounded search response: "

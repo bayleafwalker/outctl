@@ -354,40 +354,24 @@ _KUBECTL_IDENTITY_FLAGS = (
 )
 
 
-def _install_pinned_kubectl(
-    target: Path, *, kubectl_bin: Path, kubeconfig: Path, context: str
+def _install_isolated_shell_home(
+    target: Path,
+    *,
+    kubectl_bin: Path,
+    kubeconfig: Path,
+    context: str,
+    pinned_path: str,
 ) -> Path:
-    """Install one immutable identity-pinning kubectl shim shared by both arms."""
-
-    target.mkdir(parents=True, exist_ok=True)
-    helper = target / "kubectl"
-    helper.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, sys\n"
-        f"blocked = {repr(_KUBECTL_IDENTITY_FLAGS)}\n"
-        "for index, value in enumerate(sys.argv[1:]):\n"
-        "    if value in blocked or any(value.startswith(flag + '=') for flag in blocked):\n"
-        "        print('pinned kubectl: identity override flags are not permitted', "
-        "file=sys.stderr)\n"
-        "        raise SystemExit(64)\n"
-        f"binary = {str(kubectl_bin)!r}\n"
-        f"argv = [binary, '--kubeconfig', {str(kubeconfig)!r}, "
-        f"'--context', {context!r}, *sys.argv[1:]]\n"
-        "os.execv(binary, argv)\n",
-        encoding="utf-8",
-    )
-    helper.chmod(0o555)
-    target.chmod(0o555)
-    return helper
-
-
-def _install_isolated_shell_home(target: Path, *, kubeconfig: Path, pinned_path: str) -> Path:
     """Create login/non-login startup files that reassert the scoped identity."""
 
     target.mkdir(parents=True, exist_ok=True)
     body = (
         f"export KUBECONFIG={shlex.quote(str(kubeconfig))}\n"
         f"export PATH={shlex.quote(pinned_path)}\n"
+        "kubectl() { command "
+        f"{shlex.quote(str(kubectl_bin))} --kubeconfig "
+        f'{shlex.quote(str(kubeconfig))} --context {shlex.quote(context)} "$@"; }}\n'
+        "export -f kubectl\n"
     )
     profile = target / ".bash_profile"
     shell_env = target / "shell-env.sh"
@@ -400,7 +384,11 @@ def _install_isolated_shell_home(target: Path, *, kubeconfig: Path, pinned_path:
 
 
 def _probe_arm_cluster_identity(
-    *, env: Mapping[str, str], expected_context: str, expected_server: str
+    *,
+    env: Mapping[str, str],
+    expected_context: str,
+    expected_server: str,
+    kubectl_bin: Path,
 ) -> dict[str, Any]:
     """Fingerprint the actual login-shell kubectl identity without retaining values."""
 
@@ -418,13 +406,16 @@ def _probe_arm_cluster_identity(
 
     context = probe("kubectl config current-context")
     server = probe("kubectl config view --minify -o jsonpath={.clusters[0].cluster.server}")
-    resolved = Path(probe("command -v kubectl")).resolve()
+    resolution = probe("type -t kubectl")
+    if resolution != "function":
+        raise ExperimentError("arm kubectl identity pin is not active in the login shell")
     fingerprint = _sha256_text(context + "\0" + server)
     return {
         "context_sha256": _sha256_text(context),
         "api_server_sha256": _sha256_text(server),
         "identity_sha256": fingerprint,
-        "kubectl_executable_sha256": _sha256_file(resolved),
+        "kubectl_executable_sha256": _sha256_file(kubectl_bin),
+        "kubectl_resolution_sha256": _sha256_text(resolution),
         "matches_launcher_preflight": context == expected_context and server == expected_server,
     }
 
@@ -736,6 +727,7 @@ def _router_prefixes(
     kubeconfig: Path | None,
     router: Path,
     launcher: Sequence[str],
+    kubectl_prefix: Sequence[str] | None = None,
 ) -> tuple[str, str]:
     """Build the exact treatment route, including its sandbox-local uv state."""
 
@@ -748,7 +740,14 @@ def _router_prefixes(
     )
     router_common = (
         f"--outctl-command-json {shlex.quote(json.dumps(launcher, separators=(',', ':')))} "
-        ' --spool-root "$OUTCTL_AB_SPOOL_ROOT"'
+        + (
+            "--kubectl-command-json "
+            + shlex.quote(json.dumps(kubectl_prefix, separators=(",", ":")))
+            + " "
+            if kubectl_prefix is not None
+            else ""
+        )
+        + ' --spool-root "$OUTCTL_AB_SPOOL_ROOT"'
     )
     return router_exec, router_common
 
@@ -2347,7 +2346,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     # user-local state that is unrelated to this fixed corpus.
     router = Path(__file__).with_name("outctl_kubectl_router.py").resolve()
     router_exec, router_common = _router_prefixes(
-        kubeconfig=kubeconfig, router=router, launcher=launcher
+        kubeconfig=kubeconfig,
+        router=router,
+        launcher=launcher,
+        kubectl_prefix=(
+            (str(kubectl_bin), "--kubeconfig", str(kubeconfig), "--context", args.context)
+            if kubeconfig is not None and args.context is not None
+            else None
+        ),
     )
     retrieval_prefix = f"{router_exec} tail {router_common}"
     wrapper = (
@@ -2445,23 +2451,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             arm_dir_a = pair_dir / "A"
             arm_dir_b = pair_dir / "B"
             spool_a = pair_dir / "outctl-spool-A"
-            common_tooling = pair_dir / "tooling-common"
             shell_home_a = pair_dir / "shell-home-A"
             shell_home_b = pair_dir / "shell-home-B"
             for path in (arm_dir_a, arm_dir_b, spool_a, spool_a / "uv-cache", spool_a / "tmp"):
                 path.mkdir(parents=True, exist_ok=True)
                 path.chmod(0o700)
             helper_dir_a = pair_dir / "tooling-A"
-            pinned_kubectl: Path | None = None
             shell_env_a: Path | None = None
             shell_env_b: Path | None = None
-            if kubeconfig is not None and args.context is not None:
-                pinned_kubectl = _install_pinned_kubectl(
-                    common_tooling,
-                    kubectl_bin=kubectl_bin,
-                    kubeconfig=kubeconfig,
-                    context=args.context,
-                )
             if args.treatment_mode == "opt-in":
                 _install_ux_helper(
                     helper_dir_a,
@@ -2471,17 +2468,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                     policy_digest=args.policy_digest,
                 )
             if kubeconfig is not None:
-                base_path = str(common_tooling) + os.pathsep + os.environ.get("PATH", "")
+                base_path = str(kubectl_bin.parent) + os.pathsep + os.environ.get("PATH", "")
                 path_a = (
                     str(helper_dir_a) + os.pathsep + base_path
                     if args.treatment_mode == "opt-in"
                     else base_path
                 )
                 shell_env_a = _install_isolated_shell_home(
-                    shell_home_a, kubeconfig=kubeconfig, pinned_path=path_a
+                    shell_home_a,
+                    kubectl_bin=kubectl_bin,
+                    kubeconfig=kubeconfig,
+                    context=args.context,
+                    pinned_path=path_a,
                 )
                 shell_env_b = _install_isolated_shell_home(
-                    shell_home_b, kubeconfig=kubeconfig, pinned_path=base_path
+                    shell_home_b,
+                    kubectl_bin=kubectl_bin,
+                    kubeconfig=kubeconfig,
+                    context=args.context,
+                    pinned_path=base_path,
                 )
             _write_codex_home(
                 home_a,
@@ -2492,7 +2497,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 read_roots=tuple(
                     path
                     for path in (
-                        common_tooling,
                         shell_home_a,
                         helper_dir_a if args.treatment_mode == "opt-in" else None,
                     )
@@ -2508,7 +2512,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 canonical=canonical,
                 outctl_project=Path(__file__).resolve().parents[2],
                 write_roots=(arm_dir_b,),
-                read_roots=(common_tooling, shell_home_b),
+                read_roots=(shell_home_b,),
                 kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
@@ -2557,7 +2561,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "HOME": str(shell_home_a),
                 "BASH_ENV": str(shell_env_a),
                 "ENV": str(shell_env_a),
-                "CODEX_AB_KUBECTL_PIN": str(pinned_kubectl),
+                "CODEX_AB_KUBECTL_PIN": str(kubectl_bin),
                 "OUTCTL_AB_SPOOL_ROOT": str(spool_a),
                 "OUTCTL_ENABLED": "1",
                 "OUTCTL_MODE": "enforce",
@@ -2566,13 +2570,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if args.search_redaction_exact_json is not None
                     else {}
                 ),
-                "PATH": str(common_tooling) + os.pathsep + base_env.get("PATH", ""),
+                "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
                 **(
                     {
                         "PATH": (
                             str(helper_dir_a)
                             + os.pathsep
-                            + str(common_tooling)
+                            + str(kubectl_bin.parent)
                             + os.pathsep
                             + base_env.get("PATH", "")
                         )
@@ -2591,19 +2595,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "HOME": str(shell_home_b),
                 "BASH_ENV": str(shell_env_b),
                 "ENV": str(shell_env_b),
-                "CODEX_AB_KUBECTL_PIN": str(pinned_kubectl),
-                "PATH": str(common_tooling) + os.pathsep + base_env.get("PATH", ""),
+                "CODEX_AB_KUBECTL_PIN": str(kubectl_bin),
+                "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
             }
-            assert expected_identity is not None and pinned_kubectl is not None
+            assert expected_identity is not None
             identity_a = _probe_arm_cluster_identity(
                 env=env_a,
                 expected_context=str(expected_identity["context"]),
                 expected_server=str(expected_identity["server"]),
+                kubectl_bin=kubectl_bin,
             )
             identity_b = _probe_arm_cluster_identity(
                 env=env_b,
                 expected_context=str(expected_identity["context"]),
                 expected_server=str(expected_identity["server"]),
+                kubectl_bin=kubectl_bin,
             )
             if (
                 identity_a["identity_sha256"] != identity_b["identity_sha256"]
@@ -2614,7 +2620,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "arm cluster identity mismatch detected before model execution"
                 )
             helper_provenance = {
-                "pinned_kubectl_sha256": _sha256_file(pinned_kubectl),
+                "pinned_kubectl_sha256": _sha256_file(kubectl_bin),
+                "arm_a_shell_pin_sha256": _sha256_file(shell_env_a),
+                "arm_b_shell_pin_sha256": _sha256_file(shell_env_b),
                 "arm_a_outctl_helper_sha256": (
                     _sha256_file(helper_dir_a / "outctl-health")
                     if args.treatment_mode == "opt-in"

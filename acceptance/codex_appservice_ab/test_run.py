@@ -7,6 +7,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import kubectl_guard as treatment_guard
 import kubectl_readonly_guard as baseline_guard
@@ -107,6 +108,33 @@ class GuardTests(unittest.TestCase):
         self.assertIn("marker", text)
         self.assertNotIn(secret, text)
         self.assertIn("[REDACTED]", text)
+
+    def test_router_rewrites_logical_kubectl_to_pinned_direct_argv(self) -> None:
+        prefix = ["/usr/bin/kubectl", "--kubeconfig", "/scoped", "--context", "scoped"]
+        with mock.patch.object(outctl_kubectl_router, "_run", return_value=0) as execute:
+            result = outctl_kubectl_router.main(
+                [
+                    "run",
+                    "--outctl-command-json",
+                    json.dumps(["/opt/outctl"]),
+                    "--kubectl-command-json",
+                    json.dumps(prefix),
+                    "--spool-root",
+                    "/spool",
+                    "--policy-ref",
+                    "health",
+                    "--policy-digest",
+                    "sha256:" + "0" * 64,
+                    "--",
+                    "kubectl",
+                    "get",
+                    "pods",
+                ]
+            )
+        self.assertEqual(result, 0)
+        routed = execute.call_args.args[0]
+        separator = routed.index("--")
+        self.assertEqual(routed[separator + 1 :], [*prefix, "get", "pods"])
 
 
 class UsageTests(unittest.TestCase):
@@ -250,24 +278,36 @@ class HarnessValidationTests(unittest.TestCase):
         self.assertFalse(comparison["pair_valid"])
         self.assertEqual(comparison["metrics"], {})
 
-    def test_pinned_kubectl_rejects_identity_overrides(self) -> None:
+    def test_shell_pin_survives_login_and_rejects_identity_override_in_guard(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             real = root / "real-kubectl"
-            real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            real.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\n", encoding="utf-8")
             real.chmod(0o755)
-            pin = run._install_pinned_kubectl(
-                root / "tooling",
+            shell_env = run._install_isolated_shell_home(
+                root / "shell-home",
                 kubectl_bin=real,
                 kubeconfig=root / "scoped.kubeconfig",
                 context="scoped",
+                pinned_path=os.environ.get("PATH", ""),
             )
             completed = subprocess.run(
-                [str(pin), "--context", "other", "get", "pods"],
+                ["bash", "-lc", "kubectl get pods"],
+                env={
+                    **os.environ,
+                    "HOME": str(root / "shell-home"),
+                    "BASH_ENV": str(shell_env),
+                },
                 capture_output=True,
+                text=True,
                 check=False,
             )
-            self.assertEqual(completed.returncode, 64)
+            self.assertEqual(completed.returncode, 0)
+            self.assertIn("--kubeconfig", completed.stdout)
+            self.assertIn("--context scoped", completed.stdout)
+            self.assertIsNotNone(
+                baseline_guard._identity_denial("kubectl --context other get pods", str(real))
+            )
 
     def test_quality_signature_canonicalizes_model_ids_and_pod_suffixes(self) -> None:
         schema = json.loads(
