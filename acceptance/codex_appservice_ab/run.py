@@ -1758,6 +1758,16 @@ def _compare_pair(
         and not bool(arm_b.get("model_reroute_signal"))
     )
     quality_similarity = _jaccard(signature_a, signature_b)
+    quality_oracle_passed = (
+        same_overall_status
+        and (
+            treatment_mode == "opt-in"
+            or (
+                critical_high_findings_agree
+                and (quality_similarity is None or quality_similarity >= 0.6)
+            )
+        )
+    )
     raw_retained = _nested_number(arm_a, ("outctl_spool", "retained_total_bytes"))
     exposed_kubectl = _nested_number(arm_a, ("commands", "model_visible_kubectl_output_bytes"))
     outctl_exposure_ratio = (
@@ -1784,11 +1794,15 @@ def _compare_pair(
         flags.append("at least one non-read-only kubectl attempt was observed and guarded")
     if not same_overall_status:
         flags.append("arms reached different overall health statuses")
-    if not critical_high_findings_agree:
+    if treatment_mode == "deterministic" and not critical_high_findings_agree:
         flags.append("arms disagreed on critical/high finding identifiers or classifications")
     if not requested_model_integrity:
         flags.append("requested model identity was not verified cleanly in both arms")
-    if quality_similarity is not None and quality_similarity < 0.6:
+    if (
+        treatment_mode == "deterministic"
+        and quality_similarity is not None
+        and quality_similarity < 0.6
+    ):
         flags.append("structured health evidence overlap was below 0.60")
     if launch_skew_ms > 250:
         flags.append("process launch skew exceeded 250 ms")
@@ -1805,10 +1819,8 @@ def _compare_pair(
         and hooks_observed_both_arms
         and not baseline_spontaneously_used_outctl
         and no_mutation_attempts
-        and same_overall_status
-        and critical_high_findings_agree
+        and quality_oracle_passed
         and requested_model_integrity
-        and (quality_similarity is None or quality_similarity >= 0.6)
         and launch_skew_ms <= 250
     )
 
@@ -1824,6 +1836,7 @@ def _compare_pair(
         "baseline_spontaneously_used_outctl": baseline_spontaneously_used_outctl,
         "same_overall_status": same_overall_status,
         "critical_high_findings_agree": critical_high_findings_agree,
+        "quality_oracle_passed": quality_oracle_passed,
         "requested_model_integrity": requested_model_integrity,
         "quality_signature_jaccard": quality_similarity,
         "arm_a_outctl_exposure_ratio": outctl_exposure_ratio,

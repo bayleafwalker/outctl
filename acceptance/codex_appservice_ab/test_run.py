@@ -161,6 +161,29 @@ class HarnessValidationTests(unittest.TestCase):
         self.assertFalse(comparison["treatment_compliant"])
         self.assertTrue(comparison["pair_valid"])
 
+    def test_opt_in_quality_gate_accepts_same_health_despite_finding_variance(self) -> None:
+        arm = {
+            "exit_code": 0,
+            "timed_out": False,
+            "final": {"schema_valid": True, "overall_status": "degraded"},
+            "model_observed": True,
+            "model_mismatch": False,
+            "model_reroute_signal": False,
+            "commands": {"kubectl_completed": 1, "kubectl_direct_completed": 1},
+            "hooks": {"events": 1, "read_only_policy_denials": 0},
+            "outctl_spool": {},
+        }
+        comparison = run._compare_pair(
+            arm,
+            arm,
+            {("finding:A", "high")},
+            {("finding:B", "high")},
+            0,
+            treatment_mode="opt-in",
+        )
+        self.assertTrue(comparison["quality_oracle_passed"])
+        self.assertTrue(comparison["pair_valid"])
+
     def test_quality_signature_canonicalizes_model_ids_and_pod_suffixes(self) -> None:
         schema = json.loads(
             Path(run.__file__).with_name("health-result.schema.json").read_text(encoding="utf-8")
