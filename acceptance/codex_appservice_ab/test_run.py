@@ -728,6 +728,9 @@ class EndToEndTests(unittest.TestCase):
                             "evidence_refs": [{
                                 "capture_id": "capture-1",
                                 "operation": "projection",
+                                "stream": None,
+                                "start": None,
+                                "end": None,
                             }],
                         }],
                         "findings": [],

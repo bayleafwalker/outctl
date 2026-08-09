@@ -87,13 +87,13 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["capture_id", "operation"],
+        "required": ["capture_id", "operation", "stream", "start", "end"],
         "properties": {
           "capture_id": {"type": "string", "minLength": 1, "maxLength": 160},
           "operation": {"type": "string", "enum": ["projection", "inspect", "slice", "tail", "search", "search-many"]},
-          "stream": {"type": "string", "enum": ["stdout", "stderr"]},
-          "start": {"type": "integer", "minimum": 0},
-          "end": {"type": "integer", "minimum": 0}
+          "stream": {"type": ["string", "null"], "enum": ["stdout", "stderr", null]},
+          "start": {"type": ["integer", "null"], "minimum": 0},
+          "end": {"type": ["integer", "null"], "minimum": 0}
         }
       }
     },
