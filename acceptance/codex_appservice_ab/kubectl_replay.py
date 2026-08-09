@@ -33,20 +33,19 @@ def replay(fixture: dict[str, Any], argv: list[str]) -> dict[str, Any]:
             "serverVersion": {"gitVersion": "v1.34.0-replay"},
             "api": fixture.get("api"),
         },
-        ("get", "nodes", "-o", "json"): {"items": fixture.get("nodes", [])},
-        ("get", "pods", "-A", "-o", "json"): {"items": fixture.get("pods", [])},
-        ("-n", "flux-system", "get", "pods", "-o", "json"): {
+        ("get", "nodes", "-o", "wide"): {"items": fixture.get("nodes", [])},
+        ("get", "pods", "-A", "-o", "wide"): {"items": fixture.get("pods", [])},
+        ("-n", "flux-system", "get", "pods", "-o", "wide"): {
             "items": [fixture.get("gitops", {})]
         },
         (
-            "-n", "gatus", "get", "deployments,persistentvolumeclaims", "-o", "json",
+            "-n", "gatus", "get", "deployments,persistentvolumeclaims",
         ): {
             "deployments": [{"name": "gatus", "ready": True}],
             "persistentvolumeclaims": [fixture.get("storage", {})],
         },
         (
-            "-n", "gatus", "get", "events", "--field-selector", "type=Warning",
-            "--sort-by=.metadata.creationTimestamp", "-o", "json",
+            "-n", "gatus", "get", "events", "--sort-by=.lastTimestamp",
         ): {"items": fixture.get("events", [])},
     }
     key = tuple(argv)
