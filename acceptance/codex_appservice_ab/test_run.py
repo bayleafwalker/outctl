@@ -169,6 +169,7 @@ class HarnessValidationTests(unittest.TestCase):
             self.assertNotIn("sandbox_mode", config)
 
     def test_codex_command_uses_permission_profile_not_sandbox_flag(self) -> None:
+        spool = Path("/tmp/outctl-spool")
         command = run._build_codex_command(
             codex_bin="codex",
             model="gpt-5.6-terra",
@@ -176,9 +177,48 @@ class HarnessValidationTests(unittest.TestCase):
             schema=Path("/tmp/schema.json"),
             final_path=Path("/tmp/final.json"),
             prompt="test",
+            additional_write_dirs=(spool,),
         )
         self.assertNotIn("--sandbox", command)
         self.assertIn("--ephemeral", command)
+        self.assertEqual(command[command.index("--add-dir") + 1], str(spool))
+
+    def test_commissioning_failure_stops_later_pairs(self) -> None:
+        self.assertTrue(
+            run._commissioning_failed(
+                {
+                    "commands": {
+                        "kubectl_via_outctl_attempts": 1,
+                        "kubectl_via_outctl_completed": 0,
+                    },
+                    "outctl_spool": {"capture_directory_count": 0},
+                }
+            )
+        )
+
+    def test_router_prefix_uses_only_spool_local_uv_state(self) -> None:
+        executable, common = run._router_prefixes(
+            kubeconfig=Path("/tmp/readonly.kubeconfig"),
+            router=Path("/opt/outctl-router.py"),
+            launcher=("uv", "run", "--project", "/opt/outctl", "outctl"),
+        )
+        self.assertIn('UV_OFFLINE=1', executable)
+        self.assertIn('UV_CACHE_DIR="$OUTCTL_AB_SPOOL_ROOT/uv-cache"', executable)
+        self.assertIn('TMPDIR="$OUTCTL_AB_SPOOL_ROOT/tmp"', executable)
+        self.assertIn('KUBECONFIG=/tmp/readonly.kubeconfig', executable)
+        self.assertIn('--outctl-command-json', common)
+        self.assertIn('"uv","run","--project","/opt/outctl","outctl"', common)
+        self.assertFalse(
+            run._commissioning_failed(
+                {
+                    "commands": {
+                        "kubectl_via_outctl_attempts": 1,
+                        "kubectl_via_outctl_completed": 1,
+                    },
+                    "outctl_spool": {"capture_directory_count": 1},
+                }
+            )
+        )
 
     def test_home_hook_registration_uses_isolated_active_config_layer(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -76,7 +76,15 @@ def _run(argv: Sequence[str]) -> int:
     try:
         capture_id, exit_code, text = _safe_envelope(completed.stdout)
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-        print(f"outctl router could not read a bounded envelope: {exc}", file=sys.stderr)
+        # Do not expose child stderr: it may contain command output or secrets.
+        # These bounded, raw-free facts are enough to distinguish an outctl
+        # bootstrap failure from a malformed safe envelope during commissioning.
+        print(
+            "outctl router could not read a bounded envelope: "
+            f"{exc}; outctl_exit={completed.returncode}; "
+            f"stdout_bytes={len(completed.stdout)}",
+            file=sys.stderr,
+        )
         return 1
     _emit(capture_id, exit_code, text)
     return completed.returncode

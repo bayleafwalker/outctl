@@ -513,6 +513,8 @@ Narrow retrieval example, using the capture ID returned by the Pod inventory:
 
 Rules:
 
+- Use the canonical execution prefix verbatim. Do not replace it with a bare
+  `outctl run`, alter its arguments, or write outside its allocated spool.
 - Preserve direct argv after `--`; do not introduce an implicit shell inside outctl.
 - Start from the bounded projection returned by the router. It is derived from
   `outctl run`, while raw capture bytes remain private.
@@ -526,6 +528,28 @@ Rules:
   reads of Kubernetes Secret objects.
 """
     (skill_dir / "SKILL.md").write_text(skill, encoding="utf-8")
+
+
+def _router_prefixes(
+    *,
+    kubeconfig: Path | None,
+    router: Path,
+    launcher: Sequence[str],
+) -> tuple[str, str]:
+    """Build the exact treatment route, including its sandbox-local uv state."""
+
+    kubeconfig_env = f"KUBECONFIG={shlex.quote(str(kubeconfig))} " if kubeconfig else ""
+    router_exec = (
+        f"env {kubeconfig_env}OUTCTL_ENABLED=1 OUTCTL_MODE=enforce "
+        'UV_OFFLINE=1 UV_CACHE_DIR="$OUTCTL_AB_SPOOL_ROOT/uv-cache" '
+        'TMPDIR="$OUTCTL_AB_SPOOL_ROOT/tmp" '
+        f"python3 {shlex.quote(str(router))}"
+    )
+    router_common = (
+        f"--outctl-command-json {shlex.quote(json.dumps(launcher, separators=(',', ':')))} "
+        ' --spool-root "$OUTCTL_AB_SPOOL_ROOT"'
+    )
+    return router_exec, router_common
 
 
 def _write_hook_config(hooks_path: Path, command: str) -> None:
@@ -704,8 +728,9 @@ def _build_codex_command(
     schema: Path,
     final_path: Path,
     prompt: str,
+    additional_write_dirs: Sequence[Path] = (),
 ) -> list[str]:
-    return [
+    command = [
         codex_bin,
         "exec",
         "--dangerously-bypass-hook-trust",
@@ -715,12 +740,29 @@ def _build_codex_command(
         model,
         "--cd",
         str(worktree),
+    ]
+    for directory in dict.fromkeys(additional_write_dirs):
+        command.extend(("--add-dir", str(directory)))
+    return [
+        *command,
         "--output-schema",
         str(schema),
         "--output-last-message",
         str(final_path),
         prompt,
     ]
+
+
+def _commissioning_failed(arm: Mapping[str, Any]) -> bool:
+    """Identify deterministic treatment bootstrap failures before more pairs spend tokens."""
+
+    commands = arm.get("commands") if isinstance(arm.get("commands"), Mapping) else {}
+    spool = arm.get("outctl_spool") if isinstance(arm.get("outctl_spool"), Mapping) else {}
+    return (
+        int(commands.get("kubectl_via_outctl_attempts", 0)) > 0
+        and int(commands.get("kubectl_via_outctl_completed", 0)) == 0
+        and int(spool.get("capture_directory_count", 0)) == 0
+    )
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
@@ -1885,20 +1927,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     launcher = shlex.split(args.outctl_cmd)
     if not launcher:
         raise ExperimentError("--outctl-cmd resolved to an empty command")
-    kubeconfig_env = (
-        f"KUBECONFIG={shlex.quote(str(kubeconfig))} " if kubeconfig is not None else ""
-    )
     # The launcher supplies the explicit scoped kubeconfig directly.  Do not
     # invoke direnv inside the least-privilege Codex sandbox: it can touch
     # user-local state that is unrelated to this fixed corpus.
     router = Path(__file__).with_name("outctl_kubectl_router.py").resolve()
-    router_exec = (
-        f"env {kubeconfig_env}OUTCTL_ENABLED=1 OUTCTL_MODE=enforce "
-        f"python3 {shlex.quote(str(router))}"
-    )
-    router_common = (
-        f"--outctl-command-json {shlex.quote(json.dumps(launcher, separators=(',', ':')))} "
-        ' --spool-root "$OUTCTL_AB_SPOOL_ROOT"'
+    router_exec, router_common = _router_prefixes(
+        kubeconfig=kubeconfig, router=router, launcher=launcher
     )
     retrieval_prefix = f"{router_exec} tail {router_common}"
     wrapper = (
@@ -1989,7 +2023,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             arm_dir_a = pair_dir / "A"
             arm_dir_b = pair_dir / "B"
             spool_a = pair_dir / "outctl-spool-A"
-            for path in (arm_dir_a, arm_dir_b, spool_a):
+            for path in (arm_dir_a, arm_dir_b, spool_a, spool_a / "uv-cache", spool_a / "tmp"):
                 path.mkdir(parents=True, exist_ok=True)
                 path.chmod(0o700)
             _write_codex_home(
@@ -2021,6 +2055,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 schema=output_schema_path,
                 final_path=arm_dir_a / "final.json",
                 prompt=prompt,
+                additional_write_dirs=(spool_a,),
             )
             command_b = _build_codex_command(
                 codex_bin=args.codex_bin,
@@ -2155,6 +2190,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "comparison": comparison,
                 }
             )
+            if _commissioning_failed(arm_a):
+                break
 
         _write_json_private(output / "planned-commands.json", planned_commands)
         if args.dry_run:
@@ -2194,11 +2231,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "profile": PERMISSION_PROFILE_NAME,
                         "approval_policy": "never",
                         "sandbox_override": None,
+                        "additional_write_roots": {"A": ["outctl_spool"], "B": []},
                         "network": "one verified Kubernetes API host per run",
                     },
                     "preflight": preflight,
                     "reasoning_effort": args.reasoning_effort,
                     "pairs_requested": args.pairs,
+                    "pairs_executed": len(pairs),
+                    "aborted_after_commissioning_failure": (
+                        len(pairs) < args.pairs and _commissioning_failed(arm_a)
+                    ),
                     "prompt_template_sha256": _sha256_file(prompt_path),
                     "rendered_prompt_sha256": _sha256_text(prompt),
                     "rendered_prompt_bytes": len(prompt.encode("utf-8")),
@@ -2254,6 +2296,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             }
         _write_json_private(output / "report.json", report)
         print(str(output / "report.json"))
+        if not args.dry_run and not bool(report["aggregate"]["all_pairs_valid"]):
+            return 1
         return 0
     finally:
         # Remove any credential-bearing homes even after a failure.
