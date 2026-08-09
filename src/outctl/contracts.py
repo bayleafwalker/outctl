@@ -155,6 +155,23 @@ def _validate_semantics(name: str, value: Mapping[str, Any]) -> None:
                 equivalence.get(key) is True for key in components
             ):
                 raise ContractValidationError("shadow equivalence contradicts component checks")
+        overhead = value.get("overhead")
+        if isinstance(overhead, Mapping):
+            direct_ms = overhead.get("direct_median_ms")
+            shadow_ms = overhead.get("shadow_median_ms")
+            if isinstance(direct_ms, int) and isinstance(shadow_ms, int):
+                delta_ms = shadow_ms - direct_ms
+                if overhead.get("wall_time_delta_ms") != delta_ms:
+                    raise ContractValidationError("shadow overhead delta does not match medians")
+                accepted = (
+                    delta_ms <= 100
+                    if direct_ms < 1_000
+                    else delta_ms * 1_000_000 < direct_ms * 50_000
+                )
+                if overhead.get("accepted") is not accepted:
+                    raise ContractValidationError(
+                        "shadow overhead acceptance contradicts paired-median-v1"
+                    )
     elif name == "ux-evidence":
         retrievals = value.get("retrievals")
         contributed = value.get("retrievals_contributing_to_findings")

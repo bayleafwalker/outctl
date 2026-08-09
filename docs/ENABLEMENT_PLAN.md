@@ -54,6 +54,14 @@ semantic comparisons, overhead, recovery, deadlocks, capture failures, and
 bypasses. Do not proceed until direct and shadow behavior are equivalent and
 rollback has been exercised.
 
+Freeze overhead acceptance before collecting a gate observation. Measure at
+least five paired repetitions of the same direct-argv request in alternating
+order and compare medians. For a direct median of at least 1,000 ms, the shadow
+median may regress by less than 5%. For a direct median below 1,000 ms, the
+shadow median may add at most 100 ms. Report milliseconds and parts per million
+in either stratum. Earlier observations are commissioning evidence only and
+must be rerun; they cannot pass Stage 3 retroactively.
+
 ## Stage 4 — frozen controlled efficacy study
 
 Use replayable or seeded scenarios with expected facts frozen before model
@@ -67,6 +75,11 @@ each pair and paired effects first; pooled totals are secondary.
 
 Commissioning, adaptively inspected, identity-invalid, broad-authority, and
 unknown-denominator runs are not confirmatory evidence.
+
+Files under `examples/` are illustrative and never launch authority. Launch
+requires checked-in scenario manifests and expected-fact files whose canonical
+SHA-256 digests match the frozen protocol. Placeholder digests or a repository
+commit other than the candidate study commit invalidate the protocol.
 
 ## Stage 5 — real UX pilot
 

@@ -933,7 +933,10 @@ For the pilot corpus:
 - 100% retrieval of retained ranges without rerunning the command;
 - no subprocess deadlocks in stress tests;
 - no command-status changes attributable to projection logic;
-- less than 5% runtime overhead for output-heavy commands, excluding unavoidable disk I/O and optional replication;
+- less than 5% median runtime overhead when the direct median is at least
+  1,000 ms, or at most 100 ms median absolute overhead below that boundary,
+  using at least five alternating paired repetitions and excluding optional
+  replication;
 - no unbounded memory growth with multi-gigabyte synthetic output;
 - no exact secret fixture exposed in model projection or sanitized replica tests.
 

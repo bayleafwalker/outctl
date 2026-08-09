@@ -21,12 +21,17 @@
     },
     "overhead": {
       "type": "object", "additionalProperties": false,
-      "required": ["wall_time_delta_ms", "wall_time_regression_ppm", "peak_rss_delta_bytes", "disk_bytes"],
+      "required": ["policy_id", "paired_repetitions", "direct_median_ms", "shadow_median_ms", "wall_time_delta_ms", "wall_time_regression_ppm", "peak_rss_delta_bytes", "disk_bytes", "accepted"],
       "properties": {
+        "policy_id": {"const": "paired-median-v1"},
+        "paired_repetitions": {"type": "integer", "minimum": 5},
+        "direct_median_ms": {"type": "integer", "minimum": 0},
+        "shadow_median_ms": {"type": "integer", "minimum": 0},
         "wall_time_delta_ms": {"type": "integer"},
         "wall_time_regression_ppm": {"type": ["integer", "null"]},
         "peak_rss_delta_bytes": {"type": ["integer", "null"]},
-        "disk_bytes": {"type": "integer", "minimum": 0}
+        "disk_bytes": {"type": "integer", "minimum": 0},
+        "accepted": {"type": "boolean"}
       }
     },
     "recovery": {

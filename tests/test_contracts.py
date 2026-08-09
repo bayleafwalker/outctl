@@ -161,10 +161,15 @@ def test_shadow_study_ux_and_conformance_contracts_validate_metadata_only() -> N
             "semantically_equivalent": True,
         },
         "overhead": {
+            "policy_id": "paired-median-v1",
+            "paired_repetitions": 5,
+            "direct_median_ms": 100,
+            "shadow_median_ms": 101,
             "wall_time_delta_ms": 1,
             "wall_time_regression_ppm": 10_000,
             "peak_rss_delta_bytes": 1024,
             "disk_bytes": 2048,
+            "accepted": True,
         },
         "recovery": {
             "forced_termination_tested": True,
