@@ -92,3 +92,10 @@ def test_protocol_valid_identity_mismatch_fails_closed() -> None:
     observations["pairs"][0]["identity_binding_match"] = False  # type: ignore[index]
     with pytest.raises(StudyCompileError, match="identity mismatch"):
         compile_study_analysis(_protocol(), observations)
+
+
+def test_non_alternating_pair_order_fails_closed() -> None:
+    observations = _observations()
+    observations["pairs"][1]["starting_arm"] = "A"  # type: ignore[index]
+    with pytest.raises(StudyCompileError, match="must alternate"):
+        compile_study_analysis(_protocol(), observations)

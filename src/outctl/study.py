@@ -72,6 +72,7 @@ def compile_study_analysis(
         "uncached_read_b": 0,
     }
     seen: set[str] = set()
+    starting_arms: list[str] = []
     for index, item in enumerate(raw_pairs):
         if not isinstance(item, Mapping):
             raise StudyCompileError(f"pairs[{index}] must be an object")
@@ -81,6 +82,12 @@ def compile_study_analysis(
             raise StudyCompileError("pair_id values must be non-empty and unique")
         if not isinstance(scenario_id, str) or not scenario_id:
             raise StudyCompileError(f"{pair_id}.scenario_id is required")
+        starting_arm = item.get("starting_arm")
+        if starting_arm not in {"A", "B"}:
+            raise StudyCompileError(f"{pair_id}.starting_arm must be A or B")
+        if starting_arms and starting_arms[-1] == starting_arm:
+            raise StudyCompileError("starting_arm must alternate across the frozen pair order")
+        starting_arms.append(starting_arm)
         seen.add(pair_id)
         protocol_valid = item.get("protocol_valid") is True
         identity_match = item.get("identity_binding_match") is True
@@ -105,7 +112,7 @@ def compile_study_analysis(
             {
                 "pair_id": pair_id,
                 "scenario_id": scenario_id,
-                "starting_arm": item.get("starting_arm"),
+                "starting_arm": starting_arm,
                 "cache_stratum": item.get("cache_stratum"),
                 "protocol_valid": protocol_valid,
                 "identity_binding_match": identity_match,

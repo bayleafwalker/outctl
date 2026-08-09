@@ -2462,6 +2462,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Optional appservice read-only checker run once as shared bounded context",
     )
     parser.add_argument("--pairs", type=int, default=1)
+    parser.add_argument(
+        "--pair-offset",
+        type=int,
+        default=0,
+        help="Number of earlier pairs in the same frozen study; controls seeded start order",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--prompt", type=Path, default=here / "prompt.md")
     parser.add_argument(
@@ -2564,6 +2570,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if args.pairs < 1:
         raise ExperimentError("--pairs must be at least 1")
+    if args.pair_offset < 0:
+        raise ExperimentError("--pair-offset must be non-negative")
     if args.timeout_seconds < 1:
         raise ExperimentError("--timeout-seconds must be positive")
 
@@ -2776,6 +2784,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         planned_commands: list[dict[str, Any]] = []
         for pair_index in range(1, args.pairs + 1):
+            study_pair_index = args.pair_offset + pair_index
             pair_dir = private / f"pair-{pair_index:03d}"
             home_a = pair_dir / "codex-home-A"
             home_b = pair_dir / "codex-home-B"
@@ -2884,7 +2893,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             planned_commands.append(
                 {
-                    "pair": pair_index,
+                    "pair": study_pair_index,
                     "A": command_a[:-1] + ["<identical prompt>"],
                     "B": command_b[:-1] + ["<identical prompt>"],
                 }
@@ -3047,7 +3056,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     target=worker, args=("B", command_b, env_b, arm_dir_b), daemon=False
                 ),
             }
-            thread_start_order = ["A", "B"] if pair_index % 2 else ["B", "A"]
+            if controlled_study is not None:
+                seed = int(controlled_study["protocol"]["randomization_seed"])
+                starts_with_a = (seed + study_pair_index) % 2 == 0
+            else:
+                starts_with_a = pair_index % 2 == 1
+            thread_start_order = ["A", "B"] if starts_with_a else ["B", "A"]
             for arm in thread_start_order:
                 threads[arm].start()
             try:
@@ -3119,7 +3133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             pairs.append(
                 {
-                    "pair": pair_index,
+                    "pair": study_pair_index,
                     "thread_start_order": thread_start_order,
                     "arms": {
                         "A": {
