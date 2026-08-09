@@ -583,6 +583,8 @@ class EndToEndTests(unittest.TestCase):
                     "sha256:" + "0" * 64,
                     "--pairs",
                     "1",
+                    "--treatment-mode",
+                    "opt-in",
                 ],
                 env=env,
                 capture_output=True,

@@ -58,6 +58,7 @@ REQUIRED_COVERAGE_AREAS = frozenset(
     ("cluster_api", "nodes", "workloads", "gitops", "storage", "events")
 )
 PERMISSION_PROFILE_NAME = "outctl-ab-readonly"
+EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS = 6
 
 
 class ExperimentError(RuntimeError):
@@ -231,6 +232,21 @@ def _toml_string(value: str) -> str:
 def _validate_policy_digest(value: str) -> None:
     if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", value):
         raise ExperimentError("--policy-digest must be sha256:<64 hex characters>")
+
+
+def _resolve_trusted_executable(value: str, *, name: str) -> Path:
+    """Resolve an executable without inheriting detached-worktree mise state."""
+    candidate = Path(value)
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+    else:
+        found = shutil.which(value, path="/usr/local/bin:/usr/bin:/bin")
+        resolved = Path(found).resolve() if found else None
+    if resolved is None or not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise ExperimentError(f"--{name}-bin must resolve to an executable outside mise")
+    if "mise" in resolved.parts:
+        raise ExperimentError(f"--{name}-bin resolved through mise, which is not permitted")
+    return resolved
 
 
 def _kubectl_output(
@@ -620,7 +636,8 @@ esac
 """,
         encoding="utf-8",
     )
-    helper.chmod(0o755)
+    helper.chmod(0o555)
+    target.chmod(0o555)
 
 
 def _router_prefixes(
@@ -732,6 +749,7 @@ def _write_codex_home(
     canonical: Path,
     outctl_project: Path,
     write_roots: Sequence[Path],
+    read_roots: Sequence[Path] = (),
     kubernetes_api_host: str | None,
     auth_source: Path | None,
     reasoning_effort: str | None,
@@ -743,7 +761,9 @@ def _write_codex_home(
         shutil.copy2(auth_source, destination)
         destination.chmod(0o600)
 
-    workspace_roots = tuple(dict.fromkeys((worktree, canonical, outctl_project)))
+    workspace_roots = tuple(
+        dict.fromkeys((worktree, canonical, outctl_project, *read_roots))
+    )
     lines = [
         'web_search = "disabled"',
         'approval_policy = "never"',
@@ -1671,10 +1691,13 @@ def _compare_pair(
     b_final = arm_b.get("final") if isinstance(arm_b.get("final"), Mapping) else {}
 
     strict_treatment_compliant = (
-        int(a_commands.get("kubectl_completed", 0)) > 0
+        int(a_commands.get("kubectl_via_outctl_attempts", 0))
+        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
+        and int(a_commands.get("kubectl_completed", 0))
+        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
         and int(a_commands.get("kubectl_direct_completed", 0)) == 0
         and int(a_commands.get("kubectl_via_outctl_completed", 0))
-        == int(a_commands.get("kubectl_completed", 0))
+        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
     )
     strict_treatment_first_try_compliant = (
         strict_treatment_compliant
@@ -1683,8 +1706,9 @@ def _compare_pair(
     )
     strict_treatment_capture_accounted = (
         int(a_spool.get("capture_directory_count", 0))
-        == int(a_commands.get("kubectl_via_outctl_attempts", 0))
-        and int(a_spool.get("capture_directory_count", 0)) > 0
+        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
+        and int(a_commands.get("kubectl_via_outctl_attempts", 0))
+        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
         and int(a_spool.get("capture_count", 0)) == int(a_spool.get("capture_directory_count", 0))
         and int(a_spool.get("partial_capture_count", 0)) == 0
         and int(a_spool.get("manifest_errors", 0)) == 0
@@ -1974,6 +1998,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     _validate_policy_digest(args.policy_digest)
+    kubectl_bin = _resolve_trusted_executable(args.kubectl_bin, name="kubectl")
     if args.pairs < 1:
         raise ExperimentError("--pairs must be at least 1")
     if args.timeout_seconds < 1:
@@ -2011,7 +2036,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.dry_run:
         assert kubeconfig is not None and args.context is not None
         preflight = _preflight_readonly_kubeconfig(
-            kubectl_bin=args.kubectl_bin, kubeconfig=kubeconfig, context=args.context
+            kubectl_bin=str(kubectl_bin), kubeconfig=kubeconfig, context=args.context
         )
     kubernetes_api_host = preflight.pop("_api_host") if preflight is not None else None
 
@@ -2158,7 +2183,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             for path in (arm_dir_a, arm_dir_b, spool_a, spool_a / "uv-cache", spool_a / "tmp"):
                 path.mkdir(parents=True, exist_ok=True)
                 path.chmod(0o700)
-            helper_dir_a = arm_dir_a / "bin"
+            helper_dir_a = pair_dir / "tooling-A"
             if args.treatment_mode == "opt-in":
                 _install_ux_helper(
                     helper_dir_a,
@@ -2173,6 +2198,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 canonical=canonical,
                 outctl_project=Path(__file__).resolve().parents[2],
                 write_roots=(spool_a, arm_dir_a),
+                read_roots=(helper_dir_a,) if args.treatment_mode == "opt-in" else (),
                 kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
@@ -2231,8 +2257,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "OUTCTL_AB_SPOOL_ROOT": str(spool_a),
                 "OUTCTL_ENABLED": "1",
                 "OUTCTL_MODE": "enforce",
+                "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
                 **(
-                    {"PATH": str(helper_dir_a) + os.pathsep + base_env.get("PATH", "")}
+                    {
+                        "PATH": (
+                            str(helper_dir_a)
+                            + os.pathsep
+                            + str(kubectl_bin.parent)
+                            + os.pathsep
+                            + base_env.get("PATH", "")
+                        )
+                    }
                     if args.treatment_mode == "opt-in"
                     else {}
                 ),
@@ -2244,6 +2279,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_b / "hook-events.jsonl"),
                 "KUBECONFIG": str(kubeconfig),
+                "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
             }
 
             barrier = threading.Barrier(3)
