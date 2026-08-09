@@ -39,6 +39,7 @@ from outctl.retrieval import (
     verify_capture,
 )
 from outctl.study import StudyCompileError, compile_study_analysis, load_json_object
+from outctl.ux import UxCompileError, compile_ux_evidence
 
 _DEFAULT_SPOOL = Path(".outctl")
 _DEFAULT_MAX_BYTES = 64 * 1024
@@ -162,6 +163,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     study_compile.add_argument("protocol", type=Path)
     study_compile.add_argument("observations", type=Path)
+    ux_compile = commands.add_parser("ux-compile", help="compile digest-bound UX evidence")
+    ux_compile.add_argument("task_protocol", type=Path)
+    ux_compile.add_argument("observations", type=Path)
     return parser
 
 
@@ -568,7 +572,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
-    except (OSError, PilotReportError, StudyCompileError, ValueError) as error:
+        if args.command == "ux-compile":
+            _json(
+                compile_ux_evidence(
+                    load_json_object(args.task_protocol), load_json_object(args.observations)
+                )
+            )
+            return 0
+    except (OSError, PilotReportError, StudyCompileError, UxCompileError, ValueError) as error:
         _json({"status": "ERROR", "detail": _metadata_text(str(error))})
         return 2
     raise AssertionError(f"unknown command {args.command!r}")
