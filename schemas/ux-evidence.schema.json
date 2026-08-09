@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:ux-evidence:v1",
+  "title": "Raw-free multi-turn UX pilot evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_protocol_digest", "session_id_sha256", "turns", "logical_commands", "cluster_calls", "retrievals", "retrievals_contributing_to_findings", "reruns_avoided", "bypasses", "quality_preserved", "additional_critical_misses", "evidence_references_valid", "generated_at"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.ux-evidence/v1"},
+    "task_protocol_digest": {"$ref": "#/$defs/digest"},
+    "session_id_sha256": {"$ref": "#/$defs/sha256"},
+    "turns": {"type": "integer", "minimum": 2},
+    "logical_commands": {"type": "integer", "minimum": 0},
+    "cluster_calls": {"type": "integer", "minimum": 0},
+    "retrievals": {"type": "integer", "minimum": 0},
+    "retrievals_contributing_to_findings": {"type": "integer", "minimum": 0},
+    "reruns_avoided": {"type": "integer", "minimum": 0},
+    "bypasses": {
+      "type": "array", "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["reason", "count"],
+        "properties": {"reason": {"type": "string", "minLength": 1}, "count": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "quality_preserved": {"type": "boolean"},
+    "additional_critical_misses": {"type": "integer", "minimum": 0},
+    "evidence_references_valid": {"type": "boolean"},
+    "generated_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  }
+}

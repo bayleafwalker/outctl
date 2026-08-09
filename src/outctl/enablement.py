@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from outctl.contracts import ContractValidationError, normalize_enablement_evidence
+
 RAW_KEYS = frozenset(
     {"stdout", "stderr", "raw_output", "projection_body", "events_jsonl", "tool_body"}
 )
@@ -73,6 +75,10 @@ def _stage(
 
 def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
     """Evaluate ordered enablement gates without treating missing evidence as success."""
+    try:
+        evidence = normalize_enablement_evidence(evidence)
+    except ContractValidationError as error:
+        raise EnablementEvidenceError(str(error)) from error
     _reject_raw(evidence)
     foundation = _mapping(evidence.get("foundation", {}), "foundation")
     mechanism = _mapping(evidence.get("mechanism", {}), "mechanism")
@@ -96,6 +102,11 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
     )
     pairs = _number(controlled, "protocol_valid_pairs")
     output_reduction = _number(controlled, "median_command_output_reduction_pct")
+    output_reduction_ppm = _number(controlled, "median_command_output_reduction_ppm")
+
+    def referenced(section: Mapping[str, Any]) -> bool:
+        identifiers = section.get("evidence_ids")
+        return isinstance(identifiers, list) and bool(identifiers)
     stages = [
         _stage(
             0,
@@ -104,6 +115,7 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
                 "schemas_valid": _bool(foundation, "schemas_valid"),
                 "policy_digest_stable": _bool(foundation, "policy_digest_stable"),
                 "full_repository_gate": _bool(foundation, "full_repository_gate"),
+                "evidence_referenced": referenced(foundation),
             },
         ),
         _stage(
@@ -113,6 +125,8 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
                 "benchmark_passed": _bool(mechanism, "passed"),
                 "process_semantics_passed": _bool(mechanism, "process_semantics_passed"),
                 "security_passed": _bool(mechanism, "security_passed"),
+                "negative_tests_passed": _bool(mechanism, "negative_tests_passed"),
+                "evidence_referenced": referenced(mechanism),
             },
         ),
         _stage(
@@ -123,6 +137,8 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
                 "runner_injected": identity.get("identity_source") == "runner_injected",
                 "paired_bindings_match": identity_receipts_valid,
                 "read_only_rbac": _bool(identity, "read_only_rbac"),
+                "negative_rbac_tests": _bool(identity, "negative_rbac_tests"),
+                "evidence_referenced": referenced(identity),
             },
         ),
         _stage(
@@ -133,6 +149,8 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
                 "no_deadlocks": _bool(shadow, "no_deadlocks"),
                 "recovery_verified": _bool(shadow, "recovery_verified"),
                 "overhead_acceptable": _bool(shadow, "overhead_acceptable"),
+                "rollback_verified": _bool(shadow, "rollback_verified"),
+                "evidence_referenced": referenced(shadow),
             },
         ),
         _stage(
@@ -145,7 +163,13 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
                 "zero_additional_critical_misses": _bool(
                     controlled, "zero_additional_critical_misses"
                 ),
-                "output_reduction": output_reduction is not None and output_reduction >= 50,
+                "output_reduction": (
+                    output_reduction_ppm is not None and output_reduction_ppm >= 500_000
+                )
+                or (output_reduction is not None and output_reduction >= 50),
+                "confirmatory_dataset": controlled.get("dataset_class") == "confirmatory",
+                "protocol_digest": isinstance(controlled.get("protocol_digest"), str),
+                "evidence_referenced": referenced(controlled),
             },
         ),
         _stage(
@@ -156,6 +180,7 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
                 "quality_preserved": _bool(ux, "quality_preserved"),
                 "retrieval_contributed": _bool(ux, "retrieval_contributed"),
                 "raw_free_report": _bool(ux, "raw_free_report"),
+                "evidence_referenced": referenced(ux),
             },
         ),
         _stage(
@@ -166,6 +191,7 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
                 "rollback_verified": _bool(enforce, "rollback_verified"),
                 "redaction_verified": _bool(enforce, "redaction_verified"),
                 "bypass_pressure_acceptable": _bool(enforce, "bypass_pressure_acceptable"),
+                "evidence_referenced": referenced(enforce),
             },
         ),
         _stage(
@@ -176,6 +202,8 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
                 "audit_verification": _bool(authority, "audit_verification"),
                 "policy_promoted": _bool(authority, "policy_promoted"),
                 "second_harness_conformant": _bool(second, "conformant"),
+                "authority_evidence_referenced": referenced(authority),
+                "harness_evidence_referenced": referenced(second),
             },
             external=True,
         ),
@@ -186,6 +214,7 @@ def evaluate_enablement(evidence: Mapping[str, Any]) -> dict[str, object]:
                 "replica_classes_preserved": _bool(hybrid, "replica_classes_preserved"),
                 "cross_host_verified": _bool(hybrid, "cross_host_verified"),
                 "local_break_glass": _bool(hybrid, "local_break_glass"),
+                "evidence_referenced": referenced(hybrid),
             },
             external=True,
         ),

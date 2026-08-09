@@ -1,0 +1,25 @@
+{
+  "schema_version": "vuoro.outctl.study-protocol/v1",
+  "protocol_id": "controlled-efficacy-example-v1",
+  "protocol_digest": "sha256:f915dc9314e7217fd8c63167b5151ab1cd3ca5da2bf751c8167096abc7fae023",
+  "frozen_at": "2026-08-09T00:00:00Z",
+  "repository_commit": "3c3a993b195ef378e95b8e95eed1fe310b4ed009",
+  "scenario_manifest_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "expected_facts_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "quality_scoring_version": "expected-fact-recall/v1",
+  "noninferiority_margin_ppm": 50000,
+  "critical_severities": ["critical", "high"],
+  "variance_pilot_pairs": 8,
+  "confirmatory_pairs": 18,
+  "randomization_seed": 20260809,
+  "cache_strata": ["cold", "warm", "unknown"],
+  "primary_outcomes": [
+    "diagnostic_quality_noninferiority",
+    "additional_critical_misses",
+    "model_visible_command_output_bytes",
+    "uncached_read_input_tokens"
+  ],
+  "secondary_outcomes": ["total_input_tokens", "cost_estimate", "latency_ms", "retrieval_count"],
+  "exclusion_rules": ["instrumentation-invalid", "execution-identity-invalid", "protocol-invalid"],
+  "stopping_rules": ["stop on RBAC drift", "stop on identity mismatch", "stop on raw evidence leakage"]
+}

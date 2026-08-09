@@ -1,25 +1,90 @@
 {
+  "schema_version": "vuoro.outctl.enablement-evidence/v1",
+  "packet_id": "example-offline-local",
+  "repository_commit": "3c3a993b195ef378e95b8e95eed1fe310b4ed009",
+  "environment_id": "example-local",
+  "authorization": {"class": "offline-local", "reference": null},
+  "generated_at": "2026-08-09T00:00:00Z",
+  "evidence": [
+    {
+      "evidence_id": "foundation-gate",
+      "kind": "repository-verification",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "classification": "metadata-only",
+      "locator": "artifact:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "evidence_id": "mechanism-gate",
+      "kind": "mechanism-benchmark",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "classification": "metadata-only",
+      "locator": "artifact:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
   "foundation": {
     "schemas_valid": true,
     "policy_digest_stable": true,
-    "full_repository_gate": true
+    "full_repository_gate": true,
+    "evidence_ids": ["foundation-gate"]
   },
   "mechanism": {
     "passed": true,
     "process_semantics_passed": true,
-    "security_passed": true
+    "security_passed": true,
+    "negative_tests_passed": true,
+    "evidence_ids": ["mechanism-gate"]
   },
   "identity_boundary": {
     "direct_argv": true,
     "identity_source": "runner_injected",
     "paired_receipts": [],
-    "read_only_rbac": false
+    "read_only_rbac": false,
+    "negative_rbac_tests": false,
+    "evidence_ids": []
   },
-  "shadow": {},
-  "controlled_study": {},
-  "ux_pilot": {},
-  "selected_enforcement": {},
-  "authority_integration": {},
-  "second_harness": {},
-  "hybrid": {}
+  "shadow": {
+    "semantic_equivalence": false,
+    "no_deadlocks": false,
+    "recovery_verified": false,
+    "overhead_acceptable": false,
+    "rollback_verified": false,
+    "evidence_ids": []
+  },
+  "controlled_study": {
+    "protocol_digest": null,
+    "dataset_class": "unavailable",
+    "frozen_protocol": false,
+    "protocol_valid_pairs": 0,
+    "quality_noninferior": false,
+    "zero_additional_critical_misses": false,
+    "median_command_output_reduction_ppm": null,
+    "evidence_ids": []
+  },
+  "ux_pilot": {
+    "multi_turn": false,
+    "quality_preserved": false,
+    "retrieval_contributed": false,
+    "raw_free_report": false,
+    "evidence_ids": []
+  },
+  "selected_enforcement": {
+    "approved_command_classes": false,
+    "rollback_verified": false,
+    "redaction_verified": false,
+    "bypass_pressure_acceptable": false,
+    "evidence_ids": []
+  },
+  "authority_integration": {
+    "action_receipts": false,
+    "audit_verification": false,
+    "policy_promoted": false,
+    "evidence_ids": []
+  },
+  "second_harness": {"harness_id": null, "conformant": false, "evidence_ids": []},
+  "hybrid": {
+    "replica_classes_preserved": false,
+    "cross_host_verified": false,
+    "local_break_glass": false,
+    "evidence_ids": []
+  }
 }

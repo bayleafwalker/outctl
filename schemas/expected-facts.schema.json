@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:expected-facts:v1",
+  "title": "Frozen diagnostic fact denominator",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scenario_id", "facts"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.expected-facts/v1"},
+    "scenario_id": {"type": "string", "minLength": 1},
+    "facts": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["fact_id", "key", "status", "severity", "critical"],
+        "properties": {
+          "fact_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+          "key": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "minLength": 1},
+          "severity": {"enum": ["info", "warning", "high", "critical"]},
+          "critical": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

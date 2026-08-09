@@ -1,0 +1,33 @@
+{
+  "schema_version": "vuoro.outctl.study-analysis/v1",
+  "protocol_digest": "sha256:f915dc9314e7217fd8c63167b5151ab1cd3ca5da2bf751c8167096abc7fae023",
+  "analysis_code_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "dataset_class": "confirmatory",
+  "pairs": [
+    {
+      "pair_id": "scenario-1-repetition-1",
+      "scenario_id": "healthy-cluster",
+      "starting_arm": "B",
+      "cache_stratum": "cold",
+      "protocol_valid": true,
+      "identity_binding_match": true,
+      "quality_score_a_ppm": 1000000,
+      "quality_score_b_ppm": 1000000,
+      "critical_miss_a": false,
+      "critical_miss_b": false,
+      "command_output_reduction_ppm": 840000,
+      "uncached_read_reduction_ppm": 300000
+    }
+  ],
+  "paired_summary": {
+    "protocol_valid_pairs": 1,
+    "median_command_output_reduction_ppm": 840000,
+    "geometric_mean_command_output_ratio_ppm": 160000,
+    "median_uncached_read_reduction_ppm": 300000,
+    "quality_noninferior": true,
+    "additional_critical_misses": 0
+  },
+  "pooled_secondary": {"total_input_tokens_a": 1000, "total_input_tokens_b": 1200},
+  "gate_results": {"quality_noninferior": true, "zero_additional_critical_misses": true},
+  "generated_at": "2026-08-09T00:00:00Z"
+}

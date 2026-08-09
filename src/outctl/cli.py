@@ -21,6 +21,7 @@ from outctl.adapter import (
 )
 from outctl.benchmark import benchmark, rollback_check
 from outctl.capture import recover_partials
+from outctl.contracts import ContractValidationError, validate_contract
 from outctl.enablement import EnablementEvidenceError, evaluate_enablement
 from outctl.pilot import PilotReportError, validate_pilot_report
 from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
@@ -136,6 +137,24 @@ def build_parser() -> argparse.ArgumentParser:
     enablement = commands.add_parser("enablement", help="evaluate metadata-only stage gates")
     enablement.add_argument("evidence", type=Path)
     commands.add_parser("rollback-check", help="verify break-glass bypass locally")
+    contract = commands.add_parser("contract-validate", help="validate a shared JSON contract")
+    contract.add_argument(
+        "schema",
+        choices=(
+            "cross-harness-conformance",
+            "enablement-evidence",
+            "evidence-reference",
+            "expected-facts",
+            "logical-command-request",
+            "runner-command-result",
+            "scenario-manifest",
+            "shadow-observation",
+            "study-analysis",
+            "study-protocol",
+            "ux-evidence",
+        ),
+    )
+    contract.add_argument("document", type=Path)
     return parser
 
 
@@ -528,6 +547,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             report = rollback_check()
             _json(report)
             return 0 if report["passed"] is True else 1
+        if args.command == "contract-validate":
+            value = json.loads(args.document.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                raise ContractValidationError("contract document root must be an object")
+            validate_contract(args.schema, value)
+            _json({"status": "VALID", "schema": args.schema})
+            return 0
     except (OSError, PilotReportError, ValueError) as error:
         _json({"status": "ERROR", "detail": _metadata_text(str(error))})
         return 2

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:scenario-manifest:v1",
+  "title": "Seeded/replayable controlled scenario manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scenario_id", "scenario_class", "seed", "fixture_digest", "expected_facts_digest", "replayable", "mutation_authority_required"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.scenario-manifest/v1"},
+    "scenario_id": {"type": "string", "minLength": 1},
+    "scenario_class": {"enum": ["healthy", "node-not-ready", "crashloop", "gitops-reconciliation-failure", "storage-failure", "warning-events"]},
+    "seed": {"type": "integer", "minimum": 0},
+    "fixture_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "expected_facts_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "replayable": {"const": true},
+    "mutation_authority_required": {"type": "boolean"}
+  }
+}

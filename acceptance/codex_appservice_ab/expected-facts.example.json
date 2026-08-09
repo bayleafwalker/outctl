@@ -1,8 +1,9 @@
 {
+  "schema_version": "vuoro.outctl.expected-facts/v1",
   "scenario_id": "replace-with-frozen-seeded-scenario-id",
   "facts": [
-    {"key": "coverage:cluster_api", "status": "healthy", "critical": false},
-    {"key": "coverage:nodes", "status": "degraded", "critical": false},
-    {"key": "finding:component:node/node-3", "status": "high", "critical": true}
+    {"fact_id": "cluster-api-healthy", "key": "coverage:cluster_api", "status": "healthy", "severity": "info", "critical": false},
+    {"fact_id": "nodes-degraded", "key": "coverage:nodes", "status": "degraded", "severity": "warning", "critical": false},
+    {"fact_id": "node-not-ready", "key": "finding:component:node/node-3", "status": "high", "severity": "high", "critical": true}
   ]
 }

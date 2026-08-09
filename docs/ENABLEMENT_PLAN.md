@@ -11,6 +11,8 @@ uv run outctl enablement /path/to/enablement-evidence.json
 ```
 
 The checked-in starting shape is `config/enablement-evidence.example.json`.
+Shared wire and evidence contracts plus ActionQ/audit/kctl mapping rules are in
+`docs/CONTRACT_INTEGRATION.md`.
 
 ## Stage 0 — contracts and local gates
 

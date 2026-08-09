@@ -34,6 +34,9 @@ test = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/outctl"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "outctl/schemas"
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"
 testpaths = ["tests"]
@@ -49,4 +52,3 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 packages = ["outctl"]
-

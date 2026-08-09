@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:cross-harness-conformance:v1",
+  "title": "Cross-harness bounded output conformance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "contract_digests", "harness_a", "harness_b", "fixture_results", "alternate_executor_constrained", "one_version_back_readable", "conformant", "generated_at"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.cross-harness-conformance/v1"},
+    "contract_digests": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}, "uniqueItems": true},
+    "harness_a": {"$ref": "#/$defs/harness"},
+    "harness_b": {"$ref": "#/$defs/harness"},
+    "fixture_results": {
+      "type": "array", "minItems": 1,
+      "items": {"type": "object", "additionalProperties": false, "required": ["fixture_id", "bypass_equivalent", "shadow_equivalent", "enforce_envelope_equivalent", "retrieval_equivalent"], "properties": {"fixture_id": {"type": "string", "minLength": 1}, "bypass_equivalent": {"type": "boolean"}, "shadow_equivalent": {"type": "boolean"}, "enforce_envelope_equivalent": {"type": "boolean"}, "retrieval_equivalent": {"type": "boolean"}}}
+    },
+    "alternate_executor_constrained": {"type": "boolean"},
+    "one_version_back_readable": {"type": "boolean"},
+    "conformant": {"type": "boolean"},
+    "generated_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "harness": {"type": "object", "additionalProperties": false, "required": ["id", "version", "adapter_commit"], "properties": {"id": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}, "adapter_commit": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"}}}
+  }
+}

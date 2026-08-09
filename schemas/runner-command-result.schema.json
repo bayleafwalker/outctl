@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:runner-command-result:v1",
+  "title": "Runner command/capture result attachment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "request_digest", "logical_command_id", "bindings",
+    "identity_binding_sha256", "direct_argv", "command", "capture",
+    "output_attachment", "started_at", "ended_at"
+  ],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.runner-command-result/v1"},
+    "request_digest": {"$ref": "#/$defs/digest"},
+    "logical_command_id": {"type": "string", "minLength": 1},
+    "bindings": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action_id", "attempt_id", "session_id", "workspace_id", "correlation_id"],
+      "properties": {
+        "action_id": {"type": ["integer", "null"], "minimum": 1},
+        "attempt_id": {"type": ["string", "null"], "minLength": 1},
+        "session_id": {"type": "string", "minLength": 1},
+        "workspace_id": {"type": "string", "minLength": 1},
+        "correlation_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "identity_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "direct_argv": {"const": true},
+    "command": {
+      "type": "object", "additionalProperties": false,
+      "required": ["started", "exit_code", "signal", "timed_out", "cancelled"],
+      "properties": {
+        "started": {"type": "boolean"},
+        "exit_code": {"type": ["integer", "null"]},
+        "signal": {"type": ["integer", "null"]},
+        "timed_out": {"type": "boolean"},
+        "cancelled": {"type": "boolean"}
+      }
+    },
+    "capture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "capture_ref", "manifest_digest"],
+      "properties": {
+        "status": {"enum": ["BYPASSED", "COMPLETE", "CAPTURE_TRUNCATED", "CAPTURE_DEGRADED", "CAPTURE_FAILED", "RECOVERED_INCOMPLETE"]},
+        "capture_ref": {"type": ["string", "null"], "pattern": "^outctl://capture/"},
+        "manifest_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"}
+      }
+    },
+    "output_attachment": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["ref", "digest", "classification"],
+      "properties": {
+        "ref": {"type": "string", "pattern": "^artifact:sha256:[a-f0-9]{64}$"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "classification": {"enum": ["manifest-only", "projection-only"]}
+      }
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "ended_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  }
+}

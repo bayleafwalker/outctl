@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:study-analysis:v1",
+  "title": "Raw-free paired controlled study analysis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol_digest", "analysis_code_digest", "dataset_class", "pairs", "paired_summary", "pooled_secondary", "gate_results", "generated_at"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.study-analysis/v1"},
+    "protocol_digest": {"$ref": "#/$defs/digest"},
+    "analysis_code_digest": {"$ref": "#/$defs/digest"},
+    "dataset_class": {"enum": ["variance-pilot", "confirmatory"]},
+    "pairs": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["pair_id", "scenario_id", "starting_arm", "cache_stratum", "protocol_valid", "identity_binding_match", "quality_score_a_ppm", "quality_score_b_ppm", "critical_miss_a", "critical_miss_b", "command_output_reduction_ppm", "uncached_read_reduction_ppm"],
+        "properties": {
+          "pair_id": {"type": "string", "minLength": 1}, "scenario_id": {"type": "string", "minLength": 1},
+          "starting_arm": {"enum": ["A", "B"]}, "cache_stratum": {"enum": ["cold", "warm", "unknown"]},
+          "protocol_valid": {"type": "boolean"}, "identity_binding_match": {"type": "boolean"},
+          "quality_score_a_ppm": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000000},
+          "quality_score_b_ppm": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000000},
+          "critical_miss_a": {"type": ["boolean", "null"]}, "critical_miss_b": {"type": ["boolean", "null"]},
+          "command_output_reduction_ppm": {"type": ["integer", "null"]},
+          "uncached_read_reduction_ppm": {"type": ["integer", "null"]}
+        }
+      }
+    },
+    "paired_summary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol_valid_pairs", "median_command_output_reduction_ppm", "geometric_mean_command_output_ratio_ppm", "median_uncached_read_reduction_ppm", "quality_noninferior", "additional_critical_misses"],
+      "properties": {
+        "protocol_valid_pairs": {"type": "integer", "minimum": 0},
+        "median_command_output_reduction_ppm": {"type": ["integer", "null"]},
+        "geometric_mean_command_output_ratio_ppm": {"type": ["integer", "null"], "minimum": 0},
+        "median_uncached_read_reduction_ppm": {"type": ["integer", "null"]},
+        "quality_noninferior": {"type": ["boolean", "null"]},
+        "additional_critical_misses": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "pooled_secondary": {"type": "object", "additionalProperties": {"type": ["integer", "null"]}},
+    "gate_results": {"type": "object", "additionalProperties": {"type": "boolean"}},
+    "generated_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}
+}

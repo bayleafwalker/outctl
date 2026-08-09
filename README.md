@@ -20,6 +20,8 @@ The design is deliberately narrow. `outctl` is not a scheduler, queue, workflow 
    [`docs/DEVBOX.md`](docs/DEVBOX.md) — autonomous pass sequence and devbox setup.
 8. [`docs/ENABLEMENT_PLAN.md`](docs/ENABLEMENT_PLAN.md) — current ordered
    shadow, study, enforcement, integration, and rollback gates.
+9. [`docs/CONTRACT_INTEGRATION.md`](docs/CONTRACT_INTEGRATION.md) — shared
+   contracts and cross-repository attachment mappings.
 
 ## Core decision
 
