@@ -156,6 +156,11 @@ def _identity_denial(command: str, pinned: str | None) -> str | None:
         for index, token in enumerate(segment):
             if _basename(token) != "kubectl" or _is_discovery_reference(segment, index):
                 continue
+            if index != 0:
+                return (
+                    "kubectl must be invoked directly so the experiment identity pin "
+                    "cannot be replaced by an environment wrapper"
+                )
             if "/" in token and (pinned is None or Path(token).resolve() != Path(pinned).resolve()):
                 return "absolute kubectl paths cannot bypass the experiment identity pin"
             args = segment[index + 1 :]

@@ -74,6 +74,12 @@ class GuardTests(unittest.TestCase):
             )
             self.assertIsNone(guard._identity_denial("kubectl get pods", "/pin/kubectl"))
 
+        self.assertIsNotNone(
+            baseline_guard._identity_denial(
+                "direnv exec . kubectl get pods -A", "/pin/kubectl"
+            )
+        )
+
     def test_global_flags_before_verb(self) -> None:
         for classifier in (classify_kubectl, classify_readonly_kubectl):
             value = classifier("kubectl --context appservice -o wide get pods -A")
@@ -84,6 +90,16 @@ class GuardTests(unittest.TestCase):
     def test_baseline_guard_contains_no_treatment_guidance(self) -> None:
         guard = Path(run.__file__).with_name("kubectl_readonly_guard.py")
         self.assertNotIn("outctl", guard.read_text(encoding="utf-8").casefold())
+
+    def test_pinned_identity_guidance_is_treatment_neutral(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            worktree = Path(temporary)
+            (worktree / "AGENTS.md").write_text("# baseline\n", encoding="utf-8")
+            run._append_pinned_identity_guidance(worktree)
+            guidance = (worktree / "AGENTS.md").read_text(encoding="utf-8")
+            self.assertIn("dedicated read-only credential", guidance)
+            self.assertIn("Do not prefix it with `direnv`", guidance)
+            self.assertNotIn("outctl", guidance.casefold())
 
     def test_router_search_uses_only_bounded_projected_windows(self) -> None:
         payload = {

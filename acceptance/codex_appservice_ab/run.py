@@ -669,6 +669,28 @@ interactive operations, and Kubernetes Secret reads.
     (skill_dir / "SKILL.md").write_text(skill, encoding="utf-8")
 
 
+def _append_pinned_identity_guidance(worktree: Path) -> None:
+    """Override repository-wide direnv advice identically for both pilot arms."""
+
+    agents = worktree / "AGENTS.md"
+    existing = agents.read_text(encoding="utf-8") if agents.exists() else ""
+    marker = "<!-- codex-ab-pinned-kubernetes-identity -->"
+    if marker in existing:
+        return
+    addition = f"""
+
+{marker}
+## Experiment-local Kubernetes identity
+
+For this health-check session, the launcher already pins `kubectl` to the
+dedicated read-only credential. Invoke the experiment-provided command route
+directly and exactly as requested. Do not prefix it with `direnv`, `env`, a
+shell wrapper, or an absolute executable path; those routes are denied because
+they could replace the pinned identity.
+"""
+    agents.write_text(existing.rstrip() + addition + "\n", encoding="utf-8")
+
+
 def _install_ux_helper(
     target: Path,
     *,
@@ -2546,6 +2568,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         baseline_hooks_sha256 = _sha256_file(worktree_b / ".codex" / "hooks.json")
+        _append_pinned_identity_guidance(worktree_a)
+        _append_pinned_identity_guidance(worktree_b)
         _append_arm_a_guidance(
             worktree_a, wrapper, retrieval_prefix, treatment_mode=args.treatment_mode
         )
