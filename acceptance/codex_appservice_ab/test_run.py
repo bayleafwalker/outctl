@@ -238,6 +238,41 @@ class HarnessValidationTests(unittest.TestCase):
         )
         self.assertNotIn("--ephemeral", command)
 
+    def test_controlled_completion_preserves_process_result_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            events = root / "events.jsonl"
+            events.write_text(
+                json.dumps({"type": "thread.started", "thread_id": "thread-1"}) + "\n"
+            )
+            stderr = root / "stderr.log"
+            stderr.touch()
+            original = run.ProcessResult(
+                arm="A",
+                return_code=0,
+                timed_out=False,
+                duration_ms=10,
+                launched_monotonic_ns=1,
+                events_path=events,
+                stderr_path=stderr,
+                final_path=root / "final.json",
+                hook_log_path=root / "hooks.jsonl",
+                outctl_spool_root=root / "spool",
+            )
+            process = mock.Mock()
+            process.wait.return_value = 0
+            with mock.patch.object(subprocess, "Popen", return_value=process):
+                resumed = run._resume_controlled_completion(
+                    original,
+                    codex_bin="codex",
+                    model="model",
+                    schema=root / "schema.json",
+                    env={},
+                    timeout_seconds=1,
+                )
+            self.assertEqual(resumed.outctl_spool_root, original.outctl_spool_root)
+            self.assertGreaterEqual(resumed.duration_ms, original.duration_ms)
+
     def test_analyst_bundle_is_deterministic_and_excludes_bytecode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

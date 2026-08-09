@@ -1116,6 +1116,7 @@ def _resume_controlled_completion(
         stderr_path=result.stderr_path,
         final_path=result.final_path,
         hook_log_path=result.hook_log_path,
+        outctl_spool_root=result.outctl_spool_root,
     )
 
 
