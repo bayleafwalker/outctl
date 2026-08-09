@@ -1,5 +1,9 @@
 # Devbox handoff — `codex exec --json` A/B harness
 
+> Historical harness-transition handoff. Its quality-as-validity and
+> three-pair evaluation rules are superseded by `docs/ENABLEMENT_PLAN.md` and
+> the current separated validity/outcome/economics result model.
+
 ## Objective
 
 Implement and review an experiment-local replacement for the current

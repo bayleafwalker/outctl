@@ -295,3 +295,35 @@ def test_cli_validates_raw_free_pilot_report(
     path.write_text(json.dumps(report))
     assert main(["pilot-validate", str(path)]) == 0
     assert _payload(capsys)["status"] == "VALID"
+
+
+def test_cli_exposes_rollback_and_enablement_checks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["rollback-check"]) == 0
+    assert _payload(capsys)["passed"] is True
+
+    evidence = tmp_path / "enablement.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "foundation": {
+                    "schemas_valid": True,
+                    "policy_digest_stable": True,
+                    "full_repository_gate": True,
+                },
+                "mechanism": {
+                    "passed": True,
+                    "process_semantics_passed": True,
+                    "security_passed": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert main(["enablement", str(evidence)]) == 0
+    payload = _payload(capsys)
+    assert payload["highest_contiguous_stage"] == 1
+    next_stage = payload["next_stage"]
+    assert isinstance(next_stage, dict)
+    assert next_stage["name"] == "runner-owned-identity-boundary"

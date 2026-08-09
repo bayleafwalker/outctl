@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:kubernetes-execution-receipt:v1",
+  "title": "Runner-injected Kubernetes execution identity receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "logical_command_id",
+    "executable_sha256",
+    "kubeconfig_sha256",
+    "context_sha256",
+    "api_server_sha256",
+    "argv_sha256",
+    "identity_binding_sha256",
+    "identity_source",
+    "direct_argv"
+  ],
+  "properties": {
+    "logical_command_id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "executable_sha256": {"$ref": "#/$defs/sha256"},
+    "kubeconfig_sha256": {"$ref": "#/$defs/sha256"},
+    "context_sha256": {"$ref": "#/$defs/sha256"},
+    "api_server_sha256": {"$ref": "#/$defs/sha256"},
+    "argv_sha256": {"$ref": "#/$defs/sha256"},
+    "identity_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "identity_source": {"const": "runner_injected"},
+    "direct_argv": {"const": true}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

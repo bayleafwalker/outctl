@@ -1,5 +1,9 @@
 # First pilot assessment
 
+> Historical mechanism evidence. This record is not current economic or
+> diagnostic-quality efficacy evidence. See `docs/ENABLEMENT_PLAN.md` for the
+> next controlled study and enablement gates.
+
 ## Scope
 
 This is a local, qualitative pre-pilot assessment for the intended Codex or

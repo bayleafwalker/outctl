@@ -18,6 +18,8 @@ The design is deliberately narrow. `outctl` is not a scheduler, queue, workflow 
 6. [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) and [`docs/ROLLOUT.md`](docs/ROLLOUT.md).
 7. [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) and
    [`docs/DEVBOX.md`](docs/DEVBOX.md) — autonomous pass sequence and devbox setup.
+8. [`docs/ENABLEMENT_PLAN.md`](docs/ENABLEMENT_PLAN.md) — current ordered
+   shadow, study, enforcement, integration, and rollback gates.
 
 ## Core decision
 
@@ -69,6 +71,13 @@ uv run pytest
 uv run ruff check .
 uv run mypy src
 uv build
+```
+
+Run the metadata-only mechanism and enablement gates with:
+
+```bash
+uv run outctl benchmark --spool-root /tmp/outctl-mechanism
+uv run outctl enablement config/enablement-evidence.example.json
 ```
 
 The CLI supports an opt-in direct-argv wrapper via `outctl run -- <argv>`,

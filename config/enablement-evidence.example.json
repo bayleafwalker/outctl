@@ -1,0 +1,25 @@
+{
+  "foundation": {
+    "schemas_valid": true,
+    "policy_digest_stable": true,
+    "full_repository_gate": true
+  },
+  "mechanism": {
+    "passed": true,
+    "process_semantics_passed": true,
+    "security_passed": true
+  },
+  "identity_boundary": {
+    "direct_argv": true,
+    "identity_source": "runner_injected",
+    "paired_receipts": [],
+    "read_only_rbac": false
+  },
+  "shadow": {},
+  "controlled_study": {},
+  "ux_pilot": {},
+  "selected_enforcement": {},
+  "authority_integration": {},
+  "second_harness": {},
+  "hybrid": {}
+}

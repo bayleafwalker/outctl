@@ -1,5 +1,9 @@
 # Devbox implementation handoff — concurrent Terra A/B pilot
 
+> Historical app-server-first implementation handoff. It is retained for
+> provenance and does not define the current enablement path or authorize a
+> live run. See `docs/ENABLEMENT_PLAN.md`.
+
 ## Purpose and scope
 
 Continue the local, read-only concurrent A/B pilot implementation. This is

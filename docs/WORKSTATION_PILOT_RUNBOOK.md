@@ -1,5 +1,10 @@
 # Workstation appservice pilot and review runbook
 
+> Historical qualitative runbook. Do not use its broad-context workflow for a
+> new live run. Current runs require the runner-owned identity boundary,
+> genuine read-only RBAC, frozen expected facts for quality claims, and the
+> ordered gates in `docs/ENABLEMENT_PLAN.md`.
+
 ## Preconditions
 
 - Use the `main` revision containing `outctl run` and `outctl pilot-validate`.

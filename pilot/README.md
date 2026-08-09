@@ -1,5 +1,9 @@
 # Concurrent Terra A/B pilot
 
+> Historical app-server pilot definition retained for provenance and offline
+> compatibility tests. New enablement follows `docs/ENABLEMENT_PLAN.md` and
+> the `acceptance/codex_appservice_ab` commissioning harness.
+
 This directory is the checked-in, raw-output-free definition of a local pilot.
 It is intentionally not a production integration and never grants mutation
 authority. `outctl pilot smoke` validates fixture telemetry without contacting

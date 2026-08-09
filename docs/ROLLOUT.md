@@ -1,5 +1,9 @@
 # Rollout and evaluation plan
 
+> Current sequencing and study gates are canonical in
+> `docs/ENABLEMENT_PLAN.md`. This document retains the original rollout-stage
+> rationale; where the two differ, the canonical plan wins.
+
 ## Rollout principle
 
 Prove subprocess correctness and measurable context savings before adding services, advanced profiles, or mandatory enforcement.

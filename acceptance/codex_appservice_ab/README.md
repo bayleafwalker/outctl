@@ -21,12 +21,15 @@ or health-quality efficacy. Do not make an efficacy claim until a real,
 scoped-read-only wiring pair completes and a reviewer manually reconciles its
 private JSONL/capture artifacts with the metadata-only report.
 
-The first live operation is deliberately staged:
+This harness is commissioning and exploratory UX infrastructure. The old
+three-pair proofset is closed and must not be extended. A future controlled
+study follows `docs/ENABLEMENT_PLAN.md` and is deliberately staged:
 
 1. Run the offline dry run and inspect A/B guidance plus generated hook hashes.
 2. Obtain separate authorization for one scoped read-only wiring pair.
 3. Manually reconcile the private artifacts and public metadata report.
-4. Only if that review passes, run three sequential matched pairs.
+4. Estimate paired variance with a separate 6–10 pair pilot.
+5. Freeze scenario denominators and sample size before confirmatory runs.
 
 Backend prompt-cache sharing is a confound. Cache values are descriptive; the
 decision metrics are total input, uncached-read input, model-visible command
@@ -34,9 +37,10 @@ output bytes, and weighted credits.
 
 ## Recommendation
 
-Run **three concurrent pairs** and judge the median. One pair is useful only as
-a wiring smoke test; stochastic agent behavior and prompt-cache timing are not
-known for their respect for sample-size theatre.
+Do not use this harness alone to claim general cost savings. Use it for wiring,
+mechanism, and UX commissioning. A controlled study requires seeded or
+replayable scenarios, frozen expected facts, and the runner-owned typed
+Kubernetes boundary.
 
 Treat this as an **intent-to-treat test**: it measures the net effect of native
 guidance plus enforcement plus bounded output, not the isolated byte-level cost
@@ -210,8 +214,9 @@ uv run python acceptance/codex_appservice_ab/run.py \
 ```
 
 Do not run this command without separately authorized, scoped read-only
-credentials. After manual artifact/report reconciliation, repeat the command
-with `--pairs 3` for the sequential matched evaluation. The launcher uses:
+credentials. After manual artifact/report reconciliation, stop. Do not promote
+a wiring pair into confirmatory evidence or automatically repeat it as a
+three-pair evaluation. The launcher uses:
 
 - detached worktrees at the same appservice commit;
 - isolated per-arm Codex homes;
@@ -253,7 +258,7 @@ primary; pooled totals are secondary operational accounting.
 
 ### Validity gates
 
-Reject or repeat a pair when any of these fail:
+Protocol validity fails when any of these fail:
 
 - both arms exit successfully without timeout;
 - both emit a fully Draft 2020-12 schema-valid structured result;
@@ -266,28 +271,32 @@ Reject or repeat a pair when any of these fail:
   unreadable manifests;
 - B does not spontaneously use `outctl`;
 - neither arm attempts a non-read-only Kubernetes operation;
-- both reach the same overall health status;
-- structured evidence Jaccard overlap is at least `0.60`;
 - process launch skew stays below `250 ms`.
+
+Overall-status agreement, evidence Jaccard, critical/high agreement, expected
+fact recall, and quality non-inferiority are outcomes. They never decide
+protocol inclusion. Without a frozen expected-fact denominator, quality is
+explicitly unscored.
 
 `treatment_first_try_compliant` is stricter than `treatment_compliant`: it is
 false when the model first tries direct `kubectl` and only corrects after a hook
 denial. That distinction tells you whether the skill worked or the guard merely
 caught it at the fence.
 
-### Initial efficacy gates
+### Controlled-study gates
 
-For a first production decision, I would use:
+For selected enforcement, use:
 
 ```text
 median model-visible command-output bytes reduction   >= 50%
 median model-visible kubectl-output bytes reduction   >= 50%
-median total input-token reduction                    >= 20%
-median uncached-read input-token reduction            >= 20%
-median Codex-credit reduction                         >= 15%
-median wall-time regression                           <= 20%
-health-result quality                                  non-inferior
+diagnostic quality                                     non-inferior
+additional critical/high misses                       0
 ```
+
+Uncached-read input is co-primary but has no frozen improvement threshold
+until the variance pilot is complete. Total input, cost, and wall time are
+secondary because cache timing and workflow variance dominate small samples.
 
 Do not use absolute cached-token count as a pass/fail metric. A may cache a
 larger guided prefix while still consuming fewer total and uncached tokens.

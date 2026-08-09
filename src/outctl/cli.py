@@ -19,7 +19,9 @@ from outctl.adapter import (
     resolve_adapter_mode,
     run_adapter,
 )
+from outctl.benchmark import benchmark, rollback_check
 from outctl.capture import recover_partials
+from outctl.enablement import EnablementEvidenceError, evaluate_enablement
 from outctl.pilot import PilotReportError, validate_pilot_report
 from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
 from outctl.retrieval import (
@@ -126,6 +128,14 @@ def build_parser() -> argparse.ArgumentParser:
     pilot_validate.add_argument("report", type=Path)
     pilot_command = commands.add_parser("pilot", help="concurrent Terra pilot tooling")
     pilot_command.add_argument("pilot_args", nargs=argparse.REMAINDER)
+    mechanism = commands.add_parser("benchmark", help="run the model-free mechanism benchmark")
+    _spool_argument(mechanism)
+    mechanism.add_argument("--repetitions", type=int, default=1)
+    mechanism.add_argument("--scale", type=int, default=20_000)
+    mechanism.add_argument("--max-projection-bytes", type=int, default=4_096)
+    enablement = commands.add_parser("enablement", help="evaluate metadata-only stage gates")
+    enablement.add_argument("evidence", type=Path)
+    commands.add_parser("rollback-check", help="verify break-glass bypass locally")
     return parser
 
 
@@ -499,6 +509,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "pilot":
             return pilot.main(args.pilot_args)
+        if args.command == "benchmark":
+            report = benchmark(
+                args.spool_root,
+                repetitions=args.repetitions,
+                scale=args.scale,
+                max_projection_bytes=args.max_projection_bytes,
+            )
+            _json(report)
+            return 0 if report["passed"] is True else 1
+        if args.command == "enablement":
+            value = json.loads(args.evidence.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                raise EnablementEvidenceError("enablement evidence root must be an object")
+            _json(evaluate_enablement(value))
+            return 0
+        if args.command == "rollback-check":
+            report = rollback_check()
+            _json(report)
+            return 0 if report["passed"] is True else 1
     except (OSError, PilotReportError, ValueError) as error:
         _json({"status": "ERROR", "detail": _metadata_text(str(error))})
         return 2
