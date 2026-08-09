@@ -672,6 +672,8 @@ Rules:
 
 - Use the canonical execution prefix verbatim. Do not replace it with a bare
   `outctl run`, alter its arguments, or write outside its allocated spool.
+- Execute the six requested commands serially in their listed order. Wait for
+  each bounded result before starting the next command.
 - Preserve direct argv after `--`; do not introduce an implicit shell inside outctl.
 - Start from the bounded projection returned by the router. It is derived from
   `outctl run`, while raw capture bytes remain private.

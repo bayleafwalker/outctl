@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import textwrap
+import threading
 import unittest
 import zipfile
 from pathlib import Path
@@ -21,6 +22,24 @@ from kubectl_readonly_guard import classify_kubectl as classify_readonly_kubectl
 
 
 class GuardTests(unittest.TestCase):
+    def test_router_serializes_commands_within_one_spool(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            first = outctl_kubectl_router._acquire_spool_lock(raw)
+            acquired = threading.Event()
+
+            def acquire_second() -> None:
+                second = outctl_kubectl_router._acquire_spool_lock(raw)
+                acquired.set()
+                second.close()
+
+            thread = threading.Thread(target=acquire_second)
+            thread.start()
+            self.assertFalse(acquired.wait(0.05))
+            first.close()
+            self.assertTrue(acquired.wait(1))
+            thread.join()
+            self.assertEqual((Path(raw) / ".router.lock").stat().st_mode & 0o777, 0o600)
+
     def test_classifies_direct_and_wrapped(self) -> None:
         direct = classify_kubectl(
             "direnv exec /projects/dev/appservice kubectl get deployment,pod -A -o wide"
@@ -129,7 +148,9 @@ class GuardTests(unittest.TestCase):
 
     def test_router_rewrites_logical_kubectl_to_pinned_direct_argv(self) -> None:
         prefix = ["/usr/bin/kubectl", "--kubeconfig", "/scoped", "--context", "scoped"]
-        with mock.patch.object(outctl_kubectl_router, "_run", return_value=0) as execute:
+        with tempfile.TemporaryDirectory() as spool, mock.patch.object(
+            outctl_kubectl_router, "_run", return_value=0
+        ) as execute:
             result = outctl_kubectl_router.main(
                 [
                     "run",
@@ -138,7 +159,7 @@ class GuardTests(unittest.TestCase):
                     "--kubectl-command-json",
                     json.dumps(prefix),
                     "--spool-root",
-                    "/spool",
+                    spool,
                     "--policy-ref",
                     "health",
                     "--policy-digest",

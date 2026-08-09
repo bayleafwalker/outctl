@@ -1,6 +1,7 @@
 Perform the fixed, read-only appservice health-check corpus using the local arm instructions and the canonical environment rooted at `{{CANONICAL_APPSERVICE}}`.
 
 Run each of these six kubectl argv exactly once, without shell pipelines, substitutions, or any other commands:
+Run them serially in the listed order and wait for each command to finish before starting the next.
 
 1. `kubectl version -o json`
 2. `kubectl get nodes -o wide`

@@ -10,12 +10,14 @@ Raw capture bytes remain in the outctl spool.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
 import sys
 from collections.abc import Sequence
-from typing import Any
+from pathlib import Path
+from typing import IO, Any
 
 
 def _outctl_command(value: str) -> list[str]:
@@ -167,6 +169,17 @@ def _run(argv: Sequence[str]) -> int:
     return completed.returncode
 
 
+def _acquire_spool_lock(spool_root: str) -> IO[bytes]:
+    """Serialize one arm's commands while leaving the two A/B arms concurrent."""
+    root = Path(spool_root)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = root / ".router.lock"
+    handle = lock_path.open("a+b")
+    os.chmod(lock_path, 0o600)
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -277,6 +290,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--max-matches-per-pattern",
             str(args.max_matches),
         ]
+    spool_lock = _acquire_spool_lock(args.spool_root)
     if args.action in {"search", "search-many"}:
         completed = subprocess.run(
             command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
@@ -295,8 +309,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
         _emit_search(capture_id, text)
-        return completed.returncode
-    return _run(command)
+        result = completed.returncode
+    else:
+        result = _run(command)
+    spool_lock.close()
+    return result
 
 
 if __name__ == "__main__":
