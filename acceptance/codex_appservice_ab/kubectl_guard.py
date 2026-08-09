@@ -294,6 +294,16 @@ def classify_kubectl(command: str) -> list[KubectlInvocation]:
                     if suffix[:1] == ["run"] and "--" in suffix[1:]:
                         wrapped = True
                         break
+            if not wrapped:
+                for helper_index, value in enumerate(preceding):
+                    if _basename(value) != "outctl-health":
+                        continue
+                    suffix = preceding[helper_index + 1 :]
+                    # ``kubectl`` is the token currently being classified, so
+                    # a helper invocation has no remaining prefix tokens.
+                    if not suffix:
+                        wrapped = True
+                        break
             invocations.append(_classify_args(segment[index + 1 :], wrapped))
     return invocations
 

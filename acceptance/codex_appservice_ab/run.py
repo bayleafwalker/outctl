@@ -469,12 +469,19 @@ def _find_outctl_guidance(worktree: Path) -> list[str]:
     return matches
 
 
-def _append_arm_a_guidance(worktree: Path, wrapper: str, retrieval_prefix: str) -> None:
+def _append_arm_a_guidance(
+    worktree: Path,
+    wrapper: str,
+    retrieval_prefix: str,
+    *,
+    treatment_mode: str,
+) -> None:
     agents = worktree / "AGENTS.md"
     existing = agents.read_text(encoding="utf-8") if agents.exists() else ""
     marker = "<!-- outctl-codex-ab-arm-a -->"
     if marker not in existing:
-        addition = f"""
+        if treatment_mode == "deterministic":
+            addition = f"""
 
 {marker}
 ## Experiment-local outctl routing
@@ -484,11 +491,23 @@ For this session's read-only appservice cluster health check, invoke every
 is disallowed. Never inspect raw capture files or rerun a command merely to
 recover omitted output.
 """
+        else:
+            addition = f"""
+
+{marker}
+## Experiment-local bounded command output
+
+`outctl-health` preserves complete command output privately and returns a
+bounded projection. Use it for logs, large listings, test output, or an
+expensive command you may otherwise need to rerun. Direct read-only `kubectl`
+is allowed for predictably small output.
+"""
         agents.write_text(existing.rstrip() + addition + "\n", encoding="utf-8")
 
     skill_dir = worktree / ".agents" / "skills" / "outctl-kubectl-health"
     skill_dir.mkdir(parents=True, exist_ok=True)
-    skill = f"""---
+    if treatment_mode == "deterministic":
+        skill = f"""---
 name: outctl-kubectl-health
 description: >-
   Route read-only appservice kubectl health checks through outctl with bounded
@@ -527,7 +546,74 @@ Rules:
 - The experiment hook denies direct kubectl, mutation/interactive verbs, and
   reads of Kubernetes Secret objects.
 """
+    else:
+        skill = """---
+name: outctl-kubectl-health
+description: Use bounded, recoverable output for potentially large read-only command results.
+---
+
+# Bounded command output
+
+`outctl-health` preserves full output privately and returns a bounded projection.
+
+- Use `outctl-health kubectl <read-only kubectl arguments>` for logs, large
+  listings, test output, or expensive commands.
+- When omitted evidence matters, retrieve from the capture ID with a bounded
+  `outctl-health tail <capture-id>`; do not rerun only to recover output.
+- Direct read-only `kubectl` is fine for predictably small output.
+- `outctl-health --help` describes the available safe surface.
+
+Never inspect raw spool files. The experiment guard still denies mutations,
+interactive operations, and Kubernetes Secret reads.
+"""
     (skill_dir / "SKILL.md").write_text(skill, encoding="utf-8")
+
+
+def _install_ux_helper(
+    target: Path,
+    *,
+    router_exec: str,
+    router_common: str,
+    policy_ref: str,
+    policy_digest: str,
+) -> None:
+    """Install the small model-facing command surface for the opt-in UX arm."""
+
+    target.mkdir(parents=True, exist_ok=True)
+    helper = target / "outctl-health"
+    helper.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+case "${{1:-}}" in
+  kubectl)
+    shift
+    exec {router_exec} run {router_common} \\
+      --policy-ref {shlex.quote(policy_ref)} \\
+      --policy-digest {shlex.quote(policy_digest)} -- kubectl "$@"
+    ;;
+  tail)
+    shift
+    exec {router_exec} tail {router_common} "$@"
+    ;;
+  -h|--help|help|'')
+    cat <<'EOF'
+Usage:
+  outctl-health kubectl <read-only kubectl arguments>
+  outctl-health tail <capture-id> [--lines N]
+
+Runs preserve full output privately and show a bounded projection. Tail reads
+an existing capture; neither operation reruns a previous command.
+EOF
+    ;;
+  *)
+    echo "outctl-health: expected kubectl, tail, or --help" >&2
+    exit 2
+    ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
 
 
 def _router_prefixes(
@@ -575,7 +661,9 @@ def _write_hook_config(hooks_path: Path, command: str) -> None:
     hooks_path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-def _install_guard(worktree: Path, *, arm: str, wrapper: str) -> None:
+def _install_guard(
+    worktree: Path, *, arm: str, wrapper: str, require_outctl: bool = True
+) -> None:
     codex_dir = worktree / ".codex"
     hooks_dir = codex_dir / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -586,7 +674,7 @@ def _install_guard(worktree: Path, *, arm: str, wrapper: str) -> None:
         shutil.copy2(source_guard, target_guard)
         policy = {
             "arm": arm,
-            "require_outctl": True,
+            "require_outctl": require_outctl,
             "wrapper_hint": wrapper,
         }
         (codex_dir / "outctl-routing-policy.json").write_text(
@@ -1532,6 +1620,8 @@ def _compare_pair(
     signature_a: set[tuple[str, str]],
     signature_b: set[tuple[str, str]],
     launch_skew_ms: float,
+    *,
+    treatment_mode: str,
 ) -> dict[str, Any]:
     metrics = {
         "input_tokens": _comparison_metric(arm_a, arm_b, ("usage", "input_tokens")),
@@ -1573,18 +1663,18 @@ def _compare_pair(
     a_final = arm_a.get("final") if isinstance(arm_a.get("final"), Mapping) else {}
     b_final = arm_b.get("final") if isinstance(arm_b.get("final"), Mapping) else {}
 
-    treatment_compliant = (
+    strict_treatment_compliant = (
         int(a_commands.get("kubectl_completed", 0)) > 0
         and int(a_commands.get("kubectl_direct_completed", 0)) == 0
         and int(a_commands.get("kubectl_via_outctl_completed", 0))
         == int(a_commands.get("kubectl_completed", 0))
     )
-    treatment_first_try_compliant = (
-        treatment_compliant
+    strict_treatment_first_try_compliant = (
+        strict_treatment_compliant
         and int(a_commands.get("kubectl_direct_attempts", 0)) == 0
         and int(a_hooks.get("require_outctl_denials", 0)) == 0
     )
-    treatment_capture_accounted = (
+    strict_treatment_capture_accounted = (
         int(a_spool.get("capture_directory_count", 0))
         == int(a_commands.get("kubectl_via_outctl_attempts", 0))
         and int(a_spool.get("capture_directory_count", 0)) > 0
@@ -1593,6 +1683,18 @@ def _compare_pair(
         and int(a_spool.get("manifest_errors", 0)) == 0
         and set(a_spool.get("capture_status_counts", {})) <= {"COMPLETE"}
         and int(a_spool.get("retrieval_count", 0)) == 1
+    )
+    treatment_adopted = int(a_commands.get("kubectl_via_outctl_completed", 0)) > 0
+    treatment_compliant = (
+        strict_treatment_compliant if treatment_mode == "deterministic" else treatment_adopted
+    )
+    treatment_first_try_compliant = (
+        strict_treatment_first_try_compliant
+        if treatment_mode == "deterministic"
+        else treatment_adopted and int(a_hooks.get("require_outctl_denials", 0)) == 0
+    )
+    treatment_capture_accounted = (
+        strict_treatment_capture_accounted if treatment_mode == "deterministic" else True
     )
     hooks_observed_both_arms = (
         int(a_hooks.get("events", 0)) > 0 and int(b_hooks.get("events", 0)) > 0
@@ -1634,11 +1736,11 @@ def _compare_pair(
     )
 
     flags: list[str] = []
-    if not treatment_compliant:
+    if treatment_mode == "deterministic" and not treatment_compliant:
         flags.append("arm A did not complete all kubectl work through outctl")
     elif not treatment_first_try_compliant:
         flags.append("arm A required hook correction before completing kubectl through outctl")
-    if not treatment_capture_accounted:
+    if treatment_mode == "deterministic" and not treatment_capture_accounted:
         flags.append(
             "arm A did not produce one complete capture per wrapped command and one "
             "bounded retrieval"
@@ -1667,8 +1769,8 @@ def _compare_pair(
         and not bool(arm_b.get("timed_out"))
         and bool(a_final.get("schema_valid"))
         and bool(b_final.get("schema_valid"))
-        and treatment_compliant
-        and treatment_capture_accounted
+        and (treatment_mode != "deterministic" or treatment_compliant)
+        and (treatment_mode != "deterministic" or treatment_capture_accounted)
         and hooks_observed_both_arms
         and not baseline_spontaneously_used_outctl
         and no_mutation_attempts
@@ -1683,6 +1785,8 @@ def _compare_pair(
         "launch_skew_ms": launch_skew_ms,
         "metrics": metrics,
         "treatment_compliant": treatment_compliant,
+        "treatment_adopted": treatment_adopted,
+        "treatment_mode": treatment_mode,
         "treatment_first_try_compliant": treatment_first_try_compliant,
         "treatment_capture_accounted": treatment_capture_accounted,
         "hooks_observed_both_arms": hooks_observed_both_arms,
@@ -1747,6 +1851,11 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "all_pairs_valid": len(valid_pairs) == len(pairs),
         "all_treatment_compliant": all(
             bool(pair.get("comparison", {}).get("treatment_compliant"))
+            for pair in pairs
+            if isinstance(pair.get("comparison"), Mapping)
+        ),
+        "treatment_adoption_pairs": sum(
+            bool(pair.get("comparison", {}).get("treatment_adopted"))
             for pair in pairs
             if isinstance(pair.get("comparison"), Mapping)
         ),
@@ -1824,6 +1933,15 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--pairs", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--prompt", type=Path, default=here / "prompt.md")
+    parser.add_argument(
+        "--treatment-mode",
+        choices=("deterministic", "opt-in"),
+        default="deterministic",
+        help=(
+            "deterministic requires outctl for each kubectl command; opt-in measures "
+            "adoption of the brief bounded-output guidance without treating direct reads as failure"
+        ),
+    )
     parser.add_argument(
         "--output-schema",
         type=Path,
@@ -1995,8 +2113,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
 
         baseline_hooks_sha256 = _sha256_file(worktree_b / ".codex" / "hooks.json")
-        _append_arm_a_guidance(worktree_a, wrapper, retrieval_prefix)
-        _install_guard(worktree_a, arm="A", wrapper=wrapper)
+        _append_arm_a_guidance(
+            worktree_a, wrapper, retrieval_prefix, treatment_mode=args.treatment_mode
+        )
+        _install_guard(
+            worktree_a,
+            arm="A",
+            wrapper=wrapper,
+            require_outctl=args.treatment_mode == "deterministic",
+        )
         _install_guard(worktree_b, arm="B", wrapper=wrapper)
         baseline_overlay_contamination = _find_outctl_guidance(worktree_b)
         newly_introduced_contamination = sorted(
@@ -2026,6 +2151,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             for path in (arm_dir_a, arm_dir_b, spool_a, spool_a / "uv-cache", spool_a / "tmp"):
                 path.mkdir(parents=True, exist_ok=True)
                 path.chmod(0o700)
+            helper_dir_a = arm_dir_a / "bin"
+            if args.treatment_mode == "opt-in":
+                _install_ux_helper(
+                    helper_dir_a,
+                    router_exec=router_exec,
+                    router_common=router_common,
+                    policy_ref=args.policy_ref,
+                    policy_digest=args.policy_digest,
+                )
             _write_codex_home(
                 home_a,
                 worktree=worktree_a,
@@ -2090,6 +2224,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "OUTCTL_AB_SPOOL_ROOT": str(spool_a),
                 "OUTCTL_ENABLED": "1",
                 "OUTCTL_MODE": "enforce",
+                **(
+                    {"PATH": str(helper_dir_a) + os.pathsep + base_env.get("PATH", "")}
+                    if args.treatment_mode == "opt-in"
+                    else {}
+                ),
             }
             env_b = {
                 **base_env,
@@ -2178,19 +2317,33 @@ def main(argv: Sequence[str] | None = None) -> int:
                 requested_model=args.model,
                 validator=validator,
             )
-            comparison = _compare_pair(arm_a, arm_b, signature_a, signature_b, launch_skew_ms)
+            comparison = _compare_pair(
+                arm_a,
+                arm_b,
+                signature_a,
+                signature_b,
+                launch_skew_ms,
+                treatment_mode=args.treatment_mode,
+            )
             pairs.append(
                 {
                     "pair": pair_index,
                     "thread_start_order": thread_start_order,
                     "arms": {
-                        "A": {"treatment": "guided_outctl", **arm_a},
+                        "A": {
+                            "treatment": (
+                                "guided_outctl"
+                                if args.treatment_mode == "deterministic"
+                                else "opt_in_outctl"
+                            ),
+                            **arm_a,
+                        },
                         "B": {"treatment": "unguided_native", **arm_b},
                     },
                     "comparison": comparison,
                 }
             )
-            if _commissioning_failed(arm_a):
+            if args.treatment_mode == "deterministic" and _commissioning_failed(arm_a):
                 break
 
         _write_json_private(output / "planned-commands.json", planned_commands)
@@ -2199,6 +2352,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "experiment": {
                     "id": run_id,
                     "dry_run": True,
+                    "treatment_mode": args.treatment_mode,
+                    "measurement_intent": (
+                        "mechanism" if args.treatment_mode == "deterministic" else "exploratory_ux"
+                    ),
                     "created_at": _utc_now(),
                     "appservice_commit": commit,
                     "worktree_a": str(worktree_a),
@@ -2226,6 +2383,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "tracked_patch_sha256": _sha256_bytes(tracked_patch) if tracked_patch else None,
                     "included_untracked_files": untracked_counts,
                     "model_requested": args.model,
+                    "treatment_mode": args.treatment_mode,
+                    "measurement_intent": (
+                        "mechanism" if args.treatment_mode == "deterministic" else "exploratory_ux"
+                    ),
                     "codex_version": _codex_version(args.codex_bin),
                     "permissions": {
                         "profile": PERMISSION_PROFILE_NAME,
@@ -2239,7 +2400,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "pairs_requested": args.pairs,
                     "pairs_executed": len(pairs),
                     "aborted_after_commissioning_failure": (
-                        len(pairs) < args.pairs and _commissioning_failed(arm_a)
+                        args.treatment_mode == "deterministic"
+                        and len(pairs) < args.pairs
+                        and _commissioning_failed(arm_a)
                     ),
                     "prompt_template_sha256": _sha256_file(prompt_path),
                     "rendered_prompt_sha256": _sha256_text(prompt),

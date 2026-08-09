@@ -43,6 +43,10 @@ class GuardTests(unittest.TestCase):
         self.assertEqual(len(routed), 1)
         self.assertTrue(routed[0].wrapped_by_outctl)
 
+        helper = classify_kubectl("outctl-health kubectl get pods -A")
+        self.assertEqual(len(helper), 1)
+        self.assertTrue(helper[0].wrapped_by_outctl)
+
     def test_denies_mutation_and_secret_read(self) -> None:
         delete = classify_kubectl("kubectl delete pod example")
         self.assertFalse(delete[0].read_only)
@@ -93,6 +97,43 @@ class UsageTests(unittest.TestCase):
 
 
 class HarnessValidationTests(unittest.TestCase):
+    def test_opt_in_guidance_is_brief_and_direct_reads_remain_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            worktree = Path(temporary)
+            (worktree / "AGENTS.md").write_text("# baseline\n", encoding="utf-8")
+            run._append_arm_a_guidance(
+                worktree,
+                "long router prefix",
+                "long retrieval prefix",
+                treatment_mode="opt-in",
+            )
+            skill = (worktree / ".agents/skills/outctl-kubectl-health/SKILL.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("outctl-health kubectl", skill)
+            self.assertIn("Direct read-only `kubectl` is fine", skill)
+            self.assertNotIn("exactly one", skill)
+            self.assertLess(len(skill.encode("utf-8")), 1200)
+
+    def test_opt_in_comparison_records_adoption_without_mandating_it(self) -> None:
+        arm = {
+            "exit_code": 0,
+            "timed_out": False,
+            "final": {"schema_valid": True, "overall_status": "healthy"},
+            "model_observed": True,
+            "model_mismatch": False,
+            "model_reroute_signal": False,
+            "commands": {"kubectl_completed": 1, "kubectl_direct_completed": 1},
+            "hooks": {"events": 1, "read_only_policy_denials": 0},
+            "outctl_spool": {},
+        }
+        comparison = run._compare_pair(
+            arm, arm, set(), set(), 0, treatment_mode="opt-in"
+        )
+        self.assertFalse(comparison["treatment_adopted"])
+        self.assertFalse(comparison["treatment_compliant"])
+        self.assertTrue(comparison["pair_valid"])
+
     def test_quality_signature_canonicalizes_model_ids_and_pod_suffixes(self) -> None:
         schema = json.loads(
             Path(run.__file__).with_name("health-result.schema.json").read_text(encoding="utf-8")

@@ -350,3 +350,17 @@ uv run python -m py_compile run.py kubectl_guard.py kubectl_readonly_guard.py \
 The test suite includes guard classification, baseline-blinding checks,
 cache-write fallback accounting, exact Terra accounting, and a fake concurrent
 Codex end-to-end run.
+# Codex appservice A/B acceptance harness
+
+`run.py` has two deliberately distinct treatments:
+
+- `--treatment-mode deterministic` (the default) is the commissioning/mechanism
+  benchmark. It requires every `kubectl` call through the bounded router and
+  exactly one bounded retrieval. A bootstrap failure aborts later pairs.
+- `--treatment-mode opt-in` is an exploratory UX trial. Arm A receives a short
+  `outctl-health` skill and helper for likely-large output, while direct
+  read-only `kubectl` remains allowed. The report records adoption and
+  retrieval behavior; non-adoption is not a validity failure and its cost
+  numbers must not be presented as deterministic compression results.
+
+Both modes keep the same read-only/secret-denial guard and private spool.
