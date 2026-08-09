@@ -285,6 +285,27 @@ caught it at the fence.
 
 ### Controlled-study gates
 
+A `study-protocol/v2` launch is deliberately different from a live wiring or
+UX run. Each suite entry binds the scenario manifest, expected facts, and the
+fixture bytes. The harness installs an immutable offline `kubectl` replay for
+both arms and rejects `--kubeconfig`, `--context`, and `--health-checker`.
+Commands outside the frozen six-command corpus fail closed. This makes seeded
+variance and confirmatory runs independent of changing cluster state and
+prevents a study protocol from accidentally authorizing live access.
+
+Run one scenario only with a protocol whose repository commit matches HEAD:
+
+```bash
+uv run python acceptance/codex_appservice_ab/run.py \
+  --study-protocol /path/to/frozen-protocol.json \
+  --scenario-id crashloop-v1 \
+  --appservice /projects/dev/appservice \
+  --canonical-appservice /projects/dev/appservice \
+  --policy-ref "$OUTCTL_POLICY_REF" \
+  --policy-digest "$OUTCTL_POLICY_DIGEST" \
+  --pairs 6
+```
+
 For selected enforcement, use:
 
 ```text

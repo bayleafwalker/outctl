@@ -386,6 +386,43 @@ def _install_isolated_shell_home(
     return shell_env
 
 
+def _install_replay_kubectl(
+    target: Path, *, fixture: Path, fixture_digest: str
+) -> Path:
+    """Install an immutable kubectl-named launcher with no network credential."""
+    target.mkdir(parents=True, exist_ok=True)
+    replay = Path(__file__).with_name("kubectl_replay.py").resolve()
+    wrapper = target / "kubectl"
+    wrapper.write_text(
+        "#!/bin/sh\nexec "
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(replay))} "
+        f"--fixture {shlex.quote(str(fixture))} "
+        f"--fixture-sha256 {shlex.quote(fixture_digest)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o555)
+    target.chmod(0o555)
+    return wrapper
+
+
+def _install_replay_shell_home(target: Path, *, kubectl_bin: Path, pinned_path: str) -> Path:
+    target.mkdir(parents=True, exist_ok=True)
+    body = (
+        "unset KUBECONFIG\n"
+        f"export PATH={shlex.quote(pinned_path)}\n"
+        f"kubectl() {{ command {shlex.quote(str(kubectl_bin))} \"$@\"; }}\n"
+        "export -f kubectl\n"
+    )
+    profile = target / ".bash_profile"
+    shell_env = target / "shell-env.sh"
+    profile.write_text(body, encoding="utf-8")
+    shell_env.write_text(body, encoding="utf-8")
+    profile.chmod(0o444)
+    shell_env.chmod(0o444)
+    target.chmod(0o555)
+    return shell_env
+
+
 def _probe_arm_cluster_identity(
     *,
     env: Mapping[str, str],
@@ -2422,14 +2459,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if controlled_study is not None and args.expected_facts is not None:
         raise ExperimentError("--expected-facts is selected by the controlled study protocol")
     expected_facts_path = (
-        Path(controlled_study["suite"]["scenarios"][[
-            item["scenario_id"] for item in controlled_study["suite"]["scenarios"]
-        ].index(args.scenario_id)]["expected_facts"]["path"])
+        controlled_study["expected_facts_path"]
         if controlled_study is not None
         else args.expected_facts.resolve() if args.expected_facts else None
     )
-    if controlled_study is not None:
-        expected_facts_path = Path(__file__).resolve().parents[2] / expected_facts_path
     expected_signature, expected_critical = _load_expected_facts(expected_facts_path)
     if args.search_redaction_exact_json is not None:
         try:
@@ -2440,7 +2473,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             isinstance(value, str) and value for value in redactions
         ):
             raise ExperimentError("--search-redaction-exact-json must be a JSON string array")
-    kubectl_bin = _resolve_trusted_executable(args.kubectl_bin, name="kubectl")
+    kubectl_bin = (
+        Path(__file__).with_name("kubectl_replay.py").resolve()
+        if controlled_study is not None
+        else _resolve_trusted_executable(args.kubectl_bin, name="kubectl")
+    )
     if args.pairs < 1:
         raise ExperimentError("--pairs must be at least 1")
     if args.timeout_seconds < 1:
@@ -2460,7 +2497,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ExperimentError("prompt/output-schema/validator schema file is missing")
     if health_checker is not None and not health_checker.is_file():
         raise ExperimentError(f"--health-checker file is missing: {health_checker}")
-    if not args.dry_run and (kubeconfig is None or not kubeconfig.is_file() or not args.context):
+    if controlled_study is not None and (kubeconfig is not None or args.context):
+        raise ExperimentError("controlled study replay forbids --kubeconfig and --context")
+    if controlled_study is not None and health_checker is not None:
+        raise ExperimentError("controlled study replay forbids a live --health-checker")
+    if (
+        controlled_study is None
+        and not args.dry_run
+        and (kubeconfig is None or not kubeconfig.is_file() or not args.context)
+    ):
         raise ExperimentError("live runs require an explicit readable --kubeconfig and --context")
     if not args.dry_run and args.qualitative_regular_context:
         raise ExperimentError(
@@ -2480,7 +2525,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ExperimentError(f"Codex output schema is not valid JSON: {exc}") from exc
     preflight: dict[str, Any] | None = None
-    if not args.dry_run:
+    if controlled_study is not None:
+        preflight = {
+            "mode": "digest-bound-offline-replay",
+            "fixture_sha256": controlled_study["manifest"]["fixture_digest"],
+            "network_access": False,
+            "live_kubernetes_identity": False,
+        }
+    elif not args.dry_run:
         assert kubeconfig is not None and args.context is not None
         preflight = _preflight_readonly_kubeconfig(
             kubectl_bin=str(kubectl_bin),
@@ -2488,8 +2540,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             context=args.context,
             allow_broad_identity=args.qualitative_regular_context,
         )
-    kubernetes_api_host = preflight.pop("_api_host") if preflight is not None else None
-    expected_identity = preflight.pop("_identity") if preflight is not None else None
+    kubernetes_api_host = preflight.pop("_api_host", None) if preflight is not None else None
+    expected_identity = preflight.pop("_identity", None) if preflight is not None else None
 
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output = (
@@ -2506,6 +2558,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     output.chmod(0o700)
     private = output / "private"
     private.mkdir(mode=0o700)
+    if controlled_study is not None:
+        kubectl_bin = _install_replay_kubectl(
+            private / "replay-bin",
+            fixture=controlled_study["fixture_path"],
+            fixture_digest=controlled_study["manifest"]["fixture_digest"],
+        )
 
     commit = _git(source, "rev-parse", "HEAD").decode().strip()
     status = _git(source, "status", "--porcelain=v1", "-z")
@@ -2539,7 +2597,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         kubectl_prefix=(
             (str(kubectl_bin), "--kubeconfig", str(kubeconfig), "--context", args.context)
             if kubeconfig is not None and args.context is not None
-            else None
+            else (str(kubectl_bin),) if controlled_study is not None else None
         ),
     )
     retrieval_prefix = f"{router_exec} tail {router_common}"
@@ -2656,7 +2714,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     policy_ref=args.policy_ref,
                     policy_digest=args.policy_digest,
                 )
-            if kubeconfig is not None and not args.qualitative_regular_context:
+            if controlled_study is not None:
+                base_path = str(kubectl_bin.parent) + os.pathsep + os.environ.get("PATH", "")
+                path_a = (
+                    str(helper_dir_a) + os.pathsep + base_path
+                    if args.treatment_mode == "opt-in"
+                    else base_path
+                )
+                shell_env_a = _install_replay_shell_home(
+                    shell_home_a, kubectl_bin=kubectl_bin, pinned_path=path_a
+                )
+                shell_env_b = _install_replay_shell_home(
+                    shell_home_b, kubectl_bin=kubectl_bin, pinned_path=base_path
+                )
+            elif kubeconfig is not None and not args.qualitative_regular_context:
                 base_path = str(kubectl_bin.parent) + os.pathsep + os.environ.get("PATH", "")
                 path_a = (
                     str(helper_dir_a) + os.pathsep + base_path
@@ -2740,13 +2811,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_env = os.environ.copy()
             # Never allow either arm to inherit a workstation/admin kubeconfig.
             base_env.pop("KUBECONFIG", None)
+            scoped_identity_env = (
+                {}
+                if controlled_study is not None
+                else {"KUBECONFIG": str(kubeconfig)}
+            )
             env_a = {
                 **base_env,
                 "CODEX_HOME": str(home_a),
                 "CODEX_AB_ARM": "A",
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_a / "hook-events.jsonl"),
-                "KUBECONFIG": str(kubeconfig),
+                **scoped_identity_env,
                 **(
                     {
                         "HOME": str(shell_home_a),
@@ -2786,7 +2862,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CODEX_AB_ARM": "B",
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_b / "hook-events.jsonl"),
-                "KUBECONFIG": str(kubeconfig),
+                **scoped_identity_env,
                 **(
                     {
                         "HOME": str(shell_home_b),
@@ -2799,7 +2875,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
             }
-            if args.qualitative_regular_context:
+            if controlled_study is not None:
+                replay_identity = {
+                    "identity_sha256": _sha256_text(
+                        controlled_study["manifest"]["fixture_digest"] + "\0offline-replay"
+                    ),
+                    "kubectl_executable_sha256": _sha256_file(kubectl_bin),
+                    "matches_launcher_preflight": True,
+                    "mode": "digest-bound-offline-replay",
+                }
+                identity_a = dict(replay_identity)
+                identity_b = dict(replay_identity)
+            elif args.qualitative_regular_context:
                 identity_a = {"qualitative_regular_context": True}
                 identity_b = {"qualitative_regular_context": True}
             else:
@@ -2947,15 +3034,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 break
 
         _write_json_private(output / "planned-commands.json", planned_commands)
+        measurement_intent = (
+            "controlled_study"
+            if controlled_study is not None
+            else "mechanism" if args.treatment_mode == "deterministic" else "exploratory_ux"
+        )
+        controlled_binding = (
+            {
+                "protocol_id": controlled_study["protocol"]["protocol_id"],
+                "protocol_digest": controlled_study["protocol"]["protocol_digest"],
+                "suite_id": controlled_study["suite"]["suite_id"],
+                "suite_digest": controlled_study["suite"]["suite_digest"],
+                "scenario_id": controlled_study["manifest"]["scenario_id"],
+                "fixture_sha256": controlled_study["manifest"]["fixture_digest"],
+            }
+            if controlled_study is not None
+            else None
+        )
         if args.dry_run:
             report = {
                 "experiment": {
                     "id": run_id,
                     "dry_run": True,
                     "treatment_mode": args.treatment_mode,
-                    "measurement_intent": (
-                        "mechanism" if args.treatment_mode == "deterministic" else "exploratory_ux"
-                    ),
+                    "measurement_intent": measurement_intent,
+                    "controlled_study": controlled_binding,
+                    "preflight": preflight,
                     "created_at": _utc_now(),
                     "appservice_commit": commit,
                     "worktree_a": str(worktree_a),
@@ -2987,16 +3091,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "included_untracked_files": untracked_counts,
                     "model_requested": args.model,
                     "treatment_mode": args.treatment_mode,
-                    "measurement_intent": (
-                        "mechanism" if args.treatment_mode == "deterministic" else "exploratory_ux"
-                    ),
+                    "measurement_intent": measurement_intent,
+                    "controlled_study": controlled_binding,
                     "codex_version": _codex_version(args.codex_bin),
                     "permissions": {
                         "profile": PERMISSION_PROFILE_NAME,
                         "approval_policy": "never",
                         "sandbox_override": None,
                         "additional_write_roots": {"A": ["outctl_spool"], "B": []},
-                        "network": "one verified Kubernetes API host per run",
+                        "network": (
+                            "disabled for digest-bound replay"
+                            if controlled_study is not None
+                            else "one verified Kubernetes API host per run"
+                        ),
                     },
                     "preflight": preflight,
                     "pinned_tooling": helper_provenance,

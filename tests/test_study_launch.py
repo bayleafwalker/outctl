@@ -40,6 +40,8 @@ def _make_study(root: Path) -> Path:
     bindings = []
     for index, scenario_class in enumerate(CLASSES):
         scenario_id = f"scenario-{index}"
+        fixture_path = root / f"studies/{scenario_id}/fixture.json"
+        fixture_digest = _write(fixture_path, {"scenario_id": scenario_id})
         facts_path = root / f"studies/{scenario_id}/facts.json"
         facts_digest = _write(facts_path, {
             "schema_version": "vuoro.outctl.expected-facts/v1",
@@ -53,7 +55,7 @@ def _make_study(root: Path) -> Path:
             "scenario_id": scenario_id,
             "scenario_class": scenario_class,
             "seed": index,
-            "fixture_digest": "sha256:" + hashlib.sha256(scenario_id.encode()).hexdigest(),
+            "fixture_digest": fixture_digest,
             "expected_facts_digest": facts_digest,
             "replayable": True,
             "mutation_authority_required": False,
@@ -61,6 +63,7 @@ def _make_study(root: Path) -> Path:
         bindings.append({
             "scenario_id": scenario_id,
             "scenario_class": scenario_class,
+            "fixture": {"path": str(fixture_path.relative_to(root)), "sha256": fixture_digest},
             "manifest": {"path": str(manifest_path.relative_to(root)), "sha256": manifest_digest},
             "expected_facts": {"path": str(facts_path.relative_to(root)), "sha256": facts_digest},
         })
@@ -106,6 +109,14 @@ def test_valid_launch_and_one_byte_mismatch(tmp_path: Path) -> None:
     facts = tmp_path / "studies/scenario-0/facts.json"
     facts.write_bytes(facts.read_bytes() + b" ")
     with pytest.raises(ContractValidationError, match="digest mismatch"):
+        validate_controlled_study_launch(tmp_path, protocol, "scenario-0")
+
+
+def test_fixture_byte_mismatch_fails(tmp_path: Path) -> None:
+    protocol = _make_study(tmp_path)
+    fixture = tmp_path / "studies/scenario-0/fixture.json"
+    fixture.write_bytes(fixture.read_bytes() + b" ")
+    with pytest.raises(ContractValidationError, match="scenario fixture digest mismatch"):
         validate_controlled_study_launch(tmp_path, protocol, "scenario-0")
 
 

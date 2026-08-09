@@ -144,6 +144,7 @@ def validate_controlled_study_launch(
     if len(selected) != 1:
         raise ContractValidationError(f"scenario ID is not bound exactly once: {scenario_id}")
     binding = selected[0]
+    fixture_path = _bound_repository_file(root, binding["fixture"], "scenario fixture")
     manifest_path = _bound_repository_file(root, binding["manifest"], "scenario manifest")
     facts_path = _bound_repository_file(root, binding["expected_facts"], "expected facts")
     manifest = validate_contract(
@@ -154,16 +155,26 @@ def validate_controlled_study_launch(
         raise ContractValidationError("scenario manifest/expected facts cross-binding mismatch")
     if manifest.get("scenario_class") != binding.get("scenario_class"):
         raise ContractValidationError("scenario class contradicts suite binding")
-    fixture = str(manifest.get("fixture_digest", "")).removeprefix("sha256:")
+    fixture_digest = str(manifest.get("fixture_digest", ""))
+    fixture = fixture_digest.removeprefix("sha256:")
     if not fixture or len(set(fixture)) == 1:
         raise ContractValidationError("scenario fixture digest is a placeholder")
+    if fixture_digest != binding["fixture"]["sha256"]:
+        raise ContractValidationError("scenario manifest does not bind fixture bytes")
     if manifest.get("expected_facts_digest") != binding["expected_facts"]["sha256"]:
         raise ContractValidationError("scenario manifest does not bind expected-facts bytes")
     if manifest.get("replayable") is not True:
         raise ContractValidationError("controlled scenario must be replayable")
     if manifest.get("mutation_authority_required") is True and not mutation_authorized:
         raise ContractValidationError("scenario requires mutation authority not granted to launch")
-    return {"protocol": protocol, "suite": suite, "manifest": manifest, "expected_facts": facts}
+    return {
+        "protocol": protocol,
+        "suite": suite,
+        "manifest": manifest,
+        "fixture_path": fixture_path,
+        "expected_facts_path": facts_path,
+        "expected_facts": facts,
+    }
 
 
 def _plain(value: object) -> Any:
