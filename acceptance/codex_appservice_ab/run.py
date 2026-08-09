@@ -268,7 +268,7 @@ def _kubectl_output(
 
 
 def _preflight_readonly_kubeconfig(
-    *, kubectl_bin: str, kubeconfig: Path, context: str
+    *, kubectl_bin: str, kubeconfig: Path, context: str, allow_broad_identity: bool = False
 ) -> dict[str, Any]:
     """Verify the exact, minimum corpus permissions before model execution.
 
@@ -324,7 +324,7 @@ def _preflight_readonly_kubeconfig(
     denied = [not can_i(*check) for check in deny_checks]
     if not all(allowed):
         raise ExperimentError("read-only kubeconfig lacks a required fixed-corpus permission")
-    if not all(denied):
+    if not all(denied) and not allow_broad_identity:
         raise ExperimentError(
             "read-only kubeconfig has prohibited mutation or sensitive-read authority"
         )
@@ -333,7 +333,8 @@ def _preflight_readonly_kubeconfig(
         "api_server_sha256": _sha256_text(parsed_server.geturl()),
         "api_host_sha256": _sha256_text(parsed_server.hostname),
         "required_permissions_verified": len(allowed),
-        "prohibited_permissions_denied": len(denied),
+        "prohibited_permissions_denied": sum(denied),
+        "broad_identity_authorized_for_qualitative_ux": allow_broad_identity,
         # Kept private to the launch config; the public report only has its digest.
         "_api_host": parsed_server.hostname,
         "_identity": {"context": context, "server": parsed_server.geturl()},
@@ -2304,7 +2305,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.dry_run:
         assert kubeconfig is not None and args.context is not None
         preflight = _preflight_readonly_kubeconfig(
-            kubectl_bin=str(kubectl_bin), kubeconfig=kubeconfig, context=args.context
+            kubectl_bin=str(kubectl_bin),
+            kubeconfig=kubeconfig,
+            context=args.context,
+            allow_broad_identity=args.qualitative_regular_context,
         )
     kubernetes_api_host = preflight.pop("_api_host") if preflight is not None else None
     expected_identity = preflight.pop("_identity") if preflight is not None else None
