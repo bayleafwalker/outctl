@@ -60,6 +60,45 @@ def test_cli_dispatches_read_only_retrieval_without_running_a_command(
     assert invoked is False
 
 
+def test_cli_batches_literal_searches_as_one_bounded_retrieval(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _capture(tmp_path)
+
+    assert main(
+        [
+            "search-many",
+            "--spool-root",
+            str(tmp_path),
+            "capture-0001",
+            "stdout",
+            "alpha",
+            "marker",
+            "missing",
+        ]
+    ) == 0
+    payload = _payload(capsys)
+    queries = payload["queries"]
+    assert [len(query["matches"]) for query in queries] == [1, 1, 0]  # type: ignore[union-attr]
+    events = (tmp_path / "retrieval-events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(events) == 1
+    assert json.loads(events[0])["operation"] == "search-many"
+
+
+def test_cli_inspect_exposes_only_bounded_outline_metadata(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _capture(tmp_path)
+    assert main(["inspect", "--spool-root", str(tmp_path), "capture-0001"]) == 0
+    payload = _payload(capsys)
+    assert payload["outline"]["retrieval_operations"] == [  # type: ignore[index]
+        "slice",
+        "tail",
+        "search",
+        "search-many",
+    ]
+
+
 def test_cli_projects_binary_data_and_reports_tampering(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

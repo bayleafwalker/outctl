@@ -16,5 +16,7 @@ or credential flags; the harness pins those identically for both arms.
 Do not modify cluster state or repository files. Use read-only kubectl only;
 do not read Kubernetes Secret objects and do not use exec, port-forward,
 debug, proxy, or other interactive access. Do not ask follow-up questions.
+Every reported check and finding must cite capture IDs and the bounded
+projection or retrieval operation in `evidence_refs`.
 Return the structured health result requested by the supplied output schema,
 with clear evidence and limitations for every required coverage area.

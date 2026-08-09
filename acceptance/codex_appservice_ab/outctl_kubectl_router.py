@@ -118,6 +118,34 @@ def _emit_search(capture_id: str, text: str) -> None:
         print()
 
 
+def _safe_search_many(
+    stdout: bytes, *, exact_redactions: Sequence[str] = ()
+) -> tuple[str, str]:
+    value: Any = json.loads(stdout.decode("utf-8"))
+    if not isinstance(value, dict) or not isinstance(value.get("queries"), list):
+        raise ValueError("outctl search-many response lacks queries")
+    capture_id = value.get("capture_id")
+    if not isinstance(capture_id, str) or not capture_id:
+        raise ValueError("outctl search-many response lacks a capture identifier")
+    sections: list[str] = []
+    budget = 4_096
+    for query in value["queries"]:
+        if not isinstance(query, dict) or not isinstance(query.get("pattern"), str):
+            raise ValueError("outctl search-many response has an invalid query")
+        nested = {"capture_id": capture_id, "matches": query.get("matches")}
+        _, projected = _safe_search(
+            json.dumps(nested).encode(), exact_redactions=exact_redactions
+        )
+        section = f"literal {query['pattern']!r}:\n{projected}"
+        encoded = section.encode("utf-8")
+        if len(encoded) > budget:
+            sections.append(encoded[:budget].decode("utf-8", errors="ignore"))
+            break
+        sections.append(section)
+        budget -= len(encoded)
+    return capture_id, "\n".join(sections)
+
+
 def _run(argv: Sequence[str]) -> int:
     completed = subprocess.run(
         list(argv), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
@@ -142,8 +170,8 @@ def _run(argv: Sequence[str]) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     values = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
-    if not values or values[0] not in {"run", "tail", "search"}:
-        parser.error("first argument must be run, tail, or search")
+    if not values or values[0] not in {"run", "tail", "search", "search-many"}:
+        parser.error("first argument must be run, tail, search, or search-many")
     action = values.pop(0)
     parser.add_argument("--outctl-command-json", required=True)
     parser.add_argument("--kubectl-command-json")
@@ -154,6 +182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--lines", type=int, default=80)
     parser.add_argument("--max-matches", type=int, default=3)
     parser.add_argument("pattern", nargs="?")
+    parser.add_argument("--literal", action="append", dest="literals")
     command: list[str] = []
     if action == "run":
         if "--" not in values:
@@ -214,7 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--max-bytes",
             "2048",
         ]
-    else:
+    elif args.action == "search":
         if not args.capture_id or not args.pattern:
             parser.error("search requires a capture identifier and literal pattern")
         if not 1 <= args.max_matches <= 3:
@@ -232,12 +261,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             "--max-matches",
             str(args.max_matches),
         ]
-    if args.action == "search":
+    else:
+        if not args.capture_id or not args.literals:
+            parser.error("search-many requires a capture identifier and --literal values")
+        command = [
+            *outctl,
+            "search-many",
+            "--spool-root",
+            args.spool_root,
+            args.capture_id,
+            "stdout",
+            *args.literals,
+            "--context-bytes",
+            "160",
+            "--max-matches-per-pattern",
+            str(args.max_matches),
+        ]
+    if args.action in {"search", "search-many"}:
         completed = subprocess.run(
             command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
         )
         try:
-            capture_id, text = _safe_search(completed.stdout, exact_redactions=_search_redactions())
+            parser_fn = _safe_search if args.action == "search" else _safe_search_many
+            capture_id, text = parser_fn(
+                completed.stdout, exact_redactions=_search_redactions()
+            )
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             print(
                 "outctl router could not read a bounded search response: "

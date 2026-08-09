@@ -6,9 +6,11 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
+import build_analyst_bundle
 import kubectl_guard as treatment_guard
 import kubectl_readonly_guard as baseline_guard
 import outctl_kubectl_router
@@ -131,7 +133,7 @@ class GuardTests(unittest.TestCase):
                     "pods",
                 ]
             )
-        self.assertEqual(result, 0)
+            self.assertEqual(result, 0)
         routed = execute.call_args.args[0]
         separator = routed.index("--")
         self.assertEqual(routed[separator + 1 :], [*prefix, "get", "pods"])
@@ -169,6 +171,26 @@ class UsageTests(unittest.TestCase):
 
 
 class HarnessValidationTests(unittest.TestCase):
+    def test_analyst_bundle_is_deterministic_and_excludes_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "acceptance/codex_appservice_ab/__pycache__").mkdir(parents=True)
+            (root / "acceptance/codex_appservice_ab/run.py").write_text("pass\n")
+            (root / "acceptance/codex_appservice_ab/__pycache__/run.pyc").write_bytes(b"bytecode")
+            first, second = root / "first.zip", root / "second.zip"
+            inputs = [Path("acceptance/codex_appservice_ab")]
+            build_analyst_bundle.build(root, first, "analyst-safe", inputs)
+            build_analyst_bundle.build(root, second, "analyst-safe", inputs)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            with zipfile.ZipFile(first) as archive:
+                self.assertNotIn(
+                    "acceptance/codex_appservice_ab/__pycache__/run.pyc",
+                    archive.namelist(),
+                )
+                manifest = json.loads(archive.read("bundle-manifest.json"))
+            self.assertEqual(manifest["package_class"], "analyst-safe")
+            self.assertEqual(len(manifest["files"]), 1)
+
     @staticmethod
     def _identity(value: str = "same") -> dict[str, object]:
         return {"identity_sha256": value, "matches_launcher_preflight": True}
@@ -190,6 +212,26 @@ class HarnessValidationTests(unittest.TestCase):
             self.assertIn("Direct read-only `kubectl` is fine", skill)
             self.assertNotIn("exactly one", skill)
             self.assertLess(len(skill.encode("utf-8")), 1200)
+
+    def test_router_bounds_batched_search_results(self) -> None:
+        payload = {
+            "capture_id": "capture-1",
+            "queries": [
+                {
+                    "pattern": "FailedMount",
+                    "matches": [
+                        {"projection": {"text": "FailedMount evidence"}}
+                    ],
+                },
+                {"pattern": "CrashLoopBackOff", "matches": []},
+            ],
+        }
+        capture_id, text = outctl_kubectl_router._safe_search_many(
+            json.dumps(payload).encode()
+        )
+        self.assertEqual(capture_id, "capture-1")
+        self.assertIn("FailedMount evidence", text)
+        self.assertIn("no bounded matches", text)
 
     def test_opt_in_comparison_records_adoption_without_mandating_it(self) -> None:
         arm = {
@@ -235,7 +277,7 @@ class HarnessValidationTests(unittest.TestCase):
         self.assertFalse(comparison["treatment_capture_accounted"])
         self.assertFalse(comparison["pair_valid"])
 
-    def test_opt_in_quality_gate_accepts_same_health_despite_finding_variance(self) -> None:
+    def test_opt_in_quality_disagreement_remains_an_outcome(self) -> None:
         arm = {
             "exit_code": 0,
             "timed_out": False,
@@ -256,8 +298,45 @@ class HarnessValidationTests(unittest.TestCase):
             0,
             treatment_mode="opt-in",
         )
-        self.assertTrue(comparison["quality_oracle_passed"])
+        self.assertFalse(comparison["quality_oracle_passed"])
         self.assertTrue(comparison["pair_valid"])
+        self.assertTrue(comparison["validity"]["protocol_valid"])
+        self.assertFalse(comparison["outcomes"]["quality_noninferior"])
+        self.assertTrue(comparison["economics"]["eligible_for_analysis"])
+        self.assertIn(
+            "arms disagreed on critical/high finding identifiers or classifications",
+            comparison["flags"],
+        )
+
+    def test_frozen_expected_facts_score_quality_without_excluding_pair(self) -> None:
+        arm = {
+            "exit_code": 0,
+            "timed_out": False,
+            "final": {"schema_valid": True, "overall_status": "degraded"},
+            "model_observed": True,
+            "model_mismatch": False,
+            "model_reroute_signal": False,
+            "commands": {"kubectl_completed": 1, "kubectl_direct_completed": 1},
+            "hooks": {"events": 1, "read_only_policy_denials": 0},
+            "outctl_spool": {},
+            "cluster_identity": self._identity(),
+        }
+        expected = {("coverage:nodes", "degraded"), ("finding:node", "high")}
+        comparison = run._compare_pair(
+            arm,
+            arm,
+            {("coverage:nodes", "degraded")},
+            expected,
+            0,
+            treatment_mode="opt-in",
+            expected_signature=expected,
+            expected_critical={("finding:node", "high")},
+        )
+        self.assertEqual(comparison["outcomes"]["quality_score_a"], 0.5)
+        self.assertEqual(comparison["outcomes"]["quality_score_b"], 1.0)
+        self.assertTrue(comparison["outcomes"]["critical_miss_a"])
+        self.assertFalse(comparison["outcomes"]["quality_noninferior"])
+        self.assertTrue(comparison["validity"]["protocol_valid"])
 
     def test_identity_mismatch_invalidates_pair_before_metrics(self) -> None:
         arm = {
@@ -626,7 +705,15 @@ class EndToEndTests(unittest.TestCase):
                             "storage": {"status": "healthy", "evidence": "ok"},
                             "events": {"status": "healthy", "evidence": "ok"},
                         },
-                        "checks": [{"area": "cluster", "status": "healthy", "evidence": "ok"}],
+                        "checks": [{
+                            "area": "cluster",
+                            "status": "healthy",
+                            "evidence": "ok",
+                            "evidence_refs": [{
+                                "capture_id": "capture-1",
+                                "operation": "projection",
+                            }],
+                        }],
                         "findings": [],
                         "limitations": [],
                         "mutations_performed": False,

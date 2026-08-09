@@ -658,8 +658,8 @@ description: Use bounded, recoverable output for potentially large read-only com
 - Use `outctl-health kubectl <read-only kubectl arguments>` for logs, large
   listings, test output, or expensive commands.
 - When omitted evidence matters, retrieve from the capture ID with bounded
-  `outctl-health search <capture-id> <literal-term>` or `tail`; do not rerun
-  only to recover output.
+  `outctl-health search-many <capture-id> --literal <term> ...` or `tail`;
+  batch related terms and do not rerun only to recover output.
 - Direct read-only `kubectl` is fine for predictably small output.
 - `outctl-health --help` describes the available safe surface.
 
@@ -699,12 +699,17 @@ case "${{1:-}}" in
     shift
     exec {router_exec} search {router_common} "$@"
     ;;
+  search-many)
+    shift
+    exec {router_exec} search-many {router_common} "$@"
+    ;;
   -h|--help|help|'')
     cat <<'EOF'
 Usage:
   outctl-health kubectl <read-only kubectl arguments>
   outctl-health tail <capture-id> [--lines N]
   outctl-health search <capture-id> <literal-term> [--max-matches N]
+  outctl-health search-many <capture-id> --literal <term> [--literal <term> ...]
 
 Runs preserve full output privately and show a bounded projection. Tail reads
 an existing capture; search returns up to three bounded matching windows.
@@ -712,7 +717,7 @@ Neither operation reruns a previous command.
 EOF
     ;;
   *)
-    echo "outctl-health: expected kubectl, tail, search, or --help" >&2
+    echo "outctl-health: expected kubectl, tail, search, search-many, or --help" >&2
     exit 2
     ;;
 esac
@@ -1572,6 +1577,37 @@ def _jaccard(left: set[tuple[str, str]], right: set[tuple[str, str]]) -> float |
     return len(left & right) / len(union)
 
 
+def _load_expected_facts(
+    path: Path | None,
+) -> tuple[set[tuple[str, str]] | None, set[tuple[str, str]]]:
+    if path is None:
+        return None, set()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentError(f"expected-facts file is invalid: {exc}") from exc
+    facts = value.get("facts") if isinstance(value, Mapping) else None
+    if not isinstance(facts, list) or not facts:
+        raise ExperimentError("expected-facts must contain a non-empty facts array")
+    signature: set[tuple[str, str]] = set()
+    critical: set[tuple[str, str]] = set()
+    for item in facts:
+        if not isinstance(item, Mapping):
+            raise ExperimentError("each expected fact must be an object")
+        key, status = item.get("key"), item.get("status")
+        if not isinstance(key, str) or not key or not isinstance(status, str) or not status:
+            raise ExperimentError("each expected fact requires non-empty key and status")
+        fact = (key.casefold(), status.casefold())
+        if fact in signature:
+            raise ExperimentError(f"duplicate expected fact: {fact!r}")
+        signature.add(fact)
+        if item.get("critical") is True:
+            critical.add(fact)
+        elif item.get("critical") not in {None, False}:
+            raise ExperimentError("expected fact critical must be boolean")
+    return signature, critical
+
+
 def _usage_public(usage: Usage | None) -> dict[str, Any] | None:
     if usage is None:
         return None
@@ -1771,6 +1807,8 @@ def _compare_pair(
     launch_skew_ms: float,
     *,
     treatment_mode: str,
+    expected_signature: set[tuple[str, str]] | None = None,
+    expected_critical: set[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     a_identity = arm_a.get("cluster_identity")
     b_identity = arm_b.get("cluster_identity")
@@ -1917,13 +1955,32 @@ def _compare_pair(
         and not bool(arm_b.get("model_reroute_signal"))
     )
     quality_similarity = _jaccard(signature_a, signature_b)
-    quality_oracle_passed = same_overall_status and (
-        treatment_mode == "opt-in"
-        or (
-            critical_high_findings_agree
-            and (quality_similarity is None or quality_similarity >= 0.6)
+    # Arm agreement is descriptive only.  It is not a denominator-based quality
+    # oracle and must never decide whether an otherwise valid execution enters
+    # the analysis population.
+    if expected_signature is None:
+        quality_score_a = None
+        quality_score_b = None
+        critical_miss_a = None
+        critical_miss_b = None
+        quality_noninferior = None
+        quality_basis = "unscored_no_known_denominator"
+    else:
+        denominator = len(expected_signature)
+        quality_score_a = (
+            len(signature_a & expected_signature) / denominator if denominator else 1.0
         )
-    )
+        quality_score_b = (
+            len(signature_b & expected_signature) / denominator if denominator else 1.0
+        )
+        critical = expected_critical or set()
+        critical_miss_a = bool(critical - signature_a)
+        critical_miss_b = bool(critical - signature_b)
+        quality_noninferior = (
+            quality_score_a >= quality_score_b - 0.05
+            and not (critical_miss_a and not critical_miss_b)
+        )
+        quality_basis = "frozen_expected_fact_set"
     raw_retained = _nested_number(arm_a, ("outctl_spool", "retained_total_bytes"))
     exposed_kubectl = _nested_number(arm_a, ("commands", "model_visible_kubectl_output_bytes"))
     outctl_exposure_ratio = (
@@ -1954,22 +2011,18 @@ def _compare_pair(
         flags.append("at least one kubectl identity-pin bypass was attempted and guarded")
     if not same_overall_status:
         flags.append("arms reached different overall health statuses")
-    if treatment_mode == "deterministic" and not critical_high_findings_agree:
+    if not critical_high_findings_agree:
         flags.append("arms disagreed on critical/high finding identifiers or classifications")
     if not requested_model_integrity:
         flags.append("requested model identity was not verified cleanly in both arms")
-    if (
-        treatment_mode == "deterministic"
-        and quality_similarity is not None
-        and quality_similarity < 0.6
-    ):
+    if quality_similarity is not None and quality_similarity < 0.6:
         flags.append("structured health evidence overlap was below 0.60")
     if launch_skew_ms > 250:
         flags.append("process launch skew exceeded 250 ms")
     if not cluster_identity_match:
         flags.append("arm cluster context/server fingerprint mismatch; metrics suppressed")
 
-    pair_valid = (
+    instrumentation_valid = (
         int(arm_a.get("exit_code", -1)) == 0
         and int(arm_b.get("exit_code", -1)) == 0
         and not bool(arm_a.get("timed_out"))
@@ -1984,11 +2037,12 @@ def _compare_pair(
         and not baseline_spontaneously_used_outctl
         and no_mutation_attempts
         and no_identity_escape
-        and quality_oracle_passed
         and requested_model_integrity
         and launch_skew_ms <= 250
-        and cluster_identity_match
     )
+    execution_identity_valid = cluster_identity_match
+    protocol_valid = instrumentation_valid and execution_identity_valid
+    economics_eligible = protocol_valid
 
     return {
         "launch_skew_ms": launch_skew_ms,
@@ -2004,13 +2058,33 @@ def _compare_pair(
         "baseline_spontaneously_used_outctl": baseline_spontaneously_used_outctl,
         "same_overall_status": same_overall_status,
         "critical_high_findings_agree": critical_high_findings_agree,
-        "quality_oracle_passed": quality_oracle_passed,
+        "validity": {
+            "instrumentation_valid": instrumentation_valid,
+            "execution_identity_valid": execution_identity_valid,
+            "protocol_valid": protocol_valid,
+        },
+        "outcomes": {
+            "treatment_adopted": treatment_adopted,
+            "same_overall_status": same_overall_status,
+            "critical_high_findings_agree": critical_high_findings_agree,
+            "evidence_jaccard": quality_similarity,
+            "quality_score_a": quality_score_a,
+            "quality_score_b": quality_score_b,
+            "critical_miss_a": critical_miss_a,
+            "critical_miss_b": critical_miss_b,
+            "quality_noninferior": quality_noninferior,
+            "quality_basis": quality_basis,
+        },
+        "economics": {"eligible_for_analysis": economics_eligible},
+        # Deprecated compatibility fields.  ``pair_valid`` now means protocol
+        # validity only; quality disagreement remains an outcome.
+        "quality_oracle_passed": quality_noninferior is True,
         "requested_model_integrity": requested_model_integrity,
         "quality_signature_jaccard": quality_similarity,
         "arm_a_outctl_exposure_ratio": outctl_exposure_ratio,
         "no_non_read_only_kubectl_attempts": no_mutation_attempts,
         "no_cluster_identity_escape": no_identity_escape,
-        "pair_valid": pair_valid,
+        "pair_valid": protocol_valid,
         "flags": flags,
     }
 
@@ -2042,11 +2116,16 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         pair
         for pair in pairs
         if isinstance(pair.get("comparison"), Mapping)
-        and bool(pair.get("comparison", {}).get("pair_valid"))
+        and bool(
+            pair.get("comparison", {})
+            .get("economics", {})
+            .get("eligible_for_analysis")
+        )
     ]
     medians: dict[str, Any] = {}
     for name in metric_names:
         values: list[float | None] = []
+        ratios: list[float] = []
         for pair in valid_pairs:
             comparison = pair.get("comparison")
             if not isinstance(comparison, Mapping):
@@ -2056,7 +2135,28 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             metric = metrics.get(name) if isinstance(metrics, Mapping) else None
             value = metric.get("reduction_pct") if isinstance(metric, Mapping) else None
             values.append(float(value) if isinstance(value, (int, float)) else None)
-        medians[name] = {"median_reduction_pct": _median(values)}
+            if isinstance(metric, Mapping):
+                left, right = metric.get("a"), metric.get("b")
+                if (
+                    isinstance(left, (int, float))
+                    and isinstance(right, (int, float))
+                    and left > 0
+                    and right > 0
+                ):
+                    ratios.append(float(left) / float(right))
+        geometric_ratio = (
+            math.exp(sum(math.log(value) for value in ratios) / len(ratios))
+            if ratios
+            else None
+        )
+        medians[name] = {
+            "median_reduction_pct": _median(values),
+            "paired_geometric_mean_ratio_a_over_b": geometric_ratio,
+            "paired_geometric_mean_reduction_pct": (
+                (1 - geometric_ratio) * 100 if geometric_ratio is not None else None
+            ),
+            "pair_reductions_pct": values,
+        }
     pooled: dict[str, Any] = {}
     for name in metric_names:
         a_total = 0.0
@@ -2121,6 +2221,14 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
     return {
         "pairs": len(pairs),
+        "protocol_valid_pairs": len(valid_pairs),
+        "protocol_invalid_pairs": len(pairs) - len(valid_pairs),
+        "all_pairs_protocol_valid": len(valid_pairs) == len(pairs),
+        "quality_noninferior_pairs": sum(
+            bool(pair.get("comparison", {}).get("outcomes", {}).get("quality_noninferior"))
+            for pair in valid_pairs
+        ),
+        # Deprecated report keys retained for consumers of older reports.
         "valid_pairs": len(valid_pairs),
         "invalid_pairs": len(pairs) - len(valid_pairs),
         "all_pairs_valid": len(valid_pairs) == len(pairs),
@@ -2228,6 +2336,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--schema", type=Path, default=here / "health-result.schema.json")
     parser.add_argument(
+        "--expected-facts",
+        type=Path,
+        default=None,
+        help="Frozen JSON fact denominator used for diagnostic quality scoring",
+    )
+    parser.add_argument(
         "--outctl-cmd",
         default="outctl",
         help="Shell-like launcher prefix, e.g. 'uv run --project /projects/dev/outctl outctl'",
@@ -2258,6 +2372,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     _validate_policy_digest(args.policy_digest)
+    expected_facts_path = args.expected_facts.resolve() if args.expected_facts else None
+    expected_signature, expected_critical = _load_expected_facts(expected_facts_path)
     if args.search_redaction_exact_json is not None:
         try:
             redactions = json.loads(args.search_redaction_exact_json)
@@ -2289,6 +2405,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ExperimentError(f"--health-checker file is missing: {health_checker}")
     if not args.dry_run and (kubeconfig is None or not kubeconfig.is_file() or not args.context):
         raise ExperimentError("live runs require an explicit readable --kubeconfig and --context")
+    if not args.dry_run and args.qualitative_regular_context:
+        raise ExperimentError(
+            "live qualitative regular-context runs are disabled: use genuine read-only RBAC "
+            "through the pinned runner boundary"
+        )
     try:
         schema_value = json.loads(schema_path.read_text(encoding="utf-8"))
         Draft202012Validator.check_schema(schema_value)
@@ -2742,6 +2863,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 signature_b,
                 launch_skew_ms,
                 treatment_mode=args.treatment_mode,
+                expected_signature=expected_signature,
+                expected_critical=expected_critical,
             )
             pairs.append(
                 {
@@ -2788,6 +2911,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "rendered_prompt_bytes": len(prompt.encode("utf-8")),
                     "model_guidance_inventory": guidance_inventory,
                     "shared_health_checker": shared_checker,
+                    "expected_facts_sha256": (
+                        _sha256_file(expected_facts_path) if expected_facts_path else None
+                    ),
                 }
             }
         else:
@@ -2831,6 +2957,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "policy_ref": args.policy_ref,
                     "policy_digest": args.policy_digest,
                     "shared_health_checker": shared_checker,
+                    "expected_facts_sha256": (
+                        _sha256_file(expected_facts_path) if expected_facts_path else None
+                    ),
                     "baseline_native_outctl_guidance": contamination,
                     "baseline_hooks_json_sha256": baseline_hooks_sha256,
                     "model_guidance_inventory": guidance_inventory,

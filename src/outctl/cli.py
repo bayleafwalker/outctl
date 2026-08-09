@@ -99,6 +99,16 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--context-bytes", type=int, default=80)
     search.add_argument("--max-matches", type=int, default=20)
 
+    search_many = commands.add_parser(
+        "search-many", help="batch literal searches against one existing capture"
+    )
+    _spool_argument(search_many)
+    search_many.add_argument("capture_id")
+    search_many.add_argument("stream", choices=("stdout", "stderr"))
+    search_many.add_argument("patterns", nargs="+")
+    search_many.add_argument("--context-bytes", type=int, default=80)
+    search_many.add_argument("--max-matches-per-pattern", type=int, default=3)
+
     verify = commands.add_parser("verify", help="verify capture digests")
     _spool_argument(verify)
     verify.add_argument("capture_id")
@@ -208,6 +218,15 @@ def _inspection_payload(result: InspectionResult) -> dict[str, object]:
             "event_count": event_index.get("events")
             if isinstance(event_index, dict) and isinstance(event_index.get("events"), int)
             else None,
+        }
+        payload["outline"] = {
+            "streams": ["stdout", "stderr"],
+            "retrieval_operations": ["slice", "tail", "search", "search-many"],
+            "omission_reasons": (
+                ["capture_quota"]
+                if result.capture_status in {"CAPTURE_TRUNCATED", "CAPTURE_DEGRADED"}
+                else []
+            ),
         }
     return payload
 
@@ -360,6 +379,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return exit_code
         if args.command == "inspect":
             inspection = inspect_capture(args.spool_root, args.capture_id)
+            if inspection.status is RetrievalStatus.AVAILABLE:
+                _record_retrieval(args.spool_root, args.capture_id, "inspect")
             _json(_inspection_payload(inspection))
             return _status_code(inspection.status)
         if args.command == "slice":
@@ -401,6 +422,37 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _record_retrieval(args.spool_root, args.capture_id, "search")
             _json(_search_payload(searched))
             return _status_code(searched.status)
+        if args.command == "search-many":
+            if len(args.patterns) > 8:
+                raise ValueError("search-many accepts at most 8 literal patterns")
+            if not 1 <= args.max_matches_per_pattern <= 3:
+                raise ValueError("--max-matches-per-pattern must be between 1 and 3")
+            results = [
+                search_stream(
+                    args.spool_root,
+                    args.capture_id,
+                    args.stream,
+                    pattern,
+                    context_bytes=args.context_bytes,
+                    max_matches=args.max_matches_per_pattern,
+                )
+                for pattern in args.patterns
+            ]
+            available = all(result.status is RetrievalStatus.AVAILABLE for result in results)
+            if available:
+                _record_retrieval(args.spool_root, args.capture_id, "search-many")
+            _json(
+                {
+                    "status": "AVAILABLE" if available else "UNAVAILABLE",
+                    "capture_id": args.capture_id,
+                    "stream": args.stream,
+                    "queries": [
+                        {"pattern": pattern, **_search_payload(result)}
+                        for pattern, result in zip(args.patterns, results, strict=True)
+                    ],
+                }
+            )
+            return 0 if available else 1
         if args.command == "verify":
             verified = verify_capture(args.spool_root, args.capture_id)
             _json(_verification_payload(verified))

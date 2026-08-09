@@ -238,13 +238,18 @@ with `--pairs 3` for the sequential matched evaluation. The launcher uses:
 
 ```bash
 jq '.experiment, .aggregate' "$AB_LIVE/report.json"
-jq '.pairs[] | {pair, pair_valid: .comparison.pair_valid, flags: .comparison.flags}' \
+jq '.pairs[] | {pair, validity: .comparison.validity, outcomes: .comparison.outcomes, economics: .comparison.economics, flags: .comparison.flags}' \
   "$AB_LIVE/report.json"
 ```
 
-Aggregate medians use **valid pairs only**. The report keeps invalid pairs and
-their flags, but does not quietly blend broken hook loading, divergent health
-results, or missing captures into the efficacy result.
+Aggregate paired effects use **protocol-valid pairs only**. Diagnostic
+disagreement remains an outcome and never excludes a pair. `pair_valid` is a
+deprecated alias for `validity.protocol_valid`.
+
+Supply a frozen fact denominator with
+`--expected-facts expected-facts.example.json`. Without one, quality is
+explicitly unscored. Paired reductions and paired geometric-mean effects are
+primary; pooled totals are secondary operational accounting.
 
 ### Validity gates
 
@@ -375,4 +380,15 @@ Its helper never reruns a prior command: `tail <capture-id>` returns a suffix,
 while `search <capture-id> <literal-term>` returns at most three
 160-byte-context windows and imposes a second 2 KiB model-facing cap.
 
-Both modes keep the same read-only/secret-denial guard and private spool.
+Both modes keep the same read-only/secret-denial guard and private spool. Live
+`--qualitative-regular-context` runs are disabled; use genuine read-only RBAC
+through the pinned runner boundary.
+
+Checks and findings must cite capture IDs and bounded retrieval operations in
+`evidence_refs`. Core retrieval supports `inspect`, `tail`, `search`, and
+`search-many`.
+
+Build deterministic raw-free evidence packages with
+`build_analyst_bundle.py`. `analyst-safe` and `reproducibility` packages both
+exclude bytecode and private/raw captures and include a bundle inventory with
+SHA-256 hashes; the reproducibility class also includes core source and tests.

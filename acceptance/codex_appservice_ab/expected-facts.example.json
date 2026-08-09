@@ -1,0 +1,8 @@
+{
+  "scenario_id": "replace-with-frozen-seeded-scenario-id",
+  "facts": [
+    {"key": "coverage:cluster_api", "status": "healthy", "critical": false},
+    {"key": "coverage:nodes", "status": "degraded", "critical": false},
+    {"key": "finding:component:node/node-3", "status": "high", "critical": true}
+  ]
+}
