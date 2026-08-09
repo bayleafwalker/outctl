@@ -1158,6 +1158,32 @@ def _basic_final_validation(value: Any) -> tuple[bool, list[str]]:
     return not errors, errors
 
 
+_POD_SUFFIX = re.compile(r"-[a-z0-9]{5}$")
+
+
+def _canonical_finding_subject(finding: Mapping[str, Any]) -> str:
+    """Return a stable quality-comparison subject without trusting model IDs.
+
+    The output schema intentionally leaves ``findings[].id`` model-defined.
+    Comparing those labels literally turns equivalent reports into invalid A/B
+    pairs when one arm emits a descriptive ID and the other emits a sequence
+    number. A component is the structured subject when supplied; strip a
+    Kubernetes pod's generated five-character suffix so concurrent reads of
+    the same workload compare equal. Fall back to the ID for schemas lacking a
+    component, keeping the comparison conservative rather than inventing a
+    semantic match from prose.
+    """
+
+    component = str(finding.get("component", "")).strip().casefold()
+    if component:
+        namespace, separator, resource = component.partition("/")
+        if separator:
+            resource = _POD_SUFFIX.sub("", resource)
+            return f"component:{namespace}/{resource}"
+        return f"component:{_POD_SUFFIX.sub('', component)}"
+    return f"id:{str(finding.get('id', '')).strip().casefold()}"
+
+
 def _final_metrics(
     path: Path,
     validator: Draft202012Validator,
@@ -1237,10 +1263,10 @@ def _final_metrics(
                 signature.add((f"check:{area}", status))
     for finding in findings:
         if isinstance(finding, Mapping):
-            finding_id = str(finding.get("id", "")).strip().casefold()
             severity = str(finding.get("severity", "")).strip().casefold()
-            if finding_id:
-                signature.add((f"finding:{finding_id}", severity))
+            subject = _canonical_finding_subject(finding)
+            if subject != "id:":
+                signature.add((f"finding:{subject}", severity))
     fingerprint = _sha256_text(
         json.dumps(sorted(signature), separators=(",", ":"), ensure_ascii=False)
     )

@@ -93,6 +93,51 @@ class UsageTests(unittest.TestCase):
 
 
 class HarnessValidationTests(unittest.TestCase):
+    def test_quality_signature_canonicalizes_model_ids_and_pod_suffixes(self) -> None:
+        schema = json.loads(
+            Path(run.__file__).with_name("health-result.schema.json").read_text(encoding="utf-8")
+        )
+        validator = Draft202012Validator(schema)
+
+        def result(finding_id: str, component: str) -> dict[str, object]:
+            return {
+                "overall_status": "degraded",
+                "summary": "degraded",
+                "coverage": {
+                    name: {"status": "healthy", "evidence": "ok"}
+                    for name in run.REQUIRED_COVERAGE_AREAS
+                },
+                "checks": [],
+                "findings": [
+                    {
+                        "id": finding_id,
+                        "severity": "high",
+                        "component": component,
+                        "summary": "one affected workload",
+                        "evidence": [],
+                    }
+                ],
+                "limitations": [],
+                "mutations_performed": False,
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            left = root / "left.json"
+            right = root / "right.json"
+            left.write_text(
+                json.dumps(result("HIGH-WORKLOAD", "vscode/actionq-schema-v8-h7p7k")),
+                encoding="utf-8",
+            )
+            right.write_text(
+                json.dumps(result("APP-H-001", "vscode/actionq-schema-v8")),
+                encoding="utf-8",
+            )
+            _, left_signature, _ = run._final_metrics(left, validator)
+            _, right_signature, _ = run._final_metrics(right, validator)
+
+        self.assertEqual(left_signature, right_signature)
+
     def test_generated_codex_home_disables_unrelated_context_features(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
