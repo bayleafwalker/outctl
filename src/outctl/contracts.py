@@ -26,6 +26,7 @@ _SCHEMAS = frozenset(
         "shadow-observation",
         "study-analysis",
         "study-protocol",
+        "study-suite",
         "ux-evidence",
     }
 )
@@ -38,6 +39,130 @@ _PATH_KEY = re.compile(r"(spool|local)_?path", re.IGNORECASE)
 
 class ContractValidationError(ValueError):
     """Raised for schema-invalid or semantically unsafe contract material."""
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractValidationError(f"{label} is not readable JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ContractValidationError(f"{label} root must be an object")
+    return value
+
+
+def _repository_head(root: Path) -> str:
+    dotgit = root / ".git"
+    git_dir = dotgit
+    if dotgit.is_file():
+        marker = dotgit.read_text(encoding="utf-8").strip()
+        if not marker.startswith("gitdir: "):
+            raise ContractValidationError("repository .git indirection is invalid")
+        git_dir = (root / marker.removeprefix("gitdir: ")).resolve()
+    head = (git_dir / "HEAD").read_text(encoding="ascii").strip()
+    if re.fullmatch(r"[a-f0-9]{40,64}", head):
+        return head
+    if not head.startswith("ref: "):
+        raise ContractValidationError("repository HEAD is not a commit or ref")
+    reference = head.removeprefix("ref: ")
+    candidates = [git_dir / reference]
+    common_file = git_dir / "commondir"
+    common = git_dir
+    if common_file.is_file():
+        common = (git_dir / common_file.read_text(encoding="utf-8").strip()).resolve()
+        candidates.append(common / reference)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.read_text(encoding="ascii").strip()
+    packed = common / "packed-refs"
+    if packed.is_file():
+        for line in packed.read_text(encoding="ascii").splitlines():
+            if line and not line.startswith(("#", "^")):
+                commit, name = line.split(" ", 1)
+                if name == reference:
+                    return commit
+    raise ContractValidationError(f"repository HEAD ref cannot be resolved: {reference}")
+
+
+def _bound_repository_file(root: Path, binding: Mapping[str, Any], label: str) -> Path:
+    raw = binding.get("path")
+    if not isinstance(raw, str):
+        raise ContractValidationError(f"{label} path is missing")
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts or relative.parts[:1] == ("examples",):
+        raise ContractValidationError(
+            f"{label} path must be repository-relative, non-example, and traversal-free"
+        )
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root.resolve()) or not path.is_file():
+        raise ContractValidationError(f"{label} path is outside the repository or missing")
+    observed = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    if observed != binding.get("sha256"):
+        raise ContractValidationError(f"{label} digest mismatch")
+    return path
+
+
+def _repository_file(root: Path, raw: object, label: str) -> Path:
+    return _bound_repository_file(
+        root,
+        {
+            "path": raw,
+            "sha256": "sha256:"
+            + hashlib.sha256((root / str(raw)).read_bytes()).hexdigest()
+            if isinstance(raw, str)
+            and not Path(raw).is_absolute()
+            and ".." not in Path(raw).parts
+            and (root / raw).is_file()
+            else None,
+        },
+        label,
+    )
+
+
+def validate_controlled_study_launch(
+    repository_root: Path,
+    protocol_path: Path,
+    scenario_id: str,
+    *,
+    mutation_authorized: bool = False,
+) -> dict[str, Any]:
+    """Fail closed on all frozen bindings before a controlled model launch."""
+    root = repository_root.resolve()
+    protocol = validate_contract(
+        "study-protocol", _read_json_object(protocol_path, "study protocol")
+    )
+    if protocol.get("schema_version") != "vuoro.outctl.study-protocol/v2":
+        raise ContractValidationError("controlled launch requires study-protocol/v2")
+    if protocol.get("repository_commit") != _repository_head(root):
+        raise ContractValidationError("study protocol repository commit does not match HEAD")
+    suite_path = _repository_file(root, protocol.get("study_suite_path"), "study suite")
+    suite = validate_contract("study-suite", _read_json_object(suite_path, "study suite"))
+    if suite.get("suite_digest") != protocol.get("study_suite_digest"):
+        raise ContractValidationError("protocol and suite canonical digests do not match")
+    selected = [item for item in suite["scenarios"] if item.get("scenario_id") == scenario_id]
+    if len(selected) != 1:
+        raise ContractValidationError(f"scenario ID is not bound exactly once: {scenario_id}")
+    binding = selected[0]
+    manifest_path = _bound_repository_file(root, binding["manifest"], "scenario manifest")
+    facts_path = _bound_repository_file(root, binding["expected_facts"], "expected facts")
+    manifest = validate_contract(
+        "scenario-manifest", _read_json_object(manifest_path, "scenario manifest")
+    )
+    facts = validate_contract("expected-facts", _read_json_object(facts_path, "expected facts"))
+    if manifest.get("scenario_id") != scenario_id or facts.get("scenario_id") != scenario_id:
+        raise ContractValidationError("scenario manifest/expected facts cross-binding mismatch")
+    if manifest.get("scenario_class") != binding.get("scenario_class"):
+        raise ContractValidationError("scenario class contradicts suite binding")
+    fixture = str(manifest.get("fixture_digest", "")).removeprefix("sha256:")
+    if not fixture or len(set(fixture)) == 1:
+        raise ContractValidationError("scenario fixture digest is a placeholder")
+    if manifest.get("expected_facts_digest") != binding["expected_facts"]["sha256"]:
+        raise ContractValidationError("scenario manifest does not bind expected-facts bytes")
+    if manifest.get("replayable") is not True:
+        raise ContractValidationError("controlled scenario must be replayable")
+    if manifest.get("mutation_authority_required") is True and not mutation_authorized:
+        raise ContractValidationError("scenario requires mutation authority not granted to launch")
+    return {"protocol": protocol, "suite": suite, "manifest": manifest, "expected_facts": facts}
 
 
 def _plain(value: object) -> Any:
@@ -124,6 +249,31 @@ def _validate_semantics(name: str, value: Mapping[str, Any]) -> None:
     if name == "study-protocol":
         if value.get("protocol_digest") != _canonical_digest(value, omit="protocol_digest"):
             raise ContractValidationError("study protocol digest does not bind canonical bytes")
+    elif name == "study-suite":
+        if value.get("suite_digest") != _canonical_digest(value, omit="suite_digest"):
+            raise ContractValidationError("study suite digest does not bind canonical bytes")
+        scenarios = value.get("scenarios")
+        if isinstance(scenarios, list):
+            identifiers = [
+                item.get("scenario_id") for item in scenarios if isinstance(item, Mapping)
+            ]
+            classes = [
+                item.get("scenario_class") for item in scenarios if isinstance(item, Mapping)
+            ]
+            required = {
+                "healthy",
+                "node-not-ready",
+                "crashloop",
+                "gitops-reconciliation-failure",
+                "storage-failure",
+                "warning-events",
+            }
+            if len(identifiers) != len(set(identifiers)):
+                raise ContractValidationError("study suite scenario IDs must be unique")
+            if set(classes) != required or len(classes) != len(required):
+                raise ContractValidationError(
+                    "study suite must bind exactly one scenario per required class"
+                )
     elif name == "study-analysis":
         pairs = value.get("pairs")
         summary = value.get("paired_summary")

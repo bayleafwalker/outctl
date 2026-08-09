@@ -1,46 +1,70 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:vuoro:outctl:study-protocol:v1",
+  "$id": "urn:vuoro:outctl:study-protocol",
   "title": "Frozen controlled efficacy study protocol",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema_version", "protocol_id", "protocol_digest", "frozen_at",
-    "repository_commit", "scenario_manifest_digest", "expected_facts_digest",
-    "quality_scoring_version", "noninferiority_margin_ppm", "critical_severities",
-    "variance_pilot_pairs", "confirmatory_pairs", "randomization_seed",
-    "cache_strata", "primary_outcomes", "secondary_outcomes", "exclusion_rules",
-    "stopping_rules"
+  "oneOf": [
+    {"$ref": "#/$defs/v1"},
+    {"$ref": "#/$defs/v2"}
   ],
-  "properties": {
-    "schema_version": {"const": "vuoro.outctl.study-protocol/v1"},
-    "protocol_id": {"type": "string", "minLength": 1},
-    "protocol_digest": {"$ref": "#/$defs/digest"},
-    "frozen_at": {"type": "string", "format": "date-time"},
-    "repository_commit": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"},
-    "scenario_manifest_digest": {"$ref": "#/$defs/digest"},
-    "expected_facts_digest": {"$ref": "#/$defs/digest"},
-    "quality_scoring_version": {"const": "expected-fact-recall/v1"},
-    "noninferiority_margin_ppm": {"type": "integer", "minimum": 0, "maximum": 1000000},
-    "critical_severities": {
-      "type": "array", "minItems": 1, "uniqueItems": true,
-      "items": {"enum": ["critical", "high"]}
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "common": {
+      "type": "object",
+      "properties": {
+        "protocol_id": {"type": "string", "minLength": 1},
+        "protocol_digest": {"$ref": "#/$defs/digest"},
+        "frozen_at": {"type": "string", "format": "date-time"},
+        "repository_commit": {"type": "string", "pattern": "^[a-f0-9]{40,64}$"},
+        "quality_scoring_version": {"const": "expected-fact-recall/v1"},
+        "noninferiority_margin_ppm": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "critical_severities": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["critical", "high"]}},
+        "variance_pilot_pairs": {"type": "integer", "minimum": 6, "maximum": 10},
+        "confirmatory_pairs": {"type": "integer", "minimum": 1},
+        "randomization_seed": {"type": "integer", "minimum": 0},
+        "cache_strata": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["cold", "warm", "unknown"]}},
+        "primary_outcomes": {"type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true, "contains": {"const": "diagnostic_quality_noninferiority"}, "items": {"enum": ["diagnostic_quality_noninferiority", "additional_critical_misses", "model_visible_command_output_bytes", "uncached_read_input_tokens"]}},
+        "secondary_outcomes": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "exclusion_rules": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "stopping_rules": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
     },
-    "variance_pilot_pairs": {"type": "integer", "minimum": 6, "maximum": 10},
-    "confirmatory_pairs": {"type": "integer", "minimum": 1},
-    "randomization_seed": {"type": "integer", "minimum": 0},
-    "cache_strata": {
-      "type": "array", "minItems": 1, "uniqueItems": true,
-      "items": {"enum": ["cold", "warm", "unknown"]}
+    "v1": {
+      "allOf": [
+        {"$ref": "#/$defs/common"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schema_version", "protocol_id", "protocol_digest", "frozen_at", "repository_commit", "scenario_manifest_digest", "expected_facts_digest", "quality_scoring_version", "noninferiority_margin_ppm", "critical_severities", "variance_pilot_pairs", "confirmatory_pairs", "randomization_seed", "cache_strata", "primary_outcomes", "secondary_outcomes", "exclusion_rules", "stopping_rules"],
+          "properties": {
+            "schema_version": {"const": "vuoro.outctl.study-protocol/v1"},
+            "protocol_id": true, "protocol_digest": true, "frozen_at": true, "repository_commit": true,
+            "scenario_manifest_digest": {"$ref": "#/$defs/digest"},
+            "expected_facts_digest": {"$ref": "#/$defs/digest"},
+            "quality_scoring_version": true, "noninferiority_margin_ppm": true, "critical_severities": true,
+            "variance_pilot_pairs": true, "confirmatory_pairs": true, "randomization_seed": true,
+            "cache_strata": true, "primary_outcomes": true, "secondary_outcomes": true,
+            "exclusion_rules": true, "stopping_rules": true
+          }
+        }
+      ]
     },
-    "primary_outcomes": {
-      "type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true,
-      "contains": {"const": "diagnostic_quality_noninferiority"},
-      "items": {"enum": ["diagnostic_quality_noninferiority", "additional_critical_misses", "model_visible_command_output_bytes", "uncached_read_input_tokens"]}
-    },
-    "secondary_outcomes": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
-    "exclusion_rules": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
-    "stopping_rules": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
-  },
-  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}
+    "v2": {
+      "allOf": [
+        {"$ref": "#/$defs/common"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["schema_version", "protocol_id", "protocol_digest", "frozen_at", "repository_commit", "study_suite_path", "study_suite_digest", "quality_scoring_version", "noninferiority_margin_ppm", "critical_severities", "variance_pilot_pairs", "confirmatory_pairs", "randomization_seed", "cache_strata", "primary_outcomes", "secondary_outcomes", "exclusion_rules", "stopping_rules"],
+          "properties": {
+            "schema_version": {"const": "vuoro.outctl.study-protocol/v2"},
+            "protocol_id": true, "protocol_digest": true, "frozen_at": true, "repository_commit": true,
+            "study_suite_path": {"type": "string", "minLength": 1},
+            "study_suite_digest": {"$ref": "#/$defs/digest"},
+            "quality_scoring_version": true, "noninferiority_margin_ppm": true, "critical_severities": true,
+            "variance_pilot_pairs": true, "confirmatory_pairs": true, "randomization_seed": true,
+            "cache_strata": true, "primary_outcomes": true, "secondary_outcomes": true,
+            "exclusion_rules": true, "stopping_rules": true
+          }
+        }
+      ]
+    }
+  }
 }

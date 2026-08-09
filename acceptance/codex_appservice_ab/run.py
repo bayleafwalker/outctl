@@ -38,6 +38,8 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from kubectl_guard import classify_kubectl
 
+from outctl.contracts import ContractValidationError, validate_controlled_study_launch
+
 RATE_DATE = "2026-08-08"
 TERRA_MODEL_ALIASES = {"gpt-5.6-terra", "terra"}
 TERRA_CODEX_CREDITS_PER_M = {
@@ -2364,6 +2366,17 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="Frozen JSON fact denominator used for diagnostic quality scoring",
     )
     parser.add_argument(
+        "--study-protocol",
+        type=Path,
+        default=None,
+        help="Frozen study-protocol/v2 for a controlled scenario launch",
+    )
+    parser.add_argument(
+        "--scenario-id",
+        default=None,
+        help="Scenario selected from --study-protocol's bound suite",
+    )
+    parser.add_argument(
         "--outctl-cmd",
         default="outctl",
         help="Shell-like launcher prefix, e.g. 'uv run --project /projects/dev/outctl outctl'",
@@ -2393,8 +2406,30 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    if (args.study_protocol is None) != (args.scenario_id is None):
+        raise ExperimentError("--study-protocol and --scenario-id must be supplied together")
+    controlled_study: dict[str, Any] | None = None
+    if args.study_protocol is not None:
+        try:
+            controlled_study = validate_controlled_study_launch(
+                Path(__file__).resolve().parents[2],
+                args.study_protocol.resolve(),
+                args.scenario_id,
+            )
+        except ContractValidationError as exc:
+            raise ExperimentError(f"controlled study launch rejected: {exc}") from exc
     _validate_policy_digest(args.policy_digest)
-    expected_facts_path = args.expected_facts.resolve() if args.expected_facts else None
+    if controlled_study is not None and args.expected_facts is not None:
+        raise ExperimentError("--expected-facts is selected by the controlled study protocol")
+    expected_facts_path = (
+        Path(controlled_study["suite"]["scenarios"][[
+            item["scenario_id"] for item in controlled_study["suite"]["scenarios"]
+        ].index(args.scenario_id)]["expected_facts"]["path"])
+        if controlled_study is not None
+        else args.expected_facts.resolve() if args.expected_facts else None
+    )
+    if controlled_study is not None:
+        expected_facts_path = Path(__file__).resolve().parents[2] / expected_facts_path
     expected_signature, expected_critical = _load_expected_facts(expected_facts_path)
     if args.search_redaction_exact_json is not None:
         try:

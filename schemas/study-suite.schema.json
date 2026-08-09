@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:study-suite:v1",
+  "title": "Frozen controlled-study scenario suite",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "suite_id", "suite_digest", "scenarios"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.study-suite/v1"},
+    "suite_id": {"type": "string", "minLength": 1},
+    "suite_digest": {"$ref": "#/$defs/digest"},
+    "scenarios": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scenario_id", "scenario_class", "manifest", "expected_facts"],
+        "properties": {
+          "scenario_id": {"type": "string", "minLength": 1},
+          "scenario_class": {"$ref": "#/$defs/scenario_class"},
+          "manifest": {"$ref": "#/$defs/file_binding"},
+          "expected_facts": {"$ref": "#/$defs/file_binding"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "scenario_class": {"enum": ["healthy", "node-not-ready", "crashloop", "gitops-reconciliation-failure", "storage-failure", "warning-events"]},
+    "file_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

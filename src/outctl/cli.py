@@ -151,6 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
             "shadow-observation",
             "study-analysis",
             "study-protocol",
+            "study-suite",
             "ux-evidence",
         ),
     )
