@@ -1,0 +1,1 @@
+{"api":"healthy","events":[],"gitops":{"name":"apps","ready":false,"reason":"BuildFailed"},"nodes":[{"name":"node-1","ready":true}],"pods":[],"storage":{"bound":true}}

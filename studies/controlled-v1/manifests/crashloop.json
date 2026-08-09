@@ -1,0 +1,1 @@
+{"expected_facts_digest":"sha256:7671d08255ede27349f5d1d271e882959f0e9dff5ab60cd289215fe0062843ac","fixture_digest":"sha256:87d97bae2f9482c8374ed9b72f268851a11b553efc5c41e56fec640812fd5277","mutation_authority_required":false,"replayable":true,"scenario_class":"crashloop","scenario_id":"crashloop-v1","schema_version":"vuoro.outctl.scenario-manifest/v1","seed":2026080903}

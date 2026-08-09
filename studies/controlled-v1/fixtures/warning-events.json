@@ -1,0 +1,1 @@
+{"api":"healthy","events":[{"reason":"Unhealthy","severity":"Warning"},{"reason":"BackOff","severity":"Warning"}],"gitops":{"ready":true},"nodes":[{"name":"node-1","ready":true}],"pods":[{"name":"frontend-1","phase":"Running","ready":true}],"storage":{"bound":true}}

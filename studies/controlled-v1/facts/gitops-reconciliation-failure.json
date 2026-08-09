@@ -1,0 +1,1 @@
+{"facts":[{"critical":false,"fact_id":"api-healthy","key":"coverage:cluster_api","severity":"info","status":"healthy"},{"critical":true,"fact_id":"apps-build-failed","key":"finding:gitops/apps","severity":"high","status":"degraded"}],"scenario_id":"gitops-failure-v1","schema_version":"vuoro.outctl.expected-facts/v1"}

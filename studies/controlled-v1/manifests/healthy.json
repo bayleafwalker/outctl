@@ -1,0 +1,1 @@
+{"expected_facts_digest":"sha256:00620619949336c7b1f51f832d655e02ad068199a8af03cafd95cbc5a90af25b","fixture_digest":"sha256:2145c3e38a5199b85bdc8c9ebea112274a6482949dc8a3f804da5454aae49ef1","mutation_authority_required":false,"replayable":true,"scenario_class":"healthy","scenario_id":"healthy-v1","schema_version":"vuoro.outctl.scenario-manifest/v1","seed":2026080901}

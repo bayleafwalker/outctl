@@ -1,0 +1,1 @@
+{"api":"healthy","events":[{"reason":"FailedMount","severity":"Warning"}],"gitops":{"ready":true},"nodes":[{"name":"node-1","ready":true}],"pods":[{"name":"database-1","phase":"Pending","ready":false}],"storage":{"bound":false,"claim":"database-data"}}
