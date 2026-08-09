@@ -2245,6 +2245,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--include-untracked", action="store_true")
     parser.add_argument("--allow-contaminated-baseline", action="store_true")
     parser.add_argument("--keep-worktrees", action="store_true")
+    parser.add_argument(
+        "--qualitative-regular-context",
+        action="store_true",
+        help="Allow normal appservice shell initialization for a qualitative UX study",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
@@ -2467,7 +2472,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     policy_ref=args.policy_ref,
                     policy_digest=args.policy_digest,
                 )
-            if kubeconfig is not None:
+            if kubeconfig is not None and not args.qualitative_regular_context:
                 base_path = str(kubectl_bin.parent) + os.pathsep + os.environ.get("PATH", "")
                 path_a = (
                     str(helper_dir_a) + os.pathsep + base_path
@@ -2558,10 +2563,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_a / "hook-events.jsonl"),
                 "KUBECONFIG": str(kubeconfig),
-                "HOME": str(shell_home_a),
-                "BASH_ENV": str(shell_env_a),
-                "ENV": str(shell_env_a),
-                "CODEX_AB_KUBECTL_PIN": str(kubectl_bin),
+                **(
+                    {
+                        "HOME": str(shell_home_a),
+                        "BASH_ENV": str(shell_env_a),
+                        "ENV": str(shell_env_a),
+                        "CODEX_AB_KUBECTL_PIN": str(kubectl_bin),
+                    }
+                    if not args.qualitative_regular_context
+                    else {}
+                ),
                 "OUTCTL_AB_SPOOL_ROOT": str(spool_a),
                 "OUTCTL_ENABLED": "1",
                 "OUTCTL_MODE": "enforce",
@@ -2592,37 +2603,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_b / "hook-events.jsonl"),
                 "KUBECONFIG": str(kubeconfig),
-                "HOME": str(shell_home_b),
-                "BASH_ENV": str(shell_env_b),
-                "ENV": str(shell_env_b),
-                "CODEX_AB_KUBECTL_PIN": str(kubectl_bin),
+                **(
+                    {
+                        "HOME": str(shell_home_b),
+                        "BASH_ENV": str(shell_env_b),
+                        "ENV": str(shell_env_b),
+                        "CODEX_AB_KUBECTL_PIN": str(kubectl_bin),
+                    }
+                    if not args.qualitative_regular_context
+                    else {}
+                ),
                 "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
             }
-            assert expected_identity is not None
-            identity_a = _probe_arm_cluster_identity(
-                env=env_a,
-                expected_context=str(expected_identity["context"]),
-                expected_server=str(expected_identity["server"]),
-                kubectl_bin=kubectl_bin,
-            )
-            identity_b = _probe_arm_cluster_identity(
-                env=env_b,
-                expected_context=str(expected_identity["context"]),
-                expected_server=str(expected_identity["server"]),
-                kubectl_bin=kubectl_bin,
-            )
-            if (
-                identity_a["identity_sha256"] != identity_b["identity_sha256"]
-                or not identity_a["matches_launcher_preflight"]
-                or not identity_b["matches_launcher_preflight"]
-            ):
-                raise ExperimentError(
-                    "arm cluster identity mismatch detected before model execution"
+            if args.qualitative_regular_context:
+                identity_a = {"qualitative_regular_context": True}
+                identity_b = {"qualitative_regular_context": True}
+            else:
+                assert expected_identity is not None
+                identity_a = _probe_arm_cluster_identity(
+                    env=env_a,
+                    expected_context=str(expected_identity["context"]),
+                    expected_server=str(expected_identity["server"]),
+                    kubectl_bin=kubectl_bin,
                 )
+                identity_b = _probe_arm_cluster_identity(
+                    env=env_b,
+                    expected_context=str(expected_identity["context"]),
+                    expected_server=str(expected_identity["server"]),
+                    kubectl_bin=kubectl_bin,
+                )
+                if (
+                    identity_a["identity_sha256"] != identity_b["identity_sha256"]
+                    or not identity_a["matches_launcher_preflight"]
+                    or not identity_b["matches_launcher_preflight"]
+                ):
+                    raise ExperimentError(
+                        "arm cluster identity mismatch detected before model execution"
+                    )
             helper_provenance = {
                 "pinned_kubectl_sha256": _sha256_file(kubectl_bin),
-                "arm_a_shell_pin_sha256": _sha256_file(shell_env_a),
-                "arm_b_shell_pin_sha256": _sha256_file(shell_env_b),
+                "arm_a_shell_pin_sha256": _sha256_file(shell_env_a) if shell_env_a else None,
+                "arm_b_shell_pin_sha256": _sha256_file(shell_env_b) if shell_env_b else None,
                 "arm_a_outctl_helper_sha256": (
                     _sha256_file(helper_dir_a / "outctl-health")
                     if args.treatment_mode == "opt-in"
