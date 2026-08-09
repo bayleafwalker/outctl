@@ -38,6 +38,7 @@ from outctl.retrieval import (
     tail_stream,
     verify_capture,
 )
+from outctl.study import StudyCompileError, compile_study_analysis, load_json_object
 
 _DEFAULT_SPOOL = Path(".outctl")
 _DEFAULT_MAX_BYTES = 64 * 1024
@@ -156,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     contract.add_argument("document", type=Path)
+    study_compile = commands.add_parser(
+        "study-compile", help="compile raw-free paired study observations"
+    )
+    study_compile.add_argument("protocol", type=Path)
+    study_compile.add_argument("observations", type=Path)
     return parser
 
 
@@ -555,7 +561,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             validate_contract(args.schema, value)
             _json({"status": "VALID", "schema": args.schema})
             return 0
-    except (OSError, PilotReportError, ValueError) as error:
+        if args.command == "study-compile":
+            _json(
+                compile_study_analysis(
+                    load_json_object(args.protocol), load_json_object(args.observations)
+                )
+            )
+            return 0
+    except (OSError, PilotReportError, StudyCompileError, ValueError) as error:
         _json({"status": "ERROR", "detail": _metadata_text(str(error))})
         return 2
     raise AssertionError(f"unknown command {args.command!r}")
