@@ -181,6 +181,32 @@ class HarnessValidationTests(unittest.TestCase):
         self.assertFalse(comparison["treatment_compliant"])
         self.assertTrue(comparison["pair_valid"])
 
+    def test_failed_opt_in_attempt_invalidates_pair(self) -> None:
+        arm = {
+            "exit_code": 0,
+            "timed_out": False,
+            "final": {"schema_valid": True, "overall_status": "healthy"},
+            "model_observed": True,
+            "model_mismatch": False,
+            "model_reroute_signal": False,
+            "commands": {
+                "kubectl_via_outctl_attempts": 1,
+                "kubectl_via_outctl_completed": 0,
+                "retrieval_tool_turns": 0,
+            },
+            "hooks": {"events": 1, "read_only_policy_denials": 0},
+            "outctl_spool": {},
+            "cluster_identity": self._identity(),
+        }
+        baseline = {
+            **arm,
+            "commands": {"kubectl_completed": 1, "kubectl_direct_completed": 1},
+        }
+        comparison = run._compare_pair(arm, baseline, set(), set(), 0, treatment_mode="opt-in")
+        self.assertEqual(comparison["treatment_adoption_state"], "attempted_failure")
+        self.assertFalse(comparison["treatment_capture_accounted"])
+        self.assertFalse(comparison["pair_valid"])
+
     def test_opt_in_quality_gate_accepts_same_health_despite_finding_variance(self) -> None:
         arm = {
             "exit_code": 0,
@@ -592,9 +618,6 @@ class EndToEndTests(unittest.TestCase):
                                 "stderr": {"bytes": 0}
                             }
                         }))
-                        (spool / "retrieval-events.jsonl").write_text(
-                            json.dumps({"capture_id": "capture-1", "operation": "tail"}) + "\\n"
-                        )
                     else:
                         command = "kubectl get pods -A"
                         output = "x" * 1000

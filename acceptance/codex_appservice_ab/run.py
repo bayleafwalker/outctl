@@ -1845,9 +1845,23 @@ def _compare_pair(
         and set(a_spool.get("capture_status_counts", {})) <= {"COMPLETE"}
         and int(a_spool.get("retrieval_count", 0)) == 1
     )
-    treatment_adopted = int(a_commands.get("kubectl_via_outctl_completed", 0)) > 0
+    wrapped_attempts = int(a_commands.get("kubectl_via_outctl_attempts", 0))
+    wrapped_completed = int(a_commands.get("kubectl_via_outctl_completed", 0))
+    treatment_attempted = wrapped_attempts > 0
+    treatment_adopted = wrapped_completed > 0
+    opt_in_capture_accounted = not treatment_attempted or (
+        wrapped_attempts == wrapped_completed
+        and int(a_spool.get("capture_directory_count", 0)) == wrapped_attempts
+        and int(a_spool.get("capture_count", 0)) == wrapped_attempts
+        and int(a_spool.get("partial_capture_count", 0)) == 0
+        and int(a_spool.get("manifest_errors", 0)) == 0
+        and set(a_spool.get("capture_status_counts", {})) <= {"COMPLETE"}
+        and int(a_spool.get("retrieval_count", 0)) == int(a_commands.get("retrieval_tool_turns", 0))
+    )
     treatment_compliant = (
-        strict_treatment_compliant if treatment_mode == "deterministic" else treatment_adopted
+        strict_treatment_compliant
+        if treatment_mode == "deterministic"
+        else treatment_attempted and wrapped_attempts == wrapped_completed
     )
     treatment_first_try_compliant = (
         strict_treatment_first_try_compliant
@@ -1855,7 +1869,18 @@ def _compare_pair(
         else treatment_adopted and int(a_hooks.get("require_outctl_denials", 0)) == 0
     )
     treatment_capture_accounted = (
-        strict_treatment_capture_accounted if treatment_mode == "deterministic" else True
+        strict_treatment_capture_accounted
+        if treatment_mode == "deterministic"
+        else opt_in_capture_accounted
+    )
+    treatment_adoption_state = (
+        "not_attempted"
+        if not treatment_attempted
+        else "attempted_success"
+        if wrapped_attempts == wrapped_completed and opt_in_capture_accounted
+        else "attempted_failure"
+        if wrapped_completed == 0
+        else "mixed"
     )
     hooks_observed_both_arms = (
         int(a_hooks.get("events", 0)) > 0 and int(b_hooks.get("events", 0)) > 0
@@ -1917,6 +1942,8 @@ def _compare_pair(
             "arm A did not produce one complete capture per wrapped command and one "
             "bounded retrieval"
         )
+    if treatment_mode == "opt-in" and not treatment_capture_accounted:
+        flags.append("arm A opt-in attempts lack matching complete captures or retrieval events")
     if not hooks_observed_both_arms:
         flags.append("PreToolUse hook telemetry was not observed in both arms")
     if baseline_spontaneously_used_outctl:
@@ -1951,6 +1978,8 @@ def _compare_pair(
         and bool(b_final.get("schema_valid"))
         and (treatment_mode != "deterministic" or treatment_compliant)
         and (treatment_mode != "deterministic" or treatment_capture_accounted)
+        and (treatment_mode != "opt-in" or not treatment_attempted or treatment_compliant)
+        and (treatment_mode != "opt-in" or treatment_capture_accounted)
         and hooks_observed_both_arms
         and not baseline_spontaneously_used_outctl
         and no_mutation_attempts
@@ -1967,6 +1996,7 @@ def _compare_pair(
         "cluster_identity_match": cluster_identity_match,
         "treatment_compliant": treatment_compliant,
         "treatment_adopted": treatment_adopted,
+        "treatment_adoption_state": treatment_adoption_state,
         "treatment_mode": treatment_mode,
         "treatment_first_try_compliant": treatment_first_try_compliant,
         "treatment_capture_accounted": treatment_capture_accounted,
@@ -2082,6 +2112,13 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     for value in retrievals.values():
         searches = int(value["search_turns"])
         value["search_hit_rate"] = int(value["search_hits"]) / searches if searches else None
+    tool_turns = {
+        arm: sum(
+            int(pair.get("arms", {}).get(arm, {}).get("commands", {}).get("command_items", 0))
+            for pair in valid_pairs
+        )
+        for arm in ("A", "B")
+    }
     return {
         "pairs": len(pairs),
         "valid_pairs": len(valid_pairs),
@@ -2120,6 +2157,7 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "median_reductions": medians,
         "pooled_metrics": pooled,
         "retrievals": retrievals,
+        "tool_turns": tool_turns,
     }
 
 
