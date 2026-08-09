@@ -1987,6 +1987,14 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     )
     parser.add_argument("--policy-ref", required=True)
     parser.add_argument("--policy-digest", required=True)
+    parser.add_argument(
+        "--search-redaction-exact-json",
+        default=None,
+        help=(
+            "Trusted JSON string array of exact values redacted by router search "
+            "before model exposure"
+        ),
+    )
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--include-untracked", action="store_true")
     parser.add_argument("--allow-contaminated-baseline", action="store_true")
@@ -1998,6 +2006,15 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     _validate_policy_digest(args.policy_digest)
+    if args.search_redaction_exact_json is not None:
+        try:
+            redactions = json.loads(args.search_redaction_exact_json)
+        except json.JSONDecodeError as exc:
+            raise ExperimentError("--search-redaction-exact-json must be valid JSON") from exc
+        if not isinstance(redactions, list) or not all(
+            isinstance(value, str) and value for value in redactions
+        ):
+            raise ExperimentError("--search-redaction-exact-json must be a JSON string array")
     kubectl_bin = _resolve_trusted_executable(args.kubectl_bin, name="kubectl")
     if args.pairs < 1:
         raise ExperimentError("--pairs must be at least 1")
@@ -2257,6 +2274,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "OUTCTL_AB_SPOOL_ROOT": str(spool_a),
                 "OUTCTL_ENABLED": "1",
                 "OUTCTL_MODE": "enforce",
+                **(
+                    {"OUTCTL_ROUTER_REDACT_EXACT_JSON": args.search_redaction_exact_json}
+                    if args.search_redaction_exact_json is not None
+                    else {}
+                ),
                 "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
                 **(
                     {

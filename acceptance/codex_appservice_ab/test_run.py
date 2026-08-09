@@ -78,6 +78,19 @@ class GuardTests(unittest.TestCase):
         self.assertIn("first bounded window", text)
         self.assertIn("second bounded window", text)
 
+    def test_router_search_redacts_exact_value_before_model_output(self) -> None:
+        secret = "fixture-search-secret"
+        payload = {
+            "capture_id": "capture-1",
+            "matches": [{"projection": {"text": f"marker secret={secret}\n"}}],
+        }
+        _, text = outctl_kubectl_router._safe_search(
+            json.dumps(payload).encode(), exact_redactions=(secret,)
+        )
+        self.assertIn("marker", text)
+        self.assertNotIn(secret, text)
+        self.assertIn("[REDACTED]", text)
+
 
 class UsageTests(unittest.TestCase):
     def test_exact_terra_cost(self) -> None:

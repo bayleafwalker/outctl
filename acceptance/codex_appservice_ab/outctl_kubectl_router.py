@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -69,7 +70,18 @@ def _emit(capture_id: str, exit_code: int | None, text: str) -> None:
         print()
 
 
-def _safe_search(stdout: bytes) -> tuple[str, str]:
+def _search_redactions() -> tuple[str, ...]:
+    """Load exact redactions supplied only by the trusted harness boundary."""
+    raw = os.environ.get("OUTCTL_ROUTER_REDACT_EXACT_JSON")
+    if raw is None:
+        return ()
+    value = json.loads(raw)
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError("OUTCTL_ROUTER_REDACT_EXACT_JSON must be a JSON string array")
+    return tuple(value)
+
+
+def _safe_search(stdout: bytes, *, exact_redactions: Sequence[str] = ()) -> tuple[str, str]:
     """Validate and bound projected ``outctl search`` windows."""
     value: Any = json.loads(stdout.decode("utf-8"))
     if not isinstance(value, dict):
@@ -89,6 +101,8 @@ def _safe_search(stdout: bytes) -> tuple[str, str]:
         text = projection.get("text") if isinstance(projection, dict) else None
         if not isinstance(text, str):
             raise ValueError("outctl search response lacks a safe projection")
+        for value in exact_redactions:
+            text = text.replace(value, "[REDACTED]")
         text = f"match {index}:\n{text}"
         encoded = text.encode("utf-8")
         if len(encoded) > budget:
@@ -185,7 +199,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
         )
         try:
-            capture_id, text = _safe_search(completed.stdout)
+            capture_id, text = _safe_search(
+                completed.stdout, exact_redactions=_search_redactions()
+            )
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             print(
                 "outctl router could not read a bounded search response: "
