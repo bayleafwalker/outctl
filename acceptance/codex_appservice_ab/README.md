@@ -363,4 +363,8 @@ Codex end-to-end run.
   retrieval behavior; non-adoption is not a validity failure and its cost
   numbers must not be presented as deterministic compression results.
 
+Its helper never reruns a prior command: `tail <capture-id>` returns a suffix,
+while `search <capture-id> <literal-term>` returns at most three
+160-byte-context windows and imposes a second 2 KiB model-facing cap.
+
 Both modes keep the same read-only/secret-denial guard and private spool.

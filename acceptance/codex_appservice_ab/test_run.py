@@ -8,6 +8,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import outctl_kubectl_router
 import run
 from jsonschema import Draft202012Validator
 from kubectl_guard import classify_kubectl
@@ -63,6 +64,19 @@ class GuardTests(unittest.TestCase):
     def test_baseline_guard_contains_no_treatment_guidance(self) -> None:
         guard = Path(run.__file__).with_name("kubectl_readonly_guard.py")
         self.assertNotIn("outctl", guard.read_text(encoding="utf-8").casefold())
+
+    def test_router_search_uses_only_bounded_projected_windows(self) -> None:
+        payload = {
+            "capture_id": "capture-1",
+            "matches": [
+                {"projection": {"text": "first bounded window\n"}},
+                {"projection": {"text": "second bounded window\n"}},
+            ],
+        }
+        capture_id, text = outctl_kubectl_router._safe_search(json.dumps(payload).encode())
+        self.assertEqual(capture_id, "capture-1")
+        self.assertIn("first bounded window", text)
+        self.assertIn("second bounded window", text)
 
 
 class UsageTests(unittest.TestCase):

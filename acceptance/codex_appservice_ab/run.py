@@ -558,8 +558,9 @@ description: Use bounded, recoverable output for potentially large read-only com
 
 - Use `outctl-health kubectl <read-only kubectl arguments>` for logs, large
   listings, test output, or expensive commands.
-- When omitted evidence matters, retrieve from the capture ID with a bounded
-  `outctl-health tail <capture-id>`; do not rerun only to recover output.
+- When omitted evidence matters, retrieve from the capture ID with bounded
+  `outctl-health search <capture-id> <literal-term>` or `tail`; do not rerun
+  only to recover output.
 - Direct read-only `kubectl` is fine for predictably small output.
 - `outctl-health --help` describes the available safe surface.
 
@@ -595,18 +596,24 @@ case "${{1:-}}" in
     shift
     exec {router_exec} tail {router_common} "$@"
     ;;
+  search)
+    shift
+    exec {router_exec} search {router_common} "$@"
+    ;;
   -h|--help|help|'')
     cat <<'EOF'
 Usage:
   outctl-health kubectl <read-only kubectl arguments>
   outctl-health tail <capture-id> [--lines N]
+  outctl-health search <capture-id> <literal-term> [--max-matches N]
 
 Runs preserve full output privately and show a bounded projection. Tail reads
-an existing capture; neither operation reruns a previous command.
+an existing capture; search returns up to three bounded matching windows.
+Neither operation reruns a previous command.
 EOF
     ;;
   *)
-    echo "outctl-health: expected kubectl, tail, or --help" >&2
+    echo "outctl-health: expected kubectl, tail, search, or --help" >&2
     exit 2
     ;;
 esac
