@@ -997,18 +997,20 @@ def _build_codex_command(
     final_path: Path,
     prompt: str,
     additional_write_dirs: Sequence[Path] = (),
+    ephemeral: bool = True,
 ) -> list[str]:
     command = [
         codex_bin,
         "exec",
         "--dangerously-bypass-hook-trust",
-        "--ephemeral",
         "--json",
         "--model",
         model,
         "--cd",
         str(worktree),
     ]
+    if ephemeral:
+        command.insert(3, "--ephemeral")
     for directory in dict.fromkeys(additional_write_dirs):
         command.extend(("--add-dir", str(directory)))
     return [
@@ -1030,6 +1032,88 @@ def _commissioning_failed(arm: Mapping[str, Any]) -> bool:
         int(commands.get("kubectl_via_outctl_attempts", 0)) > 0
         and int(commands.get("kubectl_via_outctl_completed", 0)) == 0
         and int(spool.get("capture_directory_count", 0)) == 0
+    )
+
+
+def _controlled_completion_needed(events_path: Path, *, arm: str) -> bool:
+    events, _warnings = _read_jsonl(events_path, artifact=f"arm {arm} events")
+    commands = _command_metrics(events)
+    if int(commands["kubectl_completed"]) != 6:
+        return True
+    return arm == "A" and int(commands["retrieval_tool_turns"]) != 1
+
+
+def _thread_id(events_path: Path) -> str:
+    events, _warnings = _read_jsonl(events_path, artifact="Codex events")
+    identifiers = [
+        event.get("thread_id")
+        for event in events
+        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str)
+    ]
+    if len(identifiers) != 1:
+        raise ExperimentError("controlled completion requires exactly one Codex thread ID")
+    return identifiers[0]
+
+
+def _resume_controlled_completion(
+    result: ProcessResult,
+    *,
+    codex_bin: str,
+    model: str,
+    schema: Path,
+    env: Mapping[str, str],
+    timeout_seconds: int,
+) -> ProcessResult:
+    prompt = (
+        "The frozen corpus postcondition is not satisfied. Review your tool history, execute "
+        "only the omitted command(s) from the six-command checklist, and then replace the final "
+        "structured result using all evidence. Do not rerun a completed command. Arm A must also "
+        "have exactly one bounded tail retrieval from the all-namespaces Pod capture."
+    )
+    command = [
+        codex_bin,
+        "exec",
+        "resume",
+        "--dangerously-bypass-hook-trust",
+        "--json",
+        "--model",
+        model,
+        "--output-schema",
+        str(schema),
+        "--output-last-message",
+        str(result.final_path),
+        _thread_id(result.events_path),
+        prompt,
+    ]
+    started = time.monotonic()
+    with (
+        result.events_path.open("ab") as stdout_handle,
+        result.stderr_path.open("ab") as stderr_handle,
+    ):
+        process = subprocess.Popen(
+            command,
+            env=dict(env),
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            start_new_session=True,
+        )
+        timed_out = False
+        try:
+            return_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _terminate_process_group(process)
+            return_code = process.returncode if process.returncode is not None else -signal.SIGKILL
+    return ProcessResult(
+        arm=result.arm,
+        return_code=return_code,
+        timed_out=result.timed_out or timed_out,
+        duration_ms=result.duration_ms + round((time.monotonic() - started) * 1000),
+        launched_monotonic_ns=result.launched_monotonic_ns,
+        events_path=result.events_path,
+        stderr_path=result.stderr_path,
+        final_path=result.final_path,
+        hook_log_path=result.hook_log_path,
     )
 
 
@@ -2787,6 +2871,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 final_path=arm_dir_a / "final.json",
                 prompt=prompt,
                 additional_write_dirs=(spool_a,),
+                ephemeral=controlled_study is None,
             )
             command_b = _build_codex_command(
                 codex_bin=args.codex_bin,
@@ -2795,6 +2880,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 schema=output_schema_path,
                 final_path=arm_dir_b / "final.json",
                 prompt=prompt,
+                ephemeral=controlled_study is None,
             )
             planned_commands.append(
                 {
@@ -2974,16 +3060,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ) from exc
             for thread in threads.values():
                 thread.join()
-            _remove_codex_home(home_a)
-            _remove_codex_home(home_b)
 
             if thread_errors:
+                _remove_codex_home(home_a)
+                _remove_codex_home(home_b)
                 raise ExperimentError(
                     "arm execution failed: "
                     + "; ".join(f"{arm}: {exc}" for arm, exc in thread_errors.items())
                 )
             if set(process_results) != {"A", "B"}:
+                _remove_codex_home(home_a)
+                _remove_codex_home(home_b)
                 raise ExperimentError("did not receive process results for both arms")
+
+            try:
+                if controlled_study is not None:
+                    for arm, env in (("A", env_a), ("B", env_b)):
+                        result = process_results[arm]
+                        if _controlled_completion_needed(result.events_path, arm=arm):
+                            process_results[arm] = _resume_controlled_completion(
+                                result,
+                                codex_bin=args.codex_bin,
+                                model=args.model,
+                                schema=output_schema_path,
+                                env=env,
+                                timeout_seconds=args.timeout_seconds,
+                            )
+            finally:
+                _remove_codex_home(home_a)
+                _remove_codex_home(home_b)
 
             result_a = process_results["A"]
             result_b = process_results["B"]

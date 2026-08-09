@@ -187,6 +187,36 @@ class UsageTests(unittest.TestCase):
 
 
 class HarnessValidationTests(unittest.TestCase):
+    def test_controlled_completion_detects_missing_corpus_command(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events = Path(raw) / "events.jsonl"
+            rows = [{"type": "thread.started", "thread_id": "thread-1"}]
+            for index in range(5):
+                rows.append({
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "status": "completed",
+                        "command": f"kubectl get pods -A -o wide # {index}",
+                        "aggregated_output": "ok",
+                    },
+                })
+            events.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            self.assertTrue(run._controlled_completion_needed(events, arm="B"))
+            self.assertEqual(run._thread_id(events), "thread-1")
+
+    def test_controlled_codex_command_is_resumable(self) -> None:
+        command = run._build_codex_command(
+            codex_bin="codex",
+            model="model",
+            worktree=Path("/tmp/worktree"),
+            schema=Path("/tmp/schema.json"),
+            final_path=Path("/tmp/final.json"),
+            prompt="prompt",
+            ephemeral=False,
+        )
+        self.assertNotIn("--ephemeral", command)
+
     def test_analyst_bundle_is_deterministic_and_excludes_bytecode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
