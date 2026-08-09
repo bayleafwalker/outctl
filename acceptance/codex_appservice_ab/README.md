@@ -178,6 +178,14 @@ vocabulary. Existing B guidance is scanned before launch; the harness fails
 closed if it already mentions the treatment unless you explicitly accept a
 contaminated baseline.
 
+Both arms use an isolated shell home and the same immutable `kubectl` shim.
+The shim pins the explicit kubeconfig and context, rejects identity override
+flags, and is fingerprinted along with the observed context and API server. A
+mismatch stops execution before model work and suppresses comparison metrics.
+For exploratory operational checks, use `freeform-prompt.md`; its one extra
+identity sentence is a treatment-neutral experiment invariant, not
+outctl-specific command coaching.
+
 ## Run the authorized wiring pair
 
 Use a new output directory:

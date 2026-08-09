@@ -330,11 +330,102 @@ def _preflight_readonly_kubeconfig(
         )
     return {
         "context_sha256": _sha256_text(context),
+        "api_server_sha256": _sha256_text(parsed_server.geturl()),
         "api_host_sha256": _sha256_text(parsed_server.hostname),
         "required_permissions_verified": len(allowed),
         "prohibited_permissions_denied": len(denied),
         # Kept private to the launch config; the public report only has its digest.
         "_api_host": parsed_server.hostname,
+        "_identity": {"context": context, "server": parsed_server.geturl()},
+    }
+
+
+_KUBECTL_IDENTITY_FLAGS = (
+    "--kubeconfig",
+    "--context",
+    "--cluster",
+    "--user",
+    "--server",
+    "--token",
+    "--certificate-authority",
+    "--client-certificate",
+    "--client-key",
+    "--tls-server-name",
+)
+
+
+def _install_pinned_kubectl(
+    target: Path, *, kubectl_bin: Path, kubeconfig: Path, context: str
+) -> Path:
+    """Install one immutable identity-pinning kubectl shim shared by both arms."""
+
+    target.mkdir(parents=True, exist_ok=True)
+    helper = target / "kubectl"
+    helper.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, sys\n"
+        f"blocked = {repr(_KUBECTL_IDENTITY_FLAGS)}\n"
+        "for index, value in enumerate(sys.argv[1:]):\n"
+        "    if value in blocked or any(value.startswith(flag + '=') for flag in blocked):\n"
+        "        print('pinned kubectl: identity override flags are not permitted', "
+        "file=sys.stderr)\n"
+        "        raise SystemExit(64)\n"
+        f"binary = {str(kubectl_bin)!r}\n"
+        f"argv = [binary, '--kubeconfig', {str(kubeconfig)!r}, "
+        f"'--context', {context!r}, *sys.argv[1:]]\n"
+        "os.execv(binary, argv)\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o555)
+    target.chmod(0o555)
+    return helper
+
+
+def _install_isolated_shell_home(target: Path, *, kubeconfig: Path, pinned_path: str) -> Path:
+    """Create login/non-login startup files that reassert the scoped identity."""
+
+    target.mkdir(parents=True, exist_ok=True)
+    body = (
+        f"export KUBECONFIG={shlex.quote(str(kubeconfig))}\n"
+        f"export PATH={shlex.quote(pinned_path)}\n"
+    )
+    profile = target / ".bash_profile"
+    shell_env = target / "shell-env.sh"
+    profile.write_text(body, encoding="utf-8")
+    shell_env.write_text(body, encoding="utf-8")
+    profile.chmod(0o444)
+    shell_env.chmod(0o444)
+    target.chmod(0o555)
+    return shell_env
+
+
+def _probe_arm_cluster_identity(
+    *, env: Mapping[str, str], expected_context: str, expected_server: str
+) -> dict[str, Any]:
+    """Fingerprint the actual login-shell kubectl identity without retaining values."""
+
+    def probe(command: str) -> str:
+        result = subprocess.run(
+            ["bash", "-lc", command],
+            env=dict(env),
+            capture_output=True,
+            check=False,
+        )
+        value = result.stdout.decode("utf-8", errors="replace").strip()
+        if result.returncode != 0 or not value:
+            raise ExperimentError("arm cluster identity probe failed")
+        return value
+
+    context = probe("kubectl config current-context")
+    server = probe("kubectl config view --minify -o jsonpath={.clusters[0].cluster.server}")
+    resolved = Path(probe("command -v kubectl")).resolve()
+    fingerprint = _sha256_text(context + "\0" + server)
+    return {
+        "context_sha256": _sha256_text(context),
+        "api_server_sha256": _sha256_text(server),
+        "identity_sha256": fingerprint,
+        "kubectl_executable_sha256": _sha256_file(resolved),
+        "matches_launcher_preflight": context == expected_context and server == expected_server,
     }
 
 
@@ -685,9 +776,7 @@ def _write_hook_config(hooks_path: Path, command: str) -> None:
     hooks_path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-def _install_guard(
-    worktree: Path, *, arm: str, wrapper: str, require_outctl: bool = True
-) -> None:
+def _install_guard(worktree: Path, *, arm: str, wrapper: str, require_outctl: bool = True) -> None:
     codex_dir = worktree / ".codex"
     hooks_dir = codex_dir / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -761,9 +850,7 @@ def _write_codex_home(
         shutil.copy2(auth_source, destination)
         destination.chmod(0o600)
 
-    workspace_roots = tuple(
-        dict.fromkeys((worktree, canonical, outctl_project, *read_roots))
-    )
+    workspace_roots = tuple(dict.fromkeys((worktree, canonical, outctl_project, *read_roots)))
     lines = [
         'web_search = "disabled"',
         'approval_policy = "never"',
@@ -796,7 +883,7 @@ def _write_codex_home(
         f"[permissions.{PERMISSION_PROFILE_NAME}.filesystem]",
         '":minimal" = "read"',
         "",
-        f"[permissions.{PERMISSION_PROFILE_NAME}.filesystem.\":workspace_roots\"]",
+        f'[permissions.{PERMISSION_PROFILE_NAME}.filesystem.":workspace_roots"]',
         '"." = "read"',
     ]
     for write_root in dict.fromkeys(write_roots):
@@ -818,7 +905,7 @@ def _write_codex_home(
                 "allow_local_binding = true",
                 "",
                 f"[permissions.{PERMISSION_PROFILE_NAME}.network.domains]",
-                f"{_toml_string(kubernetes_api_host)} = \"allow\"",
+                f'{_toml_string(kubernetes_api_host)} = "allow"',
             )
         )
     if reasoning_effort:
@@ -1125,6 +1212,9 @@ def _command_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     wrapped_attempts = 0
     wrapped_completed = 0
     non_read_only_attempts = 0
+    retrieval_tool_turns = 0
+    search_tool_turns = 0
+    search_hits = 0
 
     for event in events:
         if event.get("type") != "item.completed":
@@ -1134,6 +1224,7 @@ def _command_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             continue
         total += 1
         command = item.get("command") if isinstance(item.get("command"), str) else ""
+        folded_command = command.casefold()
         command_hashes.append(_sha256_text(command))
         output = item.get("aggregated_output")
         if isinstance(output, str):
@@ -1146,6 +1237,22 @@ def _command_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         elif status == "failed":
             failed += 1
         invocations = classify_kubectl(command)
+        is_search = "outctl-health search " in folded_command or (
+            "outctl_kubectl_router.py search " in folded_command
+        )
+        is_tail = "outctl-health tail " in folded_command or (
+            "outctl_kubectl_router.py tail " in folded_command
+        )
+        if is_search or is_tail:
+            retrieval_tool_turns += 1
+        if is_search:
+            search_tool_turns += 1
+            if (
+                status == "completed"
+                and isinstance(output, str)
+                and "no bounded matches" not in output
+            ):
+                search_hits += 1
         kubectl_attempts += len(invocations)
         if invocations and isinstance(output, str):
             kubectl_output_bytes += len(output.encode("utf-8"))
@@ -1178,6 +1285,10 @@ def _command_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "kubectl_via_outctl_attempts": wrapped_attempts,
         "kubectl_via_outctl_completed": wrapped_completed,
         "kubectl_non_read_only_attempts": non_read_only_attempts,
+        "retrieval_tool_turns": retrieval_tool_turns,
+        "search_tool_turns": search_tool_turns,
+        "search_hit_count": search_hits,
+        "search_hit_rate": search_hits / search_tool_turns if search_tool_turns else None,
     }
 
 
@@ -1194,6 +1305,7 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
         "retained_total_bytes": 0,
         "manifest_errors": 0,
         "retrieval_count": 0,
+        "retrieval_operation_counts": {},
     }
     warnings: list[str] = []
     if root is None:
@@ -1206,6 +1318,12 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
     if retrieval_events.is_file():
         retrievals, retrieval_warnings = _read_jsonl(retrieval_events, artifact="retrieval log")
         metrics["retrieval_count"] = len(retrievals)
+        operations: dict[str, int] = {}
+        for event in retrievals:
+            operation = event.get("operation")
+            if isinstance(operation, str):
+                operations[operation] = operations.get(operation, 0) + 1
+        metrics["retrieval_operation_counts"] = operations
         warnings.extend(retrieval_warnings)
     if partial_root.is_dir():
         try:
@@ -1274,12 +1392,14 @@ def _hook_metrics(path: Path) -> tuple[dict[str, Any], list[str]]:
     )
     require_denials = sum(event.get("denial_class") == "require_outctl" for event in events)
     safety_denials = sum(event.get("denial_class") == "read_only_policy" for event in events)
+    identity_denials = sum(event.get("denial_class") == "cluster_identity" for event in events)
     return (
         {
             "events": len(events),
             "denials": sum(bool(event.get("denied")) for event in events),
             "require_outctl_denials": require_denials,
             "read_only_policy_denials": safety_denials,
+            "cluster_identity_denials": identity_denials,
             "observed_models": models,
         },
         warnings,
@@ -1489,9 +1609,11 @@ def _parse_arm(
         stderr_text = result.stderr_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         stderr_text = ""
-    diagnostic_source = "\n".join(
-        str(event.get("message", "")) for event in events if event.get("type") == "error"
-    ) + "\n" + stderr_text
+    diagnostic_source = (
+        "\n".join(str(event.get("message", "")) for event in events if event.get("type") == "error")
+        + "\n"
+        + stderr_text
+    )
     folded_diagnostic = diagnostic_source.casefold()
     diagnostic_code = next(
         (
@@ -1650,7 +1772,16 @@ def _compare_pair(
     *,
     treatment_mode: str,
 ) -> dict[str, Any]:
-    metrics = {
+    a_identity = arm_a.get("cluster_identity")
+    b_identity = arm_b.get("cluster_identity")
+    identity_comparable = isinstance(a_identity, Mapping) and isinstance(b_identity, Mapping)
+    cluster_identity_match = bool(
+        identity_comparable
+        and a_identity.get("identity_sha256") == b_identity.get("identity_sha256")
+        and a_identity.get("matches_launcher_preflight") is True
+        and b_identity.get("matches_launcher_preflight") is True
+    )
+    computed_metrics = {
         "input_tokens": _comparison_metric(arm_a, arm_b, ("usage", "input_tokens")),
         "cached_input_tokens": _comparison_metric(arm_a, arm_b, ("usage", "cached_input_tokens")),
         "noncached_input_tokens": _comparison_metric(
@@ -1681,6 +1812,7 @@ def _compare_pair(
             arm_a, arm_b, ("pricing", "api_equivalent_usd", "value")
         ),
     }
+    metrics = computed_metrics if cluster_identity_match else {}
 
     a_commands = arm_a.get("commands") if isinstance(arm_a.get("commands"), Mapping) else {}
     b_commands = arm_b.get("commands") if isinstance(arm_b.get("commands"), Mapping) else {}
@@ -1693,8 +1825,7 @@ def _compare_pair(
     strict_treatment_compliant = (
         int(a_commands.get("kubectl_via_outctl_attempts", 0))
         == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
-        and int(a_commands.get("kubectl_completed", 0))
-        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
+        and int(a_commands.get("kubectl_completed", 0)) == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
         and int(a_commands.get("kubectl_direct_completed", 0)) == 0
         and int(a_commands.get("kubectl_via_outctl_completed", 0))
         == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
@@ -1705,8 +1836,7 @@ def _compare_pair(
         and int(a_hooks.get("require_outctl_denials", 0)) == 0
     )
     strict_treatment_capture_accounted = (
-        int(a_spool.get("capture_directory_count", 0))
-        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
+        int(a_spool.get("capture_directory_count", 0)) == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
         and int(a_commands.get("kubectl_via_outctl_attempts", 0))
         == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
         and int(a_spool.get("capture_count", 0)) == int(a_spool.get("capture_directory_count", 0))
@@ -1737,6 +1867,10 @@ def _compare_pair(
         and int(a_hooks.get("read_only_policy_denials", 0)) == 0
         and int(b_hooks.get("read_only_policy_denials", 0)) == 0
     )
+    no_identity_escape = (
+        int(a_hooks.get("cluster_identity_denials", 0)) == 0
+        and int(b_hooks.get("cluster_identity_denials", 0)) == 0
+    )
     same_overall_status = a_final.get("overall_status") == b_final.get("overall_status")
     critical_high_a = {
         item
@@ -1758,14 +1892,11 @@ def _compare_pair(
         and not bool(arm_b.get("model_reroute_signal"))
     )
     quality_similarity = _jaccard(signature_a, signature_b)
-    quality_oracle_passed = (
-        same_overall_status
-        and (
-            treatment_mode == "opt-in"
-            or (
-                critical_high_findings_agree
-                and (quality_similarity is None or quality_similarity >= 0.6)
-            )
+    quality_oracle_passed = same_overall_status and (
+        treatment_mode == "opt-in"
+        or (
+            critical_high_findings_agree
+            and (quality_similarity is None or quality_similarity >= 0.6)
         )
     )
     raw_retained = _nested_number(arm_a, ("outctl_spool", "retained_total_bytes"))
@@ -1792,6 +1923,8 @@ def _compare_pair(
         flags.append("arm B discovered/used outctl, contaminating the unguided baseline")
     if not no_mutation_attempts:
         flags.append("at least one non-read-only kubectl attempt was observed and guarded")
+    if not no_identity_escape:
+        flags.append("at least one kubectl identity-pin bypass was attempted and guarded")
     if not same_overall_status:
         flags.append("arms reached different overall health statuses")
     if treatment_mode == "deterministic" and not critical_high_findings_agree:
@@ -1806,6 +1939,8 @@ def _compare_pair(
         flags.append("structured health evidence overlap was below 0.60")
     if launch_skew_ms > 250:
         flags.append("process launch skew exceeded 250 ms")
+    if not cluster_identity_match:
+        flags.append("arm cluster context/server fingerprint mismatch; metrics suppressed")
 
     pair_valid = (
         int(arm_a.get("exit_code", -1)) == 0
@@ -1819,14 +1954,17 @@ def _compare_pair(
         and hooks_observed_both_arms
         and not baseline_spontaneously_used_outctl
         and no_mutation_attempts
+        and no_identity_escape
         and quality_oracle_passed
         and requested_model_integrity
         and launch_skew_ms <= 250
+        and cluster_identity_match
     )
 
     return {
         "launch_skew_ms": launch_skew_ms,
         "metrics": metrics,
+        "cluster_identity_match": cluster_identity_match,
         "treatment_compliant": treatment_compliant,
         "treatment_adopted": treatment_adopted,
         "treatment_mode": treatment_mode,
@@ -1841,6 +1979,7 @@ def _compare_pair(
         "quality_signature_jaccard": quality_similarity,
         "arm_a_outctl_exposure_ratio": outctl_exposure_ratio,
         "no_non_read_only_kubectl_attempts": no_mutation_attempts,
+        "no_cluster_identity_escape": no_identity_escape,
         "pair_valid": pair_valid,
         "flags": flags,
     }
@@ -1888,6 +2027,61 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             value = metric.get("reduction_pct") if isinstance(metric, Mapping) else None
             values.append(float(value) if isinstance(value, (int, float)) else None)
         medians[name] = {"median_reduction_pct": _median(values)}
+    pooled: dict[str, Any] = {}
+    for name in metric_names:
+        a_total = 0.0
+        b_total = 0.0
+        complete = bool(valid_pairs)
+        for pair in valid_pairs:
+            metric = pair.get("comparison", {}).get("metrics", {}).get(name)
+            if (
+                not isinstance(metric, Mapping)
+                or not isinstance(metric.get("a"), (int, float))
+                or not isinstance(metric.get("b"), (int, float))
+            ):
+                complete = False
+                break
+            a_total += float(metric["a"])
+            b_total += float(metric["b"])
+        pooled[name] = {
+            "a": a_total if complete else None,
+            "b": b_total if complete else None,
+            "reduction_pct": ((b_total - a_total) / b_total * 100)
+            if complete and b_total
+            else None,
+        }
+    retrievals = {
+        arm: {
+            "tool_turns": sum(
+                int(
+                    pair.get("arms", {})
+                    .get(arm, {})
+                    .get("commands", {})
+                    .get("retrieval_tool_turns", 0)
+                )
+                for pair in valid_pairs
+            ),
+            "search_turns": sum(
+                int(
+                    pair.get("arms", {})
+                    .get(arm, {})
+                    .get("commands", {})
+                    .get("search_tool_turns", 0)
+                )
+                for pair in valid_pairs
+            ),
+            "search_hits": sum(
+                int(
+                    pair.get("arms", {}).get(arm, {}).get("commands", {}).get("search_hit_count", 0)
+                )
+                for pair in valid_pairs
+            ),
+        }
+        for arm in ("A", "B")
+    }
+    for value in retrievals.values():
+        searches = int(value["search_turns"])
+        value["search_hit_rate"] = int(value["search_hits"]) / searches if searches else None
     return {
         "pairs": len(pairs),
         "valid_pairs": len(valid_pairs),
@@ -1924,6 +2118,8 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             if isinstance(pair.get("comparison"), Mapping)
         ),
         "median_reductions": medians,
+        "pooled_metrics": pooled,
+        "retrievals": retrievals,
     }
 
 
@@ -2069,6 +2265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             kubectl_bin=str(kubectl_bin), kubeconfig=kubeconfig, context=args.context
         )
     kubernetes_api_host = preflight.pop("_api_host") if preflight is not None else None
+    expected_identity = preflight.pop("_identity") if preflight is not None else None
 
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output = (
@@ -2210,10 +2407,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             arm_dir_a = pair_dir / "A"
             arm_dir_b = pair_dir / "B"
             spool_a = pair_dir / "outctl-spool-A"
+            common_tooling = pair_dir / "tooling-common"
+            shell_home_a = pair_dir / "shell-home-A"
+            shell_home_b = pair_dir / "shell-home-B"
             for path in (arm_dir_a, arm_dir_b, spool_a, spool_a / "uv-cache", spool_a / "tmp"):
                 path.mkdir(parents=True, exist_ok=True)
                 path.chmod(0o700)
             helper_dir_a = pair_dir / "tooling-A"
+            pinned_kubectl: Path | None = None
+            shell_env_a: Path | None = None
+            shell_env_b: Path | None = None
+            if kubeconfig is not None and args.context is not None:
+                pinned_kubectl = _install_pinned_kubectl(
+                    common_tooling,
+                    kubectl_bin=kubectl_bin,
+                    kubeconfig=kubeconfig,
+                    context=args.context,
+                )
             if args.treatment_mode == "opt-in":
                 _install_ux_helper(
                     helper_dir_a,
@@ -2222,13 +2432,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                     policy_ref=args.policy_ref,
                     policy_digest=args.policy_digest,
                 )
+            if kubeconfig is not None:
+                base_path = str(common_tooling) + os.pathsep + os.environ.get("PATH", "")
+                path_a = (
+                    str(helper_dir_a) + os.pathsep + base_path
+                    if args.treatment_mode == "opt-in"
+                    else base_path
+                )
+                shell_env_a = _install_isolated_shell_home(
+                    shell_home_a, kubeconfig=kubeconfig, pinned_path=path_a
+                )
+                shell_env_b = _install_isolated_shell_home(
+                    shell_home_b, kubeconfig=kubeconfig, pinned_path=base_path
+                )
             _write_codex_home(
                 home_a,
                 worktree=worktree_a,
                 canonical=canonical,
                 outctl_project=Path(__file__).resolve().parents[2],
                 write_roots=(spool_a, arm_dir_a),
-                read_roots=(helper_dir_a,) if args.treatment_mode == "opt-in" else (),
+                read_roots=tuple(
+                    path
+                    for path in (
+                        common_tooling,
+                        shell_home_a,
+                        helper_dir_a if args.treatment_mode == "opt-in" else None,
+                    )
+                    if path is not None
+                ),
                 kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
@@ -2239,6 +2470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 canonical=canonical,
                 outctl_project=Path(__file__).resolve().parents[2],
                 write_roots=(arm_dir_b,),
+                read_roots=(common_tooling, shell_home_b),
                 kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
@@ -2284,6 +2516,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_a / "hook-events.jsonl"),
                 "KUBECONFIG": str(kubeconfig),
+                "HOME": str(shell_home_a),
+                "BASH_ENV": str(shell_env_a),
+                "ENV": str(shell_env_a),
+                "CODEX_AB_KUBECTL_PIN": str(pinned_kubectl),
                 "OUTCTL_AB_SPOOL_ROOT": str(spool_a),
                 "OUTCTL_ENABLED": "1",
                 "OUTCTL_MODE": "enforce",
@@ -2292,13 +2528,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if args.search_redaction_exact_json is not None
                     else {}
                 ),
-                "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
+                "PATH": str(common_tooling) + os.pathsep + base_env.get("PATH", ""),
                 **(
                     {
                         "PATH": (
                             str(helper_dir_a)
                             + os.pathsep
-                            + str(kubectl_bin.parent)
+                            + str(common_tooling)
                             + os.pathsep
                             + base_env.get("PATH", "")
                         )
@@ -2314,7 +2550,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_b / "hook-events.jsonl"),
                 "KUBECONFIG": str(kubeconfig),
-                "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
+                "HOME": str(shell_home_b),
+                "BASH_ENV": str(shell_env_b),
+                "ENV": str(shell_env_b),
+                "CODEX_AB_KUBECTL_PIN": str(pinned_kubectl),
+                "PATH": str(common_tooling) + os.pathsep + base_env.get("PATH", ""),
+            }
+            assert expected_identity is not None and pinned_kubectl is not None
+            identity_a = _probe_arm_cluster_identity(
+                env=env_a,
+                expected_context=str(expected_identity["context"]),
+                expected_server=str(expected_identity["server"]),
+            )
+            identity_b = _probe_arm_cluster_identity(
+                env=env_b,
+                expected_context=str(expected_identity["context"]),
+                expected_server=str(expected_identity["server"]),
+            )
+            if (
+                identity_a["identity_sha256"] != identity_b["identity_sha256"]
+                or not identity_a["matches_launcher_preflight"]
+                or not identity_b["matches_launcher_preflight"]
+            ):
+                raise ExperimentError(
+                    "arm cluster identity mismatch detected before model execution"
+                )
+            helper_provenance = {
+                "pinned_kubectl_sha256": _sha256_file(pinned_kubectl),
+                "arm_a_outctl_helper_sha256": (
+                    _sha256_file(helper_dir_a / "outctl-health")
+                    if args.treatment_mode == "opt-in"
+                    else None
+                ),
             }
 
             barrier = threading.Barrier(3)
@@ -2395,6 +2662,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 requested_model=args.model,
                 validator=validator,
             )
+            arm_a["cluster_identity"] = identity_a
+            arm_b["cluster_identity"] = identity_b
             comparison = _compare_pair(
                 arm_a,
                 arm_b,
@@ -2474,6 +2743,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "network": "one verified Kubernetes API host per run",
                     },
                     "preflight": preflight,
+                    "pinned_tooling": helper_provenance,
                     "reasoning_effort": args.reasoning_effort,
                     "pairs_requested": args.pairs,
                     "pairs_executed": len(pairs),

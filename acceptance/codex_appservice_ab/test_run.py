@@ -8,6 +8,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import kubectl_guard as treatment_guard
+import kubectl_readonly_guard as baseline_guard
 import outctl_kubectl_router
 import run
 from jsonschema import Draft202012Validator
@@ -53,6 +55,21 @@ class GuardTests(unittest.TestCase):
         self.assertFalse(delete[0].read_only)
         secret = classify_kubectl('bash -lc "kubectl get secrets -A"')
         self.assertFalse(secret[0].read_only)
+
+    def test_discovery_reference_is_not_misclassified_as_execution(self) -> None:
+        for classifier in (classify_kubectl, classify_readonly_kubectl):
+            self.assertEqual(classifier("command -v kubectl"), [])
+            self.assertEqual(classifier("which kubectl"), [])
+
+    def test_identity_override_and_absolute_escape_are_detected(self) -> None:
+        for guard in (treatment_guard, baseline_guard):
+            self.assertIsNotNone(
+                guard._identity_denial("kubectl --context other get pods", "/pin/kubectl")
+            )
+            self.assertIsNotNone(
+                guard._identity_denial("/usr/bin/kubectl get pods", "/pin/kubectl")
+            )
+            self.assertIsNone(guard._identity_denial("kubectl get pods", "/pin/kubectl"))
 
     def test_global_flags_before_verb(self) -> None:
         for classifier in (classify_kubectl, classify_readonly_kubectl):
@@ -124,6 +141,10 @@ class UsageTests(unittest.TestCase):
 
 
 class HarnessValidationTests(unittest.TestCase):
+    @staticmethod
+    def _identity(value: str = "same") -> dict[str, object]:
+        return {"identity_sha256": value, "matches_launcher_preflight": True}
+
     def test_opt_in_guidance_is_brief_and_direct_reads_remain_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             worktree = Path(temporary)
@@ -153,10 +174,9 @@ class HarnessValidationTests(unittest.TestCase):
             "commands": {"kubectl_completed": 1, "kubectl_direct_completed": 1},
             "hooks": {"events": 1, "read_only_policy_denials": 0},
             "outctl_spool": {},
+            "cluster_identity": self._identity(),
         }
-        comparison = run._compare_pair(
-            arm, arm, set(), set(), 0, treatment_mode="opt-in"
-        )
+        comparison = run._compare_pair(arm, arm, set(), set(), 0, treatment_mode="opt-in")
         self.assertFalse(comparison["treatment_adopted"])
         self.assertFalse(comparison["treatment_compliant"])
         self.assertTrue(comparison["pair_valid"])
@@ -172,6 +192,7 @@ class HarnessValidationTests(unittest.TestCase):
             "commands": {"kubectl_completed": 1, "kubectl_direct_completed": 1},
             "hooks": {"events": 1, "read_only_policy_denials": 0},
             "outctl_spool": {},
+            "cluster_identity": self._identity(),
         }
         comparison = run._compare_pair(
             arm,
@@ -183,6 +204,44 @@ class HarnessValidationTests(unittest.TestCase):
         )
         self.assertTrue(comparison["quality_oracle_passed"])
         self.assertTrue(comparison["pair_valid"])
+
+    def test_identity_mismatch_invalidates_pair_before_metrics(self) -> None:
+        arm = {
+            "exit_code": 0,
+            "timed_out": False,
+            "final": {"schema_valid": True, "overall_status": "healthy"},
+            "model_observed": True,
+            "model_mismatch": False,
+            "model_reroute_signal": False,
+            "commands": {"kubectl_completed": 1, "kubectl_direct_completed": 1},
+            "hooks": {"events": 1, "read_only_policy_denials": 0},
+            "outctl_spool": {},
+            "cluster_identity": self._identity("A"),
+        }
+        other = {**arm, "cluster_identity": self._identity("B")}
+        comparison = run._compare_pair(arm, other, set(), set(), 0, treatment_mode="opt-in")
+        self.assertFalse(comparison["cluster_identity_match"])
+        self.assertFalse(comparison["pair_valid"])
+        self.assertEqual(comparison["metrics"], {})
+
+    def test_pinned_kubectl_rejects_identity_overrides(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real = root / "real-kubectl"
+            real.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            real.chmod(0o755)
+            pin = run._install_pinned_kubectl(
+                root / "tooling",
+                kubectl_bin=real,
+                kubeconfig=root / "scoped.kubeconfig",
+                context="scoped",
+            )
+            completed = subprocess.run(
+                [str(pin), "--context", "other", "get", "pods"],
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 64)
 
     def test_quality_signature_canonicalizes_model_ids_and_pod_suffixes(self) -> None:
         schema = json.loads(
@@ -293,11 +352,11 @@ class HarnessValidationTests(unittest.TestCase):
             router=Path("/opt/outctl-router.py"),
             launcher=("uv", "run", "--project", "/opt/outctl", "outctl"),
         )
-        self.assertIn('UV_OFFLINE=1', executable)
+        self.assertIn("UV_OFFLINE=1", executable)
         self.assertIn('UV_CACHE_DIR="$OUTCTL_AB_SPOOL_ROOT/uv-cache"', executable)
         self.assertIn('TMPDIR="$OUTCTL_AB_SPOOL_ROOT/tmp"', executable)
-        self.assertIn('KUBECONFIG=/tmp/readonly.kubeconfig', executable)
-        self.assertIn('--outctl-command-json', common)
+        self.assertIn("KUBECONFIG=/tmp/readonly.kubeconfig", executable)
+        self.assertIn("--outctl-command-json", common)
         self.assertIn('"uv","run","--project","/opt/outctl","outctl"', common)
         self.assertFalse(
             run._commissioning_failed(

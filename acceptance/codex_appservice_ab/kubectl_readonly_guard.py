@@ -137,6 +137,45 @@ def _shell_segments(command: str, *, depth: int = 0) -> Iterable[list[str]]:
             segment.append(token)
 
 
+def _is_discovery_reference(segment: list[str], index: int) -> bool:
+    """Ignore executable discovery text that does not execute kubectl."""
+
+    prefix = segment[:index]
+    for probe_index, value in enumerate(prefix):
+        probe = _basename(value).casefold()
+        suffix = prefix[probe_index + 1 :]
+        if probe == "command" and any(flag in suffix for flag in ("-v", "-V")):
+            return True
+        if probe in {"type", "which", "whereis"}:
+            return True
+    return False
+
+
+def _identity_denial(command: str, pinned: str | None) -> str | None:
+    for segment in _shell_segments(command):
+        for index, token in enumerate(segment):
+            if _basename(token) != "kubectl" or _is_discovery_reference(segment, index):
+                continue
+            if "/" in token and (pinned is None or Path(token).resolve() != Path(pinned).resolve()):
+                return "absolute kubectl paths cannot bypass the experiment identity pin"
+            args = segment[index + 1 :]
+            for flag in (
+                "--kubeconfig",
+                "--context",
+                "--cluster",
+                "--user",
+                "--server",
+                "--token",
+                "--certificate-authority",
+                "--client-certificate",
+                "--client-key",
+                "--tls-server-name",
+            ):
+                if flag in args or any(value.startswith(flag + "=") for value in args):
+                    return "kubectl identity override flags are not permitted"
+    return None
+
+
 def _positionals(tokens: list[str]) -> list[str]:
     result: list[str] = []
     skip_next = False
@@ -242,7 +281,7 @@ def classify_kubectl(command: str) -> list[KubectlInvocation]:
     invocations: list[KubectlInvocation] = []
     for segment in _shell_segments(command):
         for index, token in enumerate(segment):
-            if _basename(token) == "kubectl":
+            if _basename(token) == "kubectl" and not _is_discovery_reference(segment, index):
                 invocations.append(_classify_args(segment[index + 1 :]))
     return invocations
 
@@ -285,7 +324,8 @@ def main() -> int:
         command = tool_input["command"]
 
     invocations = classify_kubectl(command) if tool_name == "Bash" else []
-    denial = next(
+    identity_denial = _identity_denial(command, os.environ.get("CODEX_AB_KUBECTL_PIN"))
+    denial = identity_denial or next(
         (
             item.denial_reason or "non-read-only kubectl command denied"
             for item in invocations
@@ -306,7 +346,13 @@ def main() -> int:
             else None,
             "kubectl_invocations": [asdict(item) for item in invocations],
             "denied": denial is not None,
-            "denial_class": "read_only_policy" if denial else None,
+            "denial_class": (
+                "cluster_identity"
+                if denial and "identity" in denial
+                else "read_only_policy"
+                if denial
+                else None
+            ),
         }
     )
     if denial:
