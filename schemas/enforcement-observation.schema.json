@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:enforcement-observation:v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_digest", "command_class", "selected_mode", "oversized", "raw_bytes", "exposed_bytes", "reduction_ppm", "quality_preserved", "redaction_verified", "retrieval_verified", "rollback_verified", "bypass_count", "accepted", "observed_at"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.enforcement-observation/v1"},
+    "policy_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "command_class": {"type": "string", "minLength": 1},
+    "selected_mode": {"enum": ["bypass", "enforce"]},
+    "oversized": {"type": "boolean"},
+    "raw_bytes": {"type": "integer", "minimum": 0},
+    "exposed_bytes": {"type": "integer", "minimum": 0},
+    "reduction_ppm": {"type": ["integer", "null"]},
+    "quality_preserved": {"type": "boolean"},
+    "redaction_verified": {"type": "boolean"},
+    "retrieval_verified": {"type": "boolean"},
+    "rollback_verified": {"type": "boolean"},
+    "bypass_count": {"type": "integer", "minimum": 0},
+    "accepted": {"type": "boolean"},
+    "observed_at": {"type": "string", "format": "date-time"}
+  }
+}

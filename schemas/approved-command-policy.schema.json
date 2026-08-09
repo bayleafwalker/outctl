@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:approved-command-policy:v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_id", "policy_digest", "approved_classes"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.approved-command-policy/v1"},
+    "policy_id": {"type": "string", "minLength": 1},
+    "policy_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "approved_classes": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["command_class", "max_full_output_bytes", "minimum_oversized_reduction_ppm"],
+        "properties": {
+          "command_class": {"type": "string", "minLength": 1},
+          "max_full_output_bytes": {"type": "integer", "minimum": 1},
+          "minimum_oversized_reduction_ppm": {"type": "integer", "minimum": 500000, "maximum": 1000000}
+        }
+      }
+    }
+  }
+}

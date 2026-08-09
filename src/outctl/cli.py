@@ -23,6 +23,11 @@ from outctl.benchmark import benchmark, rollback_check
 from outctl.capture import recover_partials
 from outctl.contracts import ContractValidationError, validate_contract
 from outctl.enablement import EnablementEvidenceError, evaluate_enablement
+from outctl.enforcement import (
+    EnforcementError,
+    compile_enforcement_observation,
+    select_command_mode,
+)
 from outctl.pilot import PilotReportError, validate_pilot_report
 from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
 from outctl.retrieval import (
@@ -144,7 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
         "schema",
         choices=(
             "cross-harness-conformance",
+            "approved-command-policy",
             "enablement-evidence",
+            "enforcement-observation",
             "evidence-reference",
             "expected-facts",
             "logical-command-request",
@@ -166,6 +173,16 @@ def build_parser() -> argparse.ArgumentParser:
     ux_compile = commands.add_parser("ux-compile", help="compile digest-bound UX evidence")
     ux_compile.add_argument("task_protocol", type=Path)
     ux_compile.add_argument("observations", type=Path)
+    selector = commands.add_parser(
+        "enforcement-select", help="select mode for an approved command class"
+    )
+    selector.add_argument("policy", type=Path)
+    selector.add_argument("command_class")
+    enforcement_compile = commands.add_parser(
+        "enforcement-compile", help="compile selected enforcement evidence"
+    )
+    enforcement_compile.add_argument("policy", type=Path)
+    enforcement_compile.add_argument("observation", type=Path)
     return parser
 
 
@@ -579,7 +596,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
-    except (OSError, PilotReportError, StudyCompileError, UxCompileError, ValueError) as error:
+        if args.command == "enforcement-select":
+            _json(select_command_mode(load_json_object(args.policy), args.command_class))
+            return 0
+        if args.command == "enforcement-compile":
+            _json(
+                compile_enforcement_observation(
+                    load_json_object(args.policy), load_json_object(args.observation)
+                )
+            )
+            return 0
+    except (
+        EnforcementError,
+        OSError,
+        PilotReportError,
+        StudyCompileError,
+        UxCompileError,
+        ValueError,
+    ) as error:
         _json({"status": "ERROR", "detail": _metadata_text(str(error))})
         return 2
     raise AssertionError(f"unknown command {args.command!r}")

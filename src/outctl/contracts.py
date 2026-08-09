@@ -16,8 +16,10 @@ from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 _DEVELOPMENT_SCHEMA_ROOT = Path(__file__).parents[2] / "schemas"
 _SCHEMAS = frozenset(
     {
+        "approved-command-policy",
         "cross-harness-conformance",
         "enablement-evidence",
+        "enforcement-observation",
         "evidence-reference",
         "expected-facts",
         "logical-command-request",
@@ -107,8 +109,7 @@ def _repository_file(root: Path, raw: object, label: str) -> Path:
         root,
         {
             "path": raw,
-            "sha256": "sha256:"
-            + hashlib.sha256((root / str(raw)).read_bytes()).hexdigest()
+            "sha256": "sha256:" + hashlib.sha256((root / str(raw)).read_bytes()).hexdigest()
             if isinstance(raw, str)
             and not Path(raw).is_absolute()
             and ".." not in Path(raw).parts
@@ -274,6 +275,22 @@ def _validate_semantics(name: str, value: Mapping[str, Any]) -> None:
                 raise ContractValidationError(
                     "study suite must bind exactly one scenario per required class"
                 )
+    elif name == "approved-command-policy":
+        if value.get("policy_digest") != _canonical_digest(value, omit="policy_digest"):
+            raise ContractValidationError("approved command policy digest mismatch")
+        approved_classes = value.get("approved_classes")
+        if isinstance(approved_classes, list):
+            names = [
+                item.get("command_class") for item in approved_classes if isinstance(item, Mapping)
+            ]
+            if len(names) != len(set(names)):
+                raise ContractValidationError("approved command classes must be unique")
+    elif name == "enforcement-observation":
+        raw, exposed = value.get("raw_bytes"), value.get("exposed_bytes")
+        if isinstance(raw, int) and isinstance(exposed, int):
+            reduction = round((raw - exposed) * 1_000_000 / raw) if raw else None
+            if value.get("reduction_ppm") != reduction:
+                raise ContractValidationError("enforcement reduction does not reconcile")
     elif name == "study-analysis":
         pairs = value.get("pairs")
         summary = value.get("paired_summary")
@@ -417,15 +434,17 @@ def normalize_enablement_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
         return dict(current) if isinstance(current, Mapping) else {}
 
     result["foundation"] = {
-        **{key: section("foundation").get(key) is True for key in (
-            "schemas_valid", "policy_digest_stable", "full_repository_gate"
-        )},
+        **{
+            key: section("foundation").get(key) is True
+            for key in ("schemas_valid", "policy_digest_stable", "full_repository_gate")
+        },
         "evidence_ids": [],
     }
     result["mechanism"] = {
-        **{key: section("mechanism").get(key) is True for key in (
-            "passed", "process_semantics_passed", "security_passed"
-        )},
+        **{
+            key: section("mechanism").get(key) is True
+            for key in ("passed", "process_semantics_passed", "security_passed")
+        },
         "negative_tests_passed": section("mechanism").get("security_passed") is True,
         "evidence_ids": [],
     }
@@ -450,9 +469,15 @@ def normalize_enablement_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
     }
     shadow = section("shadow")
     result["shadow"] = {
-        **{key: shadow.get(key) is True for key in (
-            "semantic_equivalence", "no_deadlocks", "recovery_verified", "overhead_acceptable"
-        )},
+        **{
+            key: shadow.get(key) is True
+            for key in (
+                "semantic_equivalence",
+                "no_deadlocks",
+                "recovery_verified",
+                "overhead_acceptable",
+            )
+        },
         "rollback_verified": False,
         "evidence_ids": [],
     }
