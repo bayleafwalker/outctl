@@ -23,16 +23,18 @@ Before changing behavior, read:
 - Raw capture bytes never enter Git, sprintctl, kctl, auditctl, or ordinary
   model-facing output.
 - Raw spool directories are mode `0700`; capture files are mode `0600`.
-- Projection is deterministic and model-free in Phase 1.
+- Core projection remains deterministic and model-free in the mature MVP.
 - Retrieval never reruns the wrapped command.
-- Do not add a daemon, remote executor, database, PTY, or cluster dependency in
-  Phase 1.
+- Do not add a required daemon, remote executor, central database, PTY, or
+  cluster dependency in the mature MVP.
 
 ## Implementation order
 
-Work in the four slices defined in `docs/IMPLEMENTATION_PLAN.md`. Do not begin a
-later slice until the preceding slice's gates pass. Each pass must leave the
-repository runnable and commit only its own scoped changes.
+The four slices in `docs/IMPLEMENTATION_PLAN.md` describe the completed Python
+v1 baseline. New architecture work follows `docs/MIGRATION_ROADMAP.md` in strict
+W0-W8 order. Do not begin a later wave until the preceding wave's gates pass.
+Each wave must preserve a runnable Python reference engine and commit only its
+own scoped changes.
 
 ## Verification
 

@@ -1,8 +1,8 @@
 # Vuoro bounded command-output tooling starter
 
 **Working component name:** `outctl`  
-**Status:** implementation-ready repository scaffold  
-**Date:** 2026-08-03
+**Status:** Python v1 baseline with accepted hybrid migration direction
+**Architecture accepted:** 2026-08-10
 
 This package defines a small supplemental tool for the Vuoro ecosystem: capture complete command output outside the model context, return a bounded deterministic projection to the harness, and allow later slices to be retrieved without rerunning the command.
 
@@ -10,18 +10,20 @@ The design is deliberately narrow. `outctl` is not a scheduler, queue, workflow 
 
 ## Recommended reading order
 
-1. [`docs/DESIGN.md`](docs/DESIGN.md) — normative architecture and behavior.
-2. [`docs/ADR-0001-HARNESS-BOUNDARY.md`](docs/ADR-0001-HARNESS-BOUNDARY.md) — why the wrapper belongs at the harness/runner boundary.
-3. [`IMPLEMENTATION_HANDOFF.md`](IMPLEMENTATION_HANDOFF.md) — first delivery slices and stop conditions.
-4. [`acceptance/SCENARIOS.md`](acceptance/SCENARIOS.md) — black-box acceptance suite.
-5. [`config/output-policies.example.yaml`](config/output-policies.example.yaml) and [`schemas/`](schemas/) — starter contracts.
-6. [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) and [`docs/ROLLOUT.md`](docs/ROLLOUT.md).
-7. [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) and
-   [`docs/DEVBOX.md`](docs/DEVBOX.md) — autonomous pass sequence and devbox setup.
-8. [`docs/ENABLEMENT_PLAN.md`](docs/ENABLEMENT_PLAN.md) — current ordered
-   shadow, study, enforcement, integration, and rollback gates.
-9. [`docs/CONTRACT_INTEGRATION.md`](docs/CONTRACT_INTEGRATION.md) — shared
-   contracts and cross-repository attachment mappings.
+1. [`docs/architecture/README.md`](docs/architecture/README.md) — accepted target
+   architecture and normative document index.
+2. [`docs/MIGRATION_ROADMAP.md`](docs/MIGRATION_ROADMAP.md) — governing W0-W8
+   migration sequence.
+3. [`docs/DECISION_GATES.md`](docs/DECISION_GATES.md) — frozen direction,
+   decisions requiring review, and stop conditions.
+4. [`docs/DESIGN.md`](docs/DESIGN.md) and
+   [`acceptance/SCENARIOS.md`](acceptance/SCENARIOS.md) — normative Python v1
+   compatibility baseline.
+5. [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) and the accepted ADRs under
+   [`docs/adr/`](docs/adr/).
+6. [`docs/ENABLEMENT_PLAN.md`](docs/ENABLEMENT_PLAN.md) and
+   [`docs/CONTRACT_INTEGRATION.md`](docs/CONTRACT_INTEGRATION.md) — existing
+   pilot and ecosystem integration records, subordinate to the migration plan.
 
 ## Core decision
 
@@ -52,18 +54,13 @@ kctl: curated policies and decisions, never raw command logs
 - `acceptance/SCENARIOS.md`: conformance cases.
 - `IMPLEMENTATION_HANDOFF.md`: implementation packet.
 
-## First implementation target
+## Next implementation target
 
-Implement Linux, non-PTY, local capture first. Do not begin with a daemon, cluster service, LLM summarizer, or remote execution service. The first useful slice is a library plus CLI that:
-
-- executes an argv vector without an implicit shell;
-- drains stdout and stderr concurrently with bounded memory;
-- writes raw streams and an interleave index atomically;
-- returns a generic head/error/tail projection under a hard budget;
-- provides `inspect`, `slice`, `search`, and `verify` without rerunning the command;
-- records explicit truncation, capture failure, hashes, host, path, and policy digest.
-
-That slice is enough to validate the premise against real Vuoro sessions before promoting it into every harness.
+Execute W0 only: freeze the current Python behavior and contracts, run the full
+quality/package gates, and establish fresh-process startup and syscall baselines.
+Do not add a Cargo workspace or v2 runtime contracts until W0 reproduces the
+current engine and its process semantics. See the
+[migration roadmap](docs/MIGRATION_ROADMAP.md).
 
 ## Development
 
