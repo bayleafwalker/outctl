@@ -8,9 +8,16 @@
 
 The opt-in `outctl-native` path now implements Linux non-PTY direct-argv
 execution, isolated process groups, timeout and caller-cancellation handling,
-concurrent stdout/stderr drainage, one shared retention quota, atomic local
-finalization, partial recovery, bounded retrieval, digest verification, and
+concurrent stdout/stderr drainage, one shared retention quota capped by the
+advertised 268,435,456-byte engine limit, atomic local finalization, partial
+recovery, bounded retrieval, digest verification, and
 machine-readable phase timings.
+
+Spool traversal, artifact reads/writes, recovery, and finalization are anchored
+to pinned directory descriptors. Child directories and regular files use
+descriptor-relative no-follow opens, and the final move uses `renameat` between
+the pinned partial and capture parents. Pathnames returned in results are
+display metadata only and are never reused as storage authority.
 
 Python remains the default compatibility engine. `OUTCTL_ENGINE=rust-native`
 is explicit and fails closed when the binary is absent; either
@@ -48,6 +55,10 @@ The W3 test layer covers:
 - incomplete recovery without command execution;
 - mode-0700 spool/capture directories and mode-0600 evidence files;
 - traversal/symlink denial and tamper detection;
+- adversarial root/capture replacement after descriptor acquisition, including
+  finalization that remains between the original pinned parent directories;
+- acceptance at exactly 268,435,456 retained bytes of configured quota and
+  pre-spool rejection at 268,435,457;
 - bounded resident memory while draining output far beyond the capture quota;
 - explicit engine selection, rollback, and native command/finalization/drain
   timings.
@@ -75,10 +86,10 @@ python /projects/dev/agentops/templates/dispatch/scripts/validate_verification_a
 Observed on the isolated candidate:
 
 - pinned Rust `1.85.1`: format, check, clippy, and all workspace tests passed;
-- native workspace tests: 11 unit tests passed across CLI, contracts, and
+- native workspace tests: 17 unit tests passed across CLI, contracts, and
   engine crates, plus doc tests;
-- Python full suite: `219 passed`;
-- W3/W2/native targeted suite: `22 passed`;
+- Python full suite: `220 passed`;
+- W3 native integration suite: `14 passed`;
 - Ruff and Mypy: passed;
 - wheel and source distribution build: passed;
 - exact wheel membership/package checks: passed;
@@ -87,6 +98,11 @@ Observed on the isolated candidate:
 
 The candidate contains no raw command output or capture spool. Local test
 spools remain ignored and host-local.
+
+`SHA256SUMS` is an ungoverned historical seed: repository history contains no
+validator or CI consumer, and the file has not tracked later repository
+changes. W3 leaves it untouched rather than inventing a new inventory format
+or authority.
 
 ## Intentional W3 limits
 

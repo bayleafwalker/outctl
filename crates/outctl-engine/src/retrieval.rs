@@ -1,10 +1,10 @@
-use crate::storage::{safe_directory, safe_file, sha256_file, CHUNK_BYTES};
+use crate::storage::{file_len, read_range, sha256_file, PrivateDir, CHUNK_BYTES};
 use regex::bytes::Regex;
 use serde::Serialize;
 use serde_json::Value;
-use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::{self, Read};
+use std::path::Path;
 
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 const MAX_CONTEXT_BYTES: usize = 4 * 1024;
@@ -90,7 +90,7 @@ pub struct VerificationResult {
 
 struct ResolvedCapture {
     status: RetrievalStatus,
-    path: Option<PathBuf>,
+    directory: Option<PrivateDir>,
     detail: Option<String>,
 }
 
@@ -153,8 +153,8 @@ pub fn slice_stream_for_workspace(
         return Err("slice range exceeds max_bytes".to_owned());
     }
     let resolved = resolve_capture(spool_root, capture_id);
-    let (status, path, detail) = stream_path(&resolved, stream, expected_workspace_id);
-    let Some(path) = path else {
+    let (status, file, detail) = stream_file(&resolved, stream, expected_workspace_id);
+    let Some(file) = file else {
         return Ok(SliceResult {
             status,
             capture_id: capture_id.to_owned(),
@@ -165,12 +165,10 @@ pub fn slice_stream_for_workspace(
             detail,
         });
     };
-    let size = fs::metadata(&path)
-        .map_err(|error| error.to_string())?
-        .len();
+    let size = file_len(&file).map_err(|error| error.to_string())?;
     let actual_end = end.min(size);
     let data = if start < actual_end {
-        read_range(&path, start, actual_end).map_err(|error| error.to_string())?
+        read_range(&file, start, actual_end).map_err(|error| error.to_string())?
     } else {
         Vec::new()
     };
@@ -210,8 +208,8 @@ pub fn tail_stream_for_workspace(
         ));
     }
     let resolved = resolve_capture(spool_root, capture_id);
-    let (status, path, detail) = stream_path(&resolved, stream, expected_workspace_id);
-    let Some(path) = path else {
+    let (status, file, detail) = stream_file(&resolved, stream, expected_workspace_id);
+    let Some(file) = file else {
         return Ok(TailResult {
             status,
             capture_id: capture_id.to_owned(),
@@ -221,11 +219,9 @@ pub fn tail_stream_for_workspace(
             detail,
         });
     };
-    let size = fs::metadata(&path)
-        .map_err(|error| error.to_string())?
-        .len();
+    let size = file_len(&file).map_err(|error| error.to_string())?;
     let start = size.saturating_sub(max_bytes as u64);
-    let mut data = read_range(&path, start, size).map_err(|error| error.to_string())?;
+    let mut data = read_range(&file, start, size).map_err(|error| error.to_string())?;
     if let Some(lines) = lines {
         data = final_lines(&data, lines);
     }
@@ -293,8 +289,8 @@ pub fn search_stream_for_workspace(
         None
     };
     let resolved = resolve_capture(spool_root, capture_id);
-    let (status, path, detail) = stream_path(&resolved, stream, expected_workspace_id);
-    let Some(path) = path else {
+    let (status, file, detail) = stream_file(&resolved, stream, expected_workspace_id);
+    let Some(mut file) = file else {
         return Ok(SearchResult {
             status,
             capture_id: capture_id.to_owned(),
@@ -304,10 +300,7 @@ pub fn search_stream_for_workspace(
             detail,
         });
     };
-    let size = fs::metadata(&path)
-        .map_err(|error| error.to_string())?
-        .len();
-    let mut file = File::open(&path).map_err(|error| error.to_string())?;
+    let size = file_len(&file).map_err(|error| error.to_string())?;
     let mut overlap = Vec::new();
     let mut buffer = vec![0_u8; CHUNK_BYTES];
     let mut offset = 0_u64;
@@ -338,7 +331,7 @@ pub fn search_stream_for_workspace(
             let context_start = start.saturating_sub(context_bytes as u64);
             let context_end = end.saturating_add(context_bytes as u64).min(size);
             let context =
-                read_range(&path, context_start, context_end).map_err(|error| error.to_string())?;
+                read_range(&file, context_start, context_end).map_err(|error| error.to_string())?;
             matches.push(SearchMatch {
                 start,
                 end,
@@ -389,7 +382,7 @@ pub fn verify_capture_for_workspace(
             detail,
         };
     };
-    let Some(path) = resolved.path else {
+    let Some(directory) = resolved.directory.as_ref() else {
         return VerificationResult {
             status: RetrievalStatus::Unavailable,
             capture_id: capture_id.to_owned(),
@@ -418,12 +411,10 @@ pub fn verify_capture_for_workspace(
         .into_iter()
         .map(|(artifact, filename, expected)| {
             let expected = expected.and_then(Value::as_str).map(str::to_owned);
-            let artifact_path = path.join(filename);
-            let observed = if safe_file(&artifact_path) {
-                sha256_file(&artifact_path).ok()
-            } else {
-                None
-            };
+            let observed = directory
+                .open_file(filename)
+                .ok()
+                .and_then(|file| sha256_file(&file).ok());
             DigestCheck {
                 artifact: artifact.to_owned(),
                 matches: expected.is_some() && expected == observed,
@@ -467,59 +458,68 @@ fn resolve_capture(spool_root: &Path, capture_id: &str) -> ResolvedCapture {
     if !valid_capture_id(capture_id) {
         return ResolvedCapture {
             status: RetrievalStatus::Denied,
-            path: None,
+            directory: None,
             detail: Some("invalid capture id".to_owned()),
         };
     }
-    if !safe_directory(spool_root) {
-        let status = if fs::symlink_metadata(spool_root).is_ok() {
-            RetrievalStatus::Denied
-        } else {
-            RetrievalStatus::Unavailable
-        };
-        return ResolvedCapture {
-            status,
-            path: None,
-            detail: Some("spool unavailable or unsafe".to_owned()),
-        };
-    }
-    for (group, status) in [
+    let root = match PrivateDir::open(spool_root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return ResolvedCapture {
+                status: RetrievalStatus::Unavailable,
+                directory: None,
+                detail: Some("spool unavailable".to_owned()),
+            }
+        }
+        Err(_) => {
+            return ResolvedCapture {
+                status: RetrievalStatus::Denied,
+                directory: None,
+                detail: Some("spool unavailable or unsafe".to_owned()),
+            }
+        }
+    };
+    for (group_name, status) in [
         ("captures", RetrievalStatus::Available),
         ("partial", RetrievalStatus::Incomplete),
     ] {
-        let group_path = spool_root.join(group);
-        if fs::symlink_metadata(&group_path).is_ok() && !safe_directory(&group_path) {
-            return ResolvedCapture {
-                status: RetrievalStatus::Denied,
-                path: None,
-                detail: Some("symlinked spool path".to_owned()),
-            };
-        }
-        let name = if group == "captures" {
+        let group = match root.try_open_dir(group_name) {
+            Ok(Some(group)) => group,
+            Ok(None) => continue,
+            Err(_) => {
+                return ResolvedCapture {
+                    status: RetrievalStatus::Denied,
+                    directory: None,
+                    detail: Some("unsafe spool group".to_owned()),
+                }
+            }
+        };
+        let name = if group_name == "captures" {
             capture_id.to_owned()
         } else {
             format!("{capture_id}.partial")
         };
-        let candidate = group_path.join(name);
-        if fs::symlink_metadata(&candidate).is_err() {
-            continue;
+        match group.try_open_dir(&name) {
+            Ok(Some(directory)) => {
+                return ResolvedCapture {
+                    status,
+                    directory: Some(directory),
+                    detail: None,
+                }
+            }
+            Ok(None) => continue,
+            Err(_) => {
+                return ResolvedCapture {
+                    status: RetrievalStatus::Denied,
+                    directory: None,
+                    detail: Some("unsafe capture path".to_owned()),
+                }
+            }
         }
-        if !safe_directory(&candidate) {
-            return ResolvedCapture {
-                status: RetrievalStatus::Denied,
-                path: None,
-                detail: Some("symlinked capture path".to_owned()),
-            };
-        }
-        return ResolvedCapture {
-            status,
-            path: Some(candidate),
-            detail: None,
-        };
     }
     ResolvedCapture {
         status: RetrievalStatus::Unavailable,
-        path: None,
+        directory: None,
         detail: Some("capture unavailable".to_owned()),
     }
 }
@@ -528,23 +528,32 @@ fn load_manifest(resolved: &ResolvedCapture) -> (RetrievalStatus, Option<Value>,
     if resolved.status != RetrievalStatus::Available {
         return (resolved.status, None, resolved.detail.clone());
     }
-    let Some(path) = &resolved.path else {
+    let Some(directory) = &resolved.directory else {
         return (
             RetrievalStatus::Unavailable,
             None,
             Some("capture unavailable".to_owned()),
         );
     };
-    let manifest_path = path.join("manifest.json");
-    if !safe_file(&manifest_path) {
-        return (
-            RetrievalStatus::Incomplete,
-            None,
-            Some("finalized capture has no safe manifest".to_owned()),
-        );
-    }
-    match fs::metadata(&manifest_path) {
-        Ok(metadata) if metadata.len() <= MAX_MANIFEST_BYTES => {}
+    let manifest_file = match directory.open_file("manifest.json") {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return (
+                RetrievalStatus::Incomplete,
+                None,
+                Some("finalized capture has no manifest".to_owned()),
+            )
+        }
+        Err(_) => {
+            return (
+                RetrievalStatus::Tampered,
+                None,
+                Some("finalized capture has an unsafe manifest".to_owned()),
+            )
+        }
+    };
+    match file_len(&manifest_file) {
+        Ok(length) if length <= MAX_MANIFEST_BYTES => {}
         Ok(_) => {
             return (
                 RetrievalStatus::Tampered,
@@ -560,9 +569,7 @@ fn load_manifest(resolved: &ResolvedCapture) -> (RetrievalStatus, Option<Value>,
             )
         }
     }
-    match File::open(&manifest_path)
-        .and_then(|file| serde_json::from_reader::<_, Value>(file).map_err(io::Error::other))
-    {
+    match serde_json::from_reader::<_, Value>(manifest_file).map_err(io::Error::other) {
         Ok(Value::Object(values)) => (
             RetrievalStatus::Available,
             Some(Value::Object(values)),
@@ -605,37 +612,26 @@ fn authorized_manifest(
     (status, Some(manifest), detail)
 }
 
-fn stream_path(
+fn stream_file(
     resolved: &ResolvedCapture,
     stream: &str,
     expected_workspace_id: Option<&str>,
-) -> (RetrievalStatus, Option<PathBuf>, Option<String>) {
+) -> (RetrievalStatus, Option<File>, Option<String>) {
     let (status, manifest, detail) = authorized_manifest(resolved, expected_workspace_id);
     if manifest.is_none() {
         return (status, None, detail);
     }
-    let Some(path) = &resolved.path else {
+    let Some(directory) = &resolved.directory else {
         return (RetrievalStatus::Unavailable, None, detail);
     };
-    let path = path.join(format!("{stream}.raw"));
-    if !safe_file(&path) {
-        return (
+    match directory.open_file(&format!("{stream}.raw")) {
+        Ok(file) => (RetrievalStatus::Available, Some(file), None),
+        Err(_) => (
             RetrievalStatus::Tampered,
             None,
             Some("stream is missing or unsafe".to_owned()),
-        );
+        ),
     }
-    (RetrievalStatus::Available, Some(path), None)
-}
-
-fn read_range(path: &Path, start: u64, end: u64) -> io::Result<Vec<u8>> {
-    let length = usize::try_from(end.saturating_sub(start))
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "range is too large"))?;
-    let mut file = File::open(path)?;
-    file.seek(SeekFrom::Start(start))?;
-    let mut data = vec![0_u8; length];
-    file.read_exact(&mut data)?;
-    Ok(data)
 }
 
 fn final_lines(data: &[u8], lines: usize) -> Vec<u8> {
@@ -688,11 +684,13 @@ impl Iterator for LiteralMatches<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        inspect_capture, inspect_capture_for_workspace, search_stream, search_stream_for_workspace,
-        slice_stream, slice_stream_for_workspace, tail_stream, tail_stream_for_workspace,
-        verify_capture, verify_capture_for_workspace, RetrievalStatus,
+        inspect_capture, inspect_capture_for_workspace, load_manifest, resolve_capture,
+        search_stream, search_stream_for_workspace, slice_stream, slice_stream_for_workspace,
+        stream_file, tail_stream, tail_stream_for_workspace, verify_capture,
+        verify_capture_for_workspace, RetrievalStatus,
     };
     use crate::capture::{capture_command, CaptureOptions};
+    use crate::storage::{file_len, read_range};
     use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -776,6 +774,53 @@ mod tests {
         assert_eq!(
             inspect_capture(&root, "../outside").status,
             RetrievalStatus::Denied
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_uses_pinned_capture_and_file_descriptors_after_replacement() {
+        let (root, capture_id) = capture(None);
+        let resolved = resolve_capture(&root, &capture_id);
+        assert_eq!(resolved.status, RetrievalStatus::Available);
+
+        let capture_path = root.join("captures").join(&capture_id);
+        let moved_path = root.join("captures").join(format!("{capture_id}.moved"));
+        let attacker_path = root.join("attacker");
+        fs::create_dir(&attacker_path).unwrap();
+        fs::write(attacker_path.join("manifest.json"), b"{}").unwrap();
+        fs::write(attacker_path.join("stdout.raw"), b"attacker").unwrap();
+        fs::rename(&capture_path, &moved_path).unwrap();
+        symlink(&attacker_path, &capture_path).unwrap();
+
+        let (status, manifest, _) = load_manifest(&resolved);
+        assert_eq!(status, RetrievalStatus::Available);
+        assert_eq!(manifest.unwrap()["capture_id"], capture_id);
+        let (status, file, _) = stream_file(&resolved, "stdout", None);
+        assert_eq!(status, RetrievalStatus::Available);
+        let file = file.unwrap();
+        assert_eq!(
+            read_range(&file, 0, file_len(&file).unwrap()).unwrap(),
+            b"alpha\nbeta marker\nomega\n"
+        );
+
+        fs::remove_file(&capture_path).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retrieval_rejects_artifact_symlink_without_open_race() {
+        let (root, capture_id) = capture(None);
+        let capture_path = root.join("captures").join(&capture_id);
+        let outside = root.join("outside.raw");
+        fs::write(&outside, b"outside").unwrap();
+        fs::remove_file(capture_path.join("stdout.raw")).unwrap();
+        symlink(&outside, capture_path.join("stdout.raw")).unwrap();
+        assert_eq!(
+            slice_stream(&root, &capture_id, "stdout", 0, 7, 64)
+                .unwrap()
+                .status,
+            RetrievalStatus::Tampered
         );
         fs::remove_dir_all(root).unwrap();
     }

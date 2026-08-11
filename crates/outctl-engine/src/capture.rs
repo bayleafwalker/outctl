@@ -1,11 +1,8 @@
-use crate::storage::{
-    capture_id, create_private_file, ensure_private_dir, fsync_directory, write_private,
-    CHUNK_BYTES,
-};
+use crate::storage::{capture_id, rename_entry, PrivateDir, CHUNK_BYTES};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
@@ -25,6 +22,16 @@ pub struct CaptureOptions {
     pub cwd: Option<PathBuf>,
     pub workspace_id: Option<String>,
     pub required_capture: bool,
+}
+
+pub const MAX_CAPTURE_BYTES: u64 = 268_435_456;
+
+struct Spool {
+    partial_root: PrivateDir,
+    captures_root: PrivateDir,
+    partial: PrivateDir,
+    partial_name: String,
+    final_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
@@ -126,14 +133,21 @@ pub fn capture_command(
     validate_options(options)?;
     let command_started = Instant::now();
     let capture_id = capture_id();
-    let (partial, captures_root) = prepare_spool(&options.spool_root, &capture_id)
+    let spool = prepare_spool(&options.spool_root, &capture_id)
         .map_err(CaptureError::CaptureUnavailable)?;
+    let partial_path = spool.partial.display_path().to_path_buf();
 
-    let stdout_file = create_private_file(&partial.join("stdout.raw"))
+    let stdout_file = spool
+        .partial
+        .create_file("stdout.raw")
         .map_err(CaptureError::CaptureUnavailable)?;
-    let stderr_file = create_private_file(&partial.join("stderr.raw"))
+    let stderr_file = spool
+        .partial
+        .create_file("stderr.raw")
         .map_err(CaptureError::CaptureUnavailable)?;
-    let event_file = create_private_file(&partial.join("events.ndjson"))
+    let event_file = spool
+        .partial
+        .create_file("events.ndjson")
         .map_err(CaptureError::CaptureUnavailable)?;
 
     let mut command = Command::new(&options.argv[0]);
@@ -147,7 +161,7 @@ pub fn capture_command(
         Ok(child) => child,
         Err(source) => {
             let _ = write_incomplete_manifest(
-                &partial,
+                &spool.partial,
                 &capture_id,
                 "SPAWN_FAILED",
                 Some(false),
@@ -156,7 +170,7 @@ pub fn capture_command(
             );
             return Err(CaptureError::Spawn {
                 capture_id,
-                path: partial,
+                path: partial_path,
                 source,
             });
         }
@@ -178,7 +192,7 @@ pub fn capture_command(
         kill_process_group(child_pid);
         let _ = child.wait();
         let _ = write_incomplete_manifest(
-            &partial,
+            &spool.partial,
             &capture_id,
             "CAPTURE_SETUP_FAILED",
             Some(false),
@@ -187,7 +201,7 @@ pub fn capture_command(
         );
         return Err(CaptureError::Finalize {
             capture_id,
-            path: partial,
+            path: partial_path,
             source,
         });
     }
@@ -228,7 +242,7 @@ pub fn capture_command(
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
                 let _ = write_incomplete_manifest(
-                    &partial,
+                    &spool.partial,
                     &capture_id,
                     "PROCESS_WAIT_FAILED",
                     None,
@@ -237,7 +251,7 @@ pub fn capture_command(
                 );
                 return Err(CaptureError::Finalize {
                     capture_id,
-                    path: partial,
+                    path: partial_path,
                     source,
                 });
             }
@@ -255,12 +269,12 @@ pub fn capture_command(
     }
     let stdout_outcome = stdout_thread.join().map_err(|_| CaptureError::Finalize {
         capture_id: capture_id.clone(),
-        path: partial.clone(),
+        path: partial_path.clone(),
         source: io::Error::other("stdout drain thread panicked"),
     })?;
     let stderr_outcome = stderr_thread.join().map_err(|_| CaptureError::Finalize {
         capture_id: capture_id.clone(),
-        path: partial.clone(),
+        path: partial_path.clone(),
         source: io::Error::other("stderr drain thread panicked"),
     })?;
     let drain_ms = drain_started.elapsed().as_millis();
@@ -282,7 +296,7 @@ pub fn capture_command(
 
     if cancelled {
         write_incomplete_manifest(
-            &partial,
+            &spool.partial,
             &capture_id,
             "CALLER_CANCELLED",
             Some(true),
@@ -291,12 +305,12 @@ pub fn capture_command(
         )
         .map_err(|source| CaptureError::Finalize {
             capture_id: capture_id.clone(),
-            path: partial.clone(),
+            path: partial_path.clone(),
             source,
         })?;
         return Err(CaptureError::Cancelled {
             capture_id,
-            path: partial,
+            path: partial_path,
         });
     }
 
@@ -343,38 +357,48 @@ pub fn capture_command(
     let manifest_bytes =
         serde_json::to_vec(&manifest).map_err(|source| CaptureError::Finalize {
             capture_id: capture_id.clone(),
-            path: partial.clone(),
+            path: partial_path.clone(),
             source: io::Error::other(source),
         })?;
-    write_private(
-        &partial.join("manifest.json"),
-        &[manifest_bytes, b"\n".to_vec()].concat(),
+    spool
+        .partial
+        .write_new("manifest.json", &[manifest_bytes, b"\n".to_vec()].concat())
+        .map_err(|source| CaptureError::Finalize {
+            capture_id: capture_id.clone(),
+            path: partial_path.clone(),
+            source,
+        })?;
+    spool
+        .partial
+        .sync()
+        .map_err(|source| CaptureError::Finalize {
+            capture_id: capture_id.clone(),
+            path: partial_path.clone(),
+            source,
+        })?;
+    rename_entry(
+        &spool.partial_root,
+        &spool.partial_name,
+        &spool.captures_root,
+        &capture_id,
     )
     .map_err(|source| CaptureError::Finalize {
         capture_id: capture_id.clone(),
-        path: partial.clone(),
+        path: partial_path,
         source,
     })?;
-    fsync_directory(&partial).map_err(|source| CaptureError::Finalize {
-        capture_id: capture_id.clone(),
-        path: partial.clone(),
-        source,
-    })?;
-    let final_path = captures_root.join(&capture_id);
-    fs::rename(&partial, &final_path).map_err(|source| CaptureError::Finalize {
-        capture_id: capture_id.clone(),
-        path: partial.clone(),
-        source,
-    })?;
-    fsync_directory(&captures_root).map_err(|source| CaptureError::Finalize {
-        capture_id: capture_id.clone(),
-        path: final_path.clone(),
-        source,
-    })?;
+    spool
+        .captures_root
+        .sync()
+        .map_err(|source| CaptureError::Finalize {
+            capture_id: capture_id.clone(),
+            path: spool.final_path.clone(),
+            source,
+        })?;
     let finalize_ms = finalize_started.elapsed().as_millis();
     Ok(CaptureResult {
         capture_id,
-        path: final_path,
+        path: spool.final_path,
         command: command_result,
         capture_status: capture_status.to_owned(),
         stdout_bytes: stdout_outcome.retained_bytes,
@@ -403,6 +427,11 @@ fn validate_options(options: &CaptureOptions) -> Result<(), CaptureError> {
             "argv exceeds the native limit of 256 items".to_owned(),
         ));
     }
+    if options.max_bytes > MAX_CAPTURE_BYTES {
+        return Err(CaptureError::InvalidRequest(format!(
+            "max_bytes exceeds the native limit of {MAX_CAPTURE_BYTES}"
+        )));
+    }
     if options
         .argv
         .iter()
@@ -415,16 +444,20 @@ fn validate_options(options: &CaptureOptions) -> Result<(), CaptureError> {
     Ok(())
 }
 
-fn prepare_spool(root: &Path, capture_id: &str) -> io::Result<(PathBuf, PathBuf)> {
-    ensure_private_dir(root)?;
-    let partial_root = root.join("partial");
-    let captures_root = root.join("captures");
-    ensure_private_dir(&partial_root)?;
-    ensure_private_dir(&captures_root)?;
-    let partial = partial_root.join(format!("{capture_id}.partial"));
-    fs::create_dir(&partial)?;
-    ensure_private_dir(&partial)?;
-    Ok((partial, captures_root))
+fn prepare_spool(root: &Path, capture_id: &str) -> io::Result<Spool> {
+    let root = PrivateDir::ensure(root)?;
+    let partial_root = root.ensure_dir("partial")?;
+    let captures_root = root.ensure_dir("captures")?;
+    let partial_name = format!("{capture_id}.partial");
+    let partial = partial_root.create_dir(&partial_name)?;
+    let final_path = captures_root.display_path().join(capture_id);
+    Ok(Spool {
+        partial_root,
+        captures_root,
+        partial,
+        partial_name,
+        final_path,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -612,15 +645,14 @@ fn monotonic_ns() -> u128 {
 }
 
 fn write_incomplete_manifest(
-    partial: &Path,
+    partial: &PrivateDir,
     capture_id: &str,
     reason: &str,
     caller_cancelled: Option<bool>,
     timed_out: Option<bool>,
     signals_sent: &[i32],
 ) -> io::Result<()> {
-    let manifest_path = partial.join("manifest.json");
-    if !manifest_path.exists() {
+    if partial.try_open_file("manifest.json")?.is_none() {
         let manifest = serde_json::json!({
             "schema_version": "vuoro.outctl.capture-native/w3",
             "capture_id": capture_id,
@@ -643,10 +675,9 @@ fn write_incomplete_manifest(
         });
         let mut bytes = serde_json::to_vec(&manifest).map_err(io::Error::other)?;
         bytes.push(b'\n');
-        write_private(&manifest_path, &bytes)?;
+        partial.write_new("manifest.json", &bytes)?;
     }
-    let recovery_path = partial.join("recovery.json");
-    if !recovery_path.exists() {
+    if partial.try_open_file("recovery.json")?.is_none() {
         let record = serde_json::json!({
             "capture_status": "INCOMPLETE",
             "incomplete": true,
@@ -654,9 +685,9 @@ fn write_incomplete_manifest(
         });
         let mut bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
         bytes.push(b'\n');
-        write_private(&recovery_path, &bytes)?;
+        partial.write_new("recovery.json", &bytes)?;
     }
-    fsync_directory(partial)
+    partial.sync()
 }
 
 #[derive(Clone, Debug, Serialize, Eq, PartialEq)]
@@ -667,30 +698,31 @@ pub struct RecoveryRecord {
 }
 
 pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
-    let partial_root = root.join("partial");
-    if !partial_root.exists() {
-        return Ok(Vec::new());
-    }
-    ensure_private_dir(&partial_root)?;
-    let mut paths = fs::read_dir(&partial_root)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
-    paths.sort();
+    let root = match PrivateDir::open(root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let partial_root = match root.try_open_dir("partial")? {
+        Some(partial_root) => partial_root,
+        None => return Ok(Vec::new()),
+    };
+    let mut names = partial_root.names()?;
+    names.sort();
     let mut records = Vec::new();
-    for path in paths {
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+    for name in names {
+        let Some(name) = name.to_str() else {
             continue;
         };
         let Some(capture_id) = name.strip_suffix(".partial") else {
             continue;
         };
-        let metadata = fs::symlink_metadata(&path)?;
-        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-            continue;
-        }
+        let partial = match partial_root.try_open_dir(name) {
+            Ok(Some(partial)) => partial,
+            Ok(None) | Err(_) => continue,
+        };
         write_incomplete_manifest(
-            &path,
+            &partial,
             capture_id,
             "WRAPPER_INTERRUPTED_OR_CRASHED",
             None,
@@ -699,7 +731,7 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
         )?;
         records.push(RecoveryRecord {
             capture_id: capture_id.to_owned(),
-            path,
+            path: partial.display_path().to_path_buf(),
             status: "INCOMPLETE".to_owned(),
         });
     }
@@ -708,7 +740,7 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{capture_command, CaptureError, CaptureOptions};
+    use super::{capture_command, CaptureError, CaptureOptions, MAX_CAPTURE_BYTES};
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
@@ -780,6 +812,43 @@ mod tests {
         assert_eq!(result.capture_status, "TRUNCATED");
         assert_eq!(result.command.exit_code, Some(0));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn advertised_quota_boundary_is_enforced_before_spool_creation() {
+        let accepted_root = temporary_root("quota-boundary-accepted");
+        let result = capture_command(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: accepted_root.clone(),
+                max_bytes: MAX_CAPTURE_BYTES,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.capture_status, "COMPLETE");
+        fs::remove_dir_all(accepted_root).unwrap();
+
+        let rejected_root = temporary_root("quota-boundary-rejected");
+        let error = capture_command(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: rejected_root.clone(),
+                max_bytes: MAX_CAPTURE_BYTES + 1,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!rejected_root.exists());
     }
 
     #[test]

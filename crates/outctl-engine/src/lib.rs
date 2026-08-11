@@ -4,6 +4,7 @@ pub mod capture;
 pub mod retrieval;
 mod storage;
 
+use capture::MAX_CAPTURE_BYTES;
 use outctl_contracts::{
     ContractVersions, EngineCapabilities, EngineFeatures, EngineLimits, EngineMetadata,
     ENGINE_CAPABILITIES_SCHEMA_VERSION,
@@ -43,7 +44,7 @@ pub fn capabilities() -> EngineCapabilities {
         },
         limits: EngineLimits {
             max_argv_items: 256,
-            max_capture_bytes: 256 * 1024 * 1024,
+            max_capture_bytes: MAX_CAPTURE_BYTES,
             max_projection_bytes: 1,
         },
     }
@@ -51,7 +52,7 @@ pub fn capabilities() -> EngineCapabilities {
 
 #[cfg(test)]
 mod tests {
-    use super::{capabilities, ENGINE_ID};
+    use super::{capabilities, ENGINE_ID, MAX_CAPTURE_BYTES};
 
     #[test]
     fn skeleton_capabilities_are_conservative() {
@@ -66,7 +67,7 @@ mod tests {
         assert!(value.contract_versions.policy_snapshot.is_empty());
         assert!(value.contract_versions.run_result.is_empty());
         assert_eq!(value.contract_versions.capture_manifest, ["v1alpha1"]);
-        assert_eq!(value.limits.max_capture_bytes, 256 * 1024 * 1024);
+        assert_eq!(value.limits.max_capture_bytes, MAX_CAPTURE_BYTES);
         assert_eq!(value.limits.max_projection_bytes, 1);
     }
 

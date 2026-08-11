@@ -196,6 +196,38 @@ def test_quota_is_shared_and_exhaustion_does_not_deadlock(tmp_path: Path) -> Non
     assert result["command"]["exit_code"] == 0
 
 
+def test_advertised_native_quota_rejects_one_byte_over_before_spool(tmp_path: Path) -> None:
+    capabilities = subprocess.run(
+        [str(_native_binary()), "capabilities", "--json"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(capabilities.stdout)["limits"]["max_capture_bytes"] == 268_435_456
+
+    spool = tmp_path / "must-not-exist"
+    rejected = subprocess.run(
+        [
+            str(_native_binary()),
+            "run",
+            "--spool-root",
+            str(spool),
+            "--max-bytes",
+            "268435457",
+            "--",
+            sys.executable,
+            "-c",
+            "raise SystemExit('must not execute')",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode == 125
+    assert "max_bytes exceeds the native limit of 268435456" in rejected.stderr
+    assert not spool.exists()
+
+
 def test_timeout_kills_the_child_process_group_without_orphan(tmp_path: Path) -> None:
     marker = tmp_path / "leaked-child"
     child_code = (
