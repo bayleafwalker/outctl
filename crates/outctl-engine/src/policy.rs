@@ -435,8 +435,7 @@ pub fn evaluate_policy(
     }
     let mut snapshot: Snapshot = serde_json::from_slice(snapshot_json)
         .map_err(|error| PolicyError::InvalidDocument(format!("snapshot JSON: {error}")))?;
-    let request: Request = serde_json::from_slice(request_json)
-        .map_err(|error| PolicyError::InvalidDocument(format!("request JSON: {error}")))?;
+    let request = parse_request(request_json)?;
     validate_snapshot(&mut snapshot, context.now_unix_millis)?;
     validate_request(&request)?;
 
@@ -557,8 +556,7 @@ pub fn capture_request_with_policy(
     // Evaluation already performed strict, bounded deserialization. Parsing
     // the same immutable byte slice again avoids exposing command fields from
     // EvaluatedPolicy where they could be mixed with another request.
-    let request: Request = serde_json::from_slice(options.request_json)
-        .map_err(|error| PolicyError::InvalidDocument(format!("request JSON: {error}")))?;
+    let request = parse_request(options.request_json)?;
     let environment = match request.command.environment.mode.as_str() {
         "inherited" => CommandEnvironment::Inherited,
         "empty" => CommandEnvironment::Empty,
@@ -596,6 +594,37 @@ pub fn capture_request_with_policy(
         capture,
         policy_metadata,
     })
+}
+
+fn parse_request(request_json: &[u8]) -> Result<Request, PolicyError> {
+    let value: Value = serde_json::from_slice(request_json)
+        .map_err(|error| PolicyError::InvalidDocument(format!("request JSON: {error}")))?;
+    let command = value
+        .get("command")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            PolicyError::InvalidDocument("request command must be an object".to_owned())
+        })?;
+    let stdin = command
+        .get("stdin")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            PolicyError::InvalidDocument("command stdin must be an object".to_owned())
+        })?;
+    for field in ["shell_command", "timeout_ms"] {
+        if !command.contains_key(field) {
+            return Err(PolicyError::InvalidDocument(format!(
+                "command is missing required nullable field {field}"
+            )));
+        }
+    }
+    if !stdin.contains_key("ref") {
+        return Err(PolicyError::InvalidDocument(
+            "command stdin is missing required nullable field ref".to_owned(),
+        ));
+    }
+    serde_json::from_value(value)
+        .map_err(|error| PolicyError::InvalidDocument(format!("request JSON: {error}")))
 }
 
 fn validate_snapshot(snapshot: &mut Snapshot, now_ms: i64) -> Result<(), PolicyError> {
@@ -1087,6 +1116,51 @@ mod tests {
         )
     }
 
+    fn assert_missing_required_nullable_rejected(field: &str) {
+        let (snapshot, mut request, context) = source_policy();
+        match field {
+            "shell_command" | "timeout_ms" => {
+                request["command"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(field)
+                    .unwrap();
+            }
+            "stdin.ref" => {
+                request["command"]["stdin"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("ref")
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let mut secrets = ProtectedSecretRegistry::new();
+        secrets
+            .register("secret://test/value".to_owned(), b"secret".to_vec())
+            .unwrap();
+        let spool = temporary_spool(&format!("missing-{}", field.replace('.', "-")));
+        let snapshot_bytes = serde_json::to_vec(&snapshot).unwrap();
+        let request_bytes = serde_json::to_vec(&request).unwrap();
+
+        assert!(matches!(
+            capture_request_with_policy(
+                PolicyCaptureOptions {
+                    snapshot_json: &snapshot_bytes,
+                    request_json: &request_bytes,
+                    context: &context,
+                    secrets: &secrets,
+                    spool_root: spool.clone(),
+                    max_capture_bytes: 1024,
+                    runner_authorized: true,
+                },
+                None,
+            ),
+            Err(PolicyCaptureError::Policy(PolicyError::InvalidDocument(_)))
+        ));
+        assert!(!spool.exists());
+    }
+
     #[test]
     fn restricted_sink_uses_only_protected_exact_values() {
         let (snapshot, request, context) = source_policy();
@@ -1350,5 +1424,38 @@ mod tests {
             Err(PolicyCaptureError::MissingExecutionAuthority)
         ));
         assert!(!denied_spool.exists());
+    }
+
+    #[test]
+    fn explicit_null_required_request_fields_remain_valid() {
+        let (snapshot, mut request, context) = source_policy();
+        request["command"]["timeout_ms"] = Value::Null;
+        let mut secrets = ProtectedSecretRegistry::new();
+        secrets
+            .register("secret://test/value".to_owned(), b"secret".to_vec())
+            .unwrap();
+
+        evaluate_policy(
+            &serde_json::to_vec(&snapshot).unwrap(),
+            &serde_json::to_vec(&request).unwrap(),
+            &context,
+            &secrets,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn omitted_shell_command_rejects_before_spool_creation() {
+        assert_missing_required_nullable_rejected("shell_command");
+    }
+
+    #[test]
+    fn omitted_timeout_rejects_before_spool_creation() {
+        assert_missing_required_nullable_rejected("timeout_ms");
+    }
+
+    #[test]
+    fn omitted_stdin_ref_rejects_before_spool_creation() {
+        assert_missing_required_nullable_rejected("stdin.ref");
     }
 }
