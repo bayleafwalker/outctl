@@ -9,11 +9,9 @@ use crate::storage::PrivateDir;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const DEFAULT_MAX_PROJECTION_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_PROJECTION_LINES: usize = 1_200;
@@ -27,16 +25,10 @@ const DEFAULT_TAIL_LINES: usize = 80;
 const DEFAULT_CANDIDATE_LINES: usize = 160;
 const DEFAULT_MAX_LOGICAL_LINE_BYTES: usize = 1024 * 1024;
 const MAX_REDACTION_VALUE_BYTES: usize = 64 * 1024;
-
-static PROVISIONAL_SPILL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-fn provisional_spill_path() -> PathBuf {
-    let sequence = PROVISIONAL_SPILL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "outctl-w4-provisional-{}-{sequence}.raw",
-        std::process::id()
-    ))
-}
+const MAX_REDACTION_VALUES: usize = 256;
+const MAX_REDACTION_TOTAL_BYTES: usize = 256 * 1024;
+const MAX_REDACTION_WORST_CASE_BYTES: usize = 512 * 1024;
+const REDACTION_REPLACEMENT_BYTES: usize = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresentationMode {
@@ -172,21 +164,58 @@ impl PresentationOptions {
                 "presentation record limits exceed the native bounded limit",
             ));
         }
-        if self.max_logical_line_bytes > DEFAULT_MAX_LOGICAL_LINE_BYTES
-            || self
-                .exact_redaction_values
-                .iter()
-                .any(|value| value.len() > MAX_REDACTION_VALUE_BYTES)
-        {
+        if self.max_logical_line_bytes > DEFAULT_MAX_LOGICAL_LINE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "presentation transform limits exceed the native bounded limit",
+                "presentation line transform limit exceeds the native bounded limit",
             ));
         }
         if self.exact_redaction_values.iter().any(Vec::is_empty) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "exact redaction values must not be empty",
+            ));
+        }
+        let redaction_total_bytes = self
+            .exact_redaction_values
+            .iter()
+            .try_fold(0_usize, |total, value| total.checked_add(value.len()))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "exact redaction aggregate size overflows",
+                )
+            })?;
+        let redaction_overlap_bytes = self
+            .exact_redaction_values
+            .len()
+            .checked_mul(self.exact_redaction_values.len())
+            .and_then(|count| count.checked_mul(REDACTION_REPLACEMENT_BYTES))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "exact redaction overlap expansion overflows",
+                )
+            })?;
+        let worst_case_redaction_bytes = redaction_total_bytes
+            .checked_add(redaction_overlap_bytes)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "exact redaction transform expansion overflows",
+                )
+            })?;
+        if self.exact_redaction_values.len() > MAX_REDACTION_VALUES
+            || self
+                .exact_redaction_values
+                .iter()
+                .any(|value| value.len() > MAX_REDACTION_VALUE_BYTES)
+            || redaction_total_bytes > MAX_REDACTION_TOTAL_BYTES
+            || worst_case_redaction_bytes > MAX_REDACTION_WORST_CASE_BYTES
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "exact redaction limits exceed the native bounded transform budget",
             ));
         }
         Ok(())
@@ -295,13 +324,16 @@ pub struct SpillBuffer {
     memory_limit: usize,
     memory: Vec<u8>,
     spill: Option<File>,
-    spill_path: Option<PathBuf>,
+    spill_root: Option<PathBuf>,
+    spill_directory: Option<PrivateDir>,
     len: u64,
     max_bytes: Option<u64>,
 }
 
+const SPILL_FILE_NAME: &str = "buffer.raw";
+
 impl SpillBuffer {
-    pub fn new(memory_limit: usize, spill_path: Option<&Path>) -> io::Result<Self> {
+    pub fn new(memory_limit: usize, spill_root: Option<&Path>) -> io::Result<Self> {
         if memory_limit == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -312,7 +344,8 @@ impl SpillBuffer {
             memory_limit,
             memory: Vec::with_capacity(memory_limit.min(READ_BYTES)),
             spill: None,
-            spill_path: spill_path.map(Path::to_path_buf),
+            spill_root: spill_root.map(Path::to_path_buf),
+            spill_directory: None,
             len: 0,
             max_bytes: None,
         })
@@ -321,9 +354,9 @@ impl SpillBuffer {
     pub fn with_max_bytes(
         memory_limit: usize,
         max_bytes: u64,
-        spill_path: Option<&Path>,
+        spill_root: Option<&Path>,
     ) -> io::Result<Self> {
-        let mut buffer = Self::new(memory_limit, spill_path)?;
+        let mut buffer = Self::new(memory_limit, spill_root)?;
         buffer.max_bytes = Some(max_bytes);
         Ok(buffer)
     }
@@ -349,20 +382,27 @@ impl SpillBuffer {
             return Ok(());
         }
         if self.spill.is_none() {
-            let path = self.spill_path.clone().ok_or_else(|| {
+            let root = self.spill_root.clone().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "spill path is required when the memory limit is exceeded",
+                    "spill root is required when the memory limit is exceeded",
                 )
             })?;
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(path)?;
-            file.write_all(&self.memory)?;
-            self.memory.clear();
+            self.spill_directory = Some(PrivateDir::create_private_temp_dir(
+                &root,
+                "outctl-w4-spill",
+            )?);
+            let file = self
+                .spill_directory
+                .as_ref()
+                .expect("spill directory initialized")
+                .create_read_write_file(SPILL_FILE_NAME)?;
             self.spill = Some(file);
+            self.spill
+                .as_mut()
+                .expect("spill initialized")
+                .write_all(&self.memory)?;
+            self.memory.clear();
         }
         self.spill
             .as_mut()
@@ -390,15 +430,13 @@ impl SpillBuffer {
         let prefix_len = self.len.min(max_bytes as u64) as usize;
         if let Some(mut file) = self.spill.take() {
             file.flush()?;
-            let path = self
-                .spill_path
-                .take()
-                .ok_or_else(|| io::Error::other("spilled buffer lost its backing path"))?;
-            drop(file);
+            file.seek(SeekFrom::Start(0))?;
             let mut bytes = Vec::with_capacity(prefix_len);
-            let reader = File::open(&path)?;
-            reader.take(prefix_len as u64).read_to_end(&mut bytes)?;
-            let _ = fs::remove_file(path);
+            (&mut file)
+                .take(prefix_len as u64)
+                .read_to_end(&mut bytes)?;
+            drop(file);
+            self.cleanup_spill_directory();
             self.len = 0;
             Ok(bytes)
         } else {
@@ -410,11 +448,21 @@ impl SpillBuffer {
     }
 }
 
+impl SpillBuffer {
+    fn cleanup_spill_directory(&mut self) {
+        if let Some(directory) = self.spill_directory.take() {
+            let _ = directory.remove_file(SPILL_FILE_NAME);
+            let path = directory.display_path().to_path_buf();
+            drop(directory);
+            let _ = fs::remove_dir(path);
+        }
+    }
+}
+
 impl Drop for SpillBuffer {
     fn drop(&mut self) {
-        if let Some(path) = self.spill_path.take() {
-            let _ = fs::remove_file(path);
-        }
+        let _ = self.spill.take();
+        self.cleanup_spill_directory();
     }
 }
 
@@ -452,7 +500,7 @@ pub struct StreamingCandidates {
 
 impl StreamingCandidates {
     pub fn new(options: &PresentationOptions) -> io::Result<Self> {
-        let spill_path = provisional_spill_path();
+        let spill_root = std::env::temp_dir();
         Ok(Self {
             head_limit: options.head_lines,
             tail_limit: options.tail_lines,
@@ -472,7 +520,7 @@ impl StreamingCandidates {
             provisional: SpillBuffer::with_max_bytes(
                 MAX_SAFE_PROVISIONAL_BYTES / 4,
                 options.full_if_bytes.min(MAX_SAFE_PROVISIONAL_BYTES as u64),
-                Some(&spill_path),
+                Some(&spill_root),
             )?,
             provisional_len: 0,
             small_output_limit: options.full_if_bytes.min(MAX_SAFE_PROVISIONAL_BYTES as u64)
@@ -1025,6 +1073,16 @@ pub fn render_capture_files_from_handles(
     capture_id: &str,
     options: &PresentationOptions,
 ) -> io::Result<PresentationResult> {
+    render_capture_files_from_handles_with_status(stdout, stderr, capture_id, options, true)
+}
+
+pub fn render_capture_files_from_handles_with_status(
+    stdout: &File,
+    stderr: &File,
+    capture_id: &str,
+    options: &PresentationOptions,
+    command_success: bool,
+) -> io::Result<PresentationResult> {
     options.validate()?;
     let (mut stdout_candidates, stdout_stats, stdout_changed) =
         read_stream(stdout, "stdout", options)?;
@@ -1044,7 +1102,7 @@ pub fn render_capture_files_from_handles(
         .normalized_bytes()
         .checked_add(stderr_candidates.normalized_bytes())
         .ok_or_else(|| io::Error::other("normalized byte count overflow"))?;
-    let empty_success = total_normalized == 0 && raw_bytes == 0;
+    let empty_success = total_normalized == 0 && raw_bytes == 0 && command_success;
     let rendered = if empty_success {
         RenderedBody {
             mode: PresentationMode::Safe,
@@ -1053,11 +1111,20 @@ pub fn render_capture_files_from_handles(
             omission: false,
         }
     } else if total_normalized == 0 {
-        RenderedBody {
-            mode: PresentationMode::Safe,
-            kind: "raw-safe",
-            body: Some(Vec::new()),
-            omission: true,
+        if raw_bytes == 0 {
+            RenderedBody {
+                mode: PresentationMode::Safe,
+                kind: "empty-command-failure",
+                body: Some(b"[command failed; no output]\n".to_vec()),
+                omission: false,
+            }
+        } else {
+            RenderedBody {
+                mode: PresentationMode::Safe,
+                kind: "raw-safe",
+                body: Some(Vec::new()),
+                omission: true,
+            }
         }
     } else {
         match options.mode {
@@ -1125,7 +1192,9 @@ pub fn render_capture_files_from_handles(
         exposed_estimated_tokens: exposed_tokens,
         estimated_tokens_saved: raw_tokens.saturating_sub(exposed_tokens),
         exposure_reduced: exposed_tokens < raw_tokens,
-        reason: if requested == PresentationMode::Safe && !omission && exposed_tokens < raw_tokens {
+        reason: if rendered.kind == "empty-command-failure" {
+            "empty-command-failure".to_owned()
+        } else if requested == PresentationMode::Safe && !omission && exposed_tokens < raw_tokens {
             "safe-small-output-is-cheaper".to_owned()
         } else if requested == PresentationMode::Safe && omission {
             "safe-bounded-body-is-cheapest".to_owned()
@@ -1268,11 +1337,13 @@ fn enforce_body_budget(
 #[cfg(test)]
 mod tests {
     use super::{
-        render_capture_files, render_capture_files_from_handles, ControlSanitizer, PersistenceMode,
+        render_capture_files, render_capture_files_from_handles,
+        render_capture_files_from_handles_with_status, ControlSanitizer, PersistenceMode,
         PresentationMode, PresentationOptions, SpillBuffer, StreamingCandidates,
+        MAX_REDACTION_VALUES, SPILL_FILE_NAME,
     };
     use crate::storage::PrivateDir;
-    use std::fs;
+    use std::fs::{self, File};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1288,20 +1359,39 @@ mod tests {
     fn spill_buffer_keeps_memory_bounded_and_cleans_spill() {
         let directory = root("spill");
         fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("spill.raw");
-        let mut buffer = SpillBuffer::new(4, Some(&path)).unwrap();
+        let mut buffer = SpillBuffer::new(4, Some(&directory)).unwrap();
         buffer.write(b"12345").unwrap();
         assert!(buffer.spilled());
         assert_eq!(buffer.len(), 5);
         assert_eq!(buffer.read_prefix(5).unwrap(), b"12345");
-        assert!(!path.exists());
-        let bounded_path = directory.join("bounded.raw");
-        let mut bounded = SpillBuffer::with_max_bytes(4, 5, Some(&bounded_path)).unwrap();
+        assert!(fs::read_dir(&directory).unwrap().next().is_none());
+        let mut bounded = SpillBuffer::with_max_bytes(4, 5, Some(&directory)).unwrap();
         bounded.write(b"12345").unwrap();
         assert!(bounded.write(b"6").is_err());
         assert_eq!(bounded.len(), 5);
         assert_eq!(bounded.read_prefix(5).unwrap(), b"12345");
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn spill_read_uses_pinned_descriptor_after_path_replacement() {
+        let directory = root("spill-replacement");
+        let attacker_directory = root("spill-attacker");
+        fs::create_dir_all(&directory).unwrap();
+        let mut buffer = SpillBuffer::new(4, Some(&directory)).unwrap();
+        buffer.write(b"trusted").unwrap();
+        let private_directory = fs::read_dir(&directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::rename(&private_directory, &attacker_directory).unwrap();
+        fs::create_dir(&private_directory).unwrap();
+        fs::write(private_directory.join(SPILL_FILE_NAME), b"attacker").unwrap();
+        assert_eq!(buffer.read_prefix(7).unwrap(), b"trusted");
+        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(attacker_directory).unwrap();
     }
 
     #[test]
@@ -1480,6 +1570,31 @@ mod tests {
     }
 
     #[test]
+    fn failed_empty_command_is_not_empty_success() {
+        let directory = root("empty-failure");
+        fs::create_dir_all(&directory).unwrap();
+        let stdout_path = directory.join("stdout.raw");
+        let stderr_path = directory.join("stderr.raw");
+        fs::write(&stdout_path, b"").unwrap();
+        fs::write(&stderr_path, b"").unwrap();
+        let stdout = File::open(&stdout_path).unwrap();
+        let stderr = File::open(&stderr_path).unwrap();
+        let result = render_capture_files_from_handles_with_status(
+            &stdout,
+            &stderr,
+            "capture-empty-failure",
+            &PresentationOptions::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.kind, "empty-command-failure");
+        assert_ne!(result.kind, "empty-success");
+        assert!(result.body.unwrap().contains("command failed"));
+        assert_eq!(result.savings.reason, "empty-command-failure");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn too_small_budget_is_rejected_before_rendering() {
         let options = PresentationOptions {
             max_bytes: 1,
@@ -1488,6 +1603,32 @@ mod tests {
             ..PresentationOptions::default()
         };
         assert!(options.validate().is_err());
+    }
+
+    #[test]
+    fn exact_redaction_limits_cover_count_aggregate_and_expansion() {
+        let count_excess = PresentationOptions {
+            exact_redaction_values: vec![vec![b'x']; MAX_REDACTION_VALUES + 1],
+            ..PresentationOptions::default()
+        };
+        assert!(count_excess.validate().is_err());
+
+        let aggregate_excess = PresentationOptions {
+            exact_redaction_values: vec![vec![b'x'; 64 * 1024]; 5],
+            ..PresentationOptions::default()
+        };
+        assert!(aggregate_excess.validate().is_err());
+
+        let expansion_boundary = PresentationOptions {
+            exact_redaction_values: vec![vec![b'x']; 228],
+            ..PresentationOptions::default()
+        };
+        assert!(expansion_boundary.validate().is_ok());
+        let expansion_excess = PresentationOptions {
+            exact_redaction_values: vec![vec![b'x']; 229],
+            ..PresentationOptions::default()
+        };
+        assert!(expansion_excess.validate().is_err());
     }
 
     #[test]

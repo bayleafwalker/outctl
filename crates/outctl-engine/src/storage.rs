@@ -89,16 +89,34 @@ impl PrivateDir {
     }
 
     pub(crate) fn create_file(&self, name: &str) -> io::Result<File> {
+        self.create_file_with_flags(name, libc::O_WRONLY)
+    }
+
+    pub(crate) fn create_read_write_file(&self, name: &str) -> io::Result<File> {
+        self.create_file_with_flags(name, libc::O_RDWR)
+    }
+
+    fn create_file_with_flags(&self, name: &str, access: i32) -> io::Result<File> {
         validate_name(name)?;
         let file = openat_file(
             self.file.as_raw_fd(),
             name,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+            access | libc::O_CREAT | libc::O_EXCL,
             0o600,
         )?;
         require_regular(&file)?;
         set_file_mode(&file, 0o600)?;
         Ok(file)
+    }
+
+    pub(crate) fn remove_file(&self, name: &str) -> io::Result<()> {
+        let name = c_name(name)?;
+        let result = unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) };
+        if result == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 
     pub(crate) fn open_file(&self, name: &str) -> io::Result<File> {
@@ -131,6 +149,29 @@ impl PrivateDir {
         fs::read_dir(proc_path)?
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect()
+    }
+
+    pub(crate) fn create_private_temp_dir(parent_path: &Path, prefix: &str) -> io::Result<Self> {
+        let parent = Self::open(parent_path)?;
+        let mut random = File::open("/dev/urandom")?;
+        for _ in 0..32 {
+            let mut bytes = [0_u8; 16];
+            random.read_exact(&mut bytes)?;
+            let suffix = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let name = format!("{prefix}-{suffix}");
+            match parent.create_dir(&name) {
+                Ok(directory) => return Ok(directory),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not allocate a private temporary directory",
+        ))
     }
 
     fn set_private_permissions(&self) -> io::Result<()> {

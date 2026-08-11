@@ -1,5 +1,6 @@
 use crate::presentation::{
-    render_capture_files_from_handles, PersistenceMode, PresentationOptions, PresentationResult,
+    render_capture_files_from_handles_with_status, PersistenceMode, PresentationOptions,
+    PresentationResult,
 };
 use crate::storage::{capture_id, rename_entry, PrivateDir, CHUNK_BYTES};
 use serde::Serialize;
@@ -90,6 +91,16 @@ pub enum CaptureError {
         path: PathBuf,
         source: io::Error,
     },
+    Presentation(Box<PresentationFailure>),
+}
+
+#[derive(Debug)]
+pub struct PresentationFailure {
+    pub capture_id: String,
+    pub path: PathBuf,
+    pub command: CommandResult,
+    pub capture_status: String,
+    pub source: io::Error,
 }
 
 impl std::fmt::Display for CaptureError {
@@ -101,6 +112,13 @@ impl std::fmt::Display for CaptureError {
             Self::Cancelled { .. } => write!(formatter, "capture caller cancelled"),
             Self::Finalize { source, .. } => {
                 write!(formatter, "capture finalization failed: {source}")
+            }
+            Self::Presentation(failure) => {
+                write!(
+                    formatter,
+                    "presentation failed after capture: {}",
+                    failure.source
+                )
             }
         }
     }
@@ -459,32 +477,43 @@ pub fn capture_command_with_presentation(
         ));
     }
     let (mut result, pinned_capture) = capture_command_pinned(options, cancellation)?;
-    let stdout =
-        pinned_capture
-            .open_file("stdout.raw")
-            .map_err(|source| CaptureError::Finalize {
-                capture_id: result.capture_id.clone(),
-                path: result.path.clone(),
-                source,
-            })?;
-    let stderr =
-        pinned_capture
-            .open_file("stderr.raw")
-            .map_err(|source| CaptureError::Finalize {
-                capture_id: result.capture_id.clone(),
-                path: result.path.clone(),
-                source,
-            })?;
-    let mut presentation = render_capture_files_from_handles(
+    let stdout = pinned_capture.open_file("stdout.raw").map_err(|source| {
+        CaptureError::Presentation(Box::new(PresentationFailure {
+            capture_id: result.capture_id.clone(),
+            path: result.path.clone(),
+            command: result.command.clone(),
+            capture_status: result.capture_status.clone(),
+            source,
+        }))
+    })?;
+    let stderr = pinned_capture.open_file("stderr.raw").map_err(|source| {
+        CaptureError::Presentation(Box::new(PresentationFailure {
+            capture_id: result.capture_id.clone(),
+            path: result.path.clone(),
+            command: result.command.clone(),
+            capture_status: result.capture_status.clone(),
+            source,
+        }))
+    })?;
+    let command_success = result.command.exit_code == Some(0)
+        && result.command.signal.is_none()
+        && !result.command.timed_out
+        && !result.command.cancelled;
+    let mut presentation = render_capture_files_from_handles_with_status(
         &stdout,
         &stderr,
         &result.capture_id,
         presentation_options,
+        command_success,
     )
-    .map_err(|source| CaptureError::Finalize {
-        capture_id: result.capture_id.clone(),
-        path: result.path.clone(),
-        source,
+    .map_err(|source| {
+        CaptureError::Presentation(Box::new(PresentationFailure {
+            capture_id: result.capture_id.clone(),
+            path: result.path.clone(),
+            command: result.command.clone(),
+            capture_status: result.capture_status.clone(),
+            source,
+        }))
     })?;
     if matches!(
         presentation_options.persistence,
@@ -969,6 +998,53 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, CaptureError::InvalidRequest(_)));
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn excessive_redaction_transform_is_rejected_before_spawn_or_spool_creation() {
+        let root = temporary_root("redaction-overflow");
+        let error = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("false")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                exact_redaction_values: vec![vec![b'x'; 64 * 1024]; 5],
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn failed_empty_command_has_honest_presentation_kind() {
+        let root = temporary_root("empty-command-failure");
+        let result = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("false")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.command.exit_code, Some(1));
+        assert_eq!(result.capture_status, "COMPLETE");
+        assert_eq!(result.presentation.unwrap().kind, "empty-command-failure");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

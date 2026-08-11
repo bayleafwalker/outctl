@@ -131,8 +131,7 @@ fn main() {
     };
     assert!(tiny.validate().is_err());
 
-    let spill_path = root.join("bounded-spill.raw");
-    let mut spill = SpillBuffer::with_max_bytes(1024, 64 * 1024, Some(&spill_path))
+    let mut spill = SpillBuffer::with_max_bytes(1024, 64 * 1024, Some(&root))
         .expect("create bounded spill buffer");
     let chunk = [b'x'; 4096];
     for _ in 0..16 {
@@ -146,7 +145,5 @@ fn main() {
             .len(),
         64 * 1024
     );
-    assert!(!spill_path.exists());
-
     fs::remove_dir_all(root).expect("remove benchmark directory");
 }

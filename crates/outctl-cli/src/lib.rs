@@ -415,6 +415,22 @@ fn execute_run(request: RunRequest) -> Result<(String, u8), CliError> {
 }
 
 fn capture_error(error: CaptureError) -> CliError {
+    if let CaptureError::Presentation(failure) = &error {
+        return CliError::wrapper(
+            json!({
+                "wrapper_error": {
+                    "code": "OUTCTL_POSTSPAWN_PRESENTATION_FAILED",
+                    "phase": "post-spawn",
+                    "message": error.to_string()
+                },
+                "capture_id": failure.capture_id,
+                "path": failure.path,
+                "capture_status": failure.capture_status,
+                "command": failure.command,
+            })
+            .to_string(),
+        );
+    }
     let (code, phase, capture_id, path) = match &error {
         CaptureError::InvalidRequest(_) => {
             ("OUTCTL_PRESPAWN_INVALID_REQUEST", "pre-spawn", None, None)
@@ -447,6 +463,7 @@ fn capture_error(error: CaptureError) -> CliError {
             Some(capture_id),
             Some(path),
         ),
+        CaptureError::Presentation(_) => unreachable!("presentation errors are handled above"),
     };
     CliError::wrapper(
         json!({
@@ -478,8 +495,10 @@ pub const HELP_OUTPUT: &str = "outctl-native capabilities [--json]\noutctl-nativ
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, Request};
+    use super::{capture_error, parse_args, Request};
+    use outctl_engine::capture::{CaptureError, CommandResult};
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -511,5 +530,37 @@ mod tests {
             "true",
         ]))
         .is_ok());
+    }
+
+    #[test]
+    fn presentation_failure_is_not_labeled_capture_failure() {
+        let error = capture_error(CaptureError::Presentation(Box::new(
+            outctl_engine::capture::PresentationFailure {
+                capture_id: "capture-fault".to_owned(),
+                path: PathBuf::from("/private/capture-fault"),
+                command: CommandResult {
+                    started: true,
+                    exit_code: Some(0),
+                    signal: None,
+                    timed_out: false,
+                    cancelled: false,
+                    signals_sent: Vec::new(),
+                },
+                capture_status: "COMPLETE".to_owned(),
+                source: std::io::Error::other("injected presentation fault"),
+            },
+        )));
+        let value: serde_json::Value = serde_json::from_str(error.message()).unwrap();
+        assert_eq!(
+            value["wrapper_error"]["code"],
+            "OUTCTL_POSTSPAWN_PRESENTATION_FAILED"
+        );
+        assert_eq!(value["wrapper_error"]["phase"], "post-spawn");
+        assert_eq!(value["capture_status"], "COMPLETE");
+        assert_eq!(value["command"]["exit_code"], 0);
+        assert_ne!(
+            value["wrapper_error"]["code"],
+            "OUTCTL_POSTSPAWN_CAPTURE_FAILED"
+        );
     }
 }
