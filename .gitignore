@@ -11,3 +11,4 @@ dist/
 .outctl/
 outctl-captures/
 .outctl-pilot/
+target/

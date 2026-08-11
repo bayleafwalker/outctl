@@ -1,0 +1,11 @@
+[package]
+name = "outctl-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+outctl-contracts = { path = "../outctl-contracts" }
+
+[lib]
+path = "src/lib.rs"
