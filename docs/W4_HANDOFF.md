@@ -16,7 +16,9 @@ top of the reviewed W3 capture boundary.
   Provisional safe output is a capped `SpillBuffer` (16 KiB memory threshold,
   64 KiB hard ceiling) under a randomly named mode-0700 private directory;
   spill reads use the retained read/write descriptor and descriptor-relative
-  unlink cleanup, never a pathname reopen.
+  unlink cleanup. Directory removal uses the pinned parent and first verifies
+  that the entry still names the pinned directory, so an empty path replacement
+  is never removed.
 - Production presentation consumes descriptor-relative handles pinned before
   W3 finalization rename; `openat(O_NOFOLLOW)` plus regular-file `fstat` checks
   prevent capture-root/file pathname replacement from changing rendered bytes.
@@ -43,7 +45,11 @@ top of the reviewed W3 capture boundary.
   captures retain an opaque `outctl://capture/` reference; memory-only and
   process-local captures remove their temporary material before return. Lossy
   ephemeral results say evidence is unavailable and do not offer retrieval;
-  a replicated request fails before spawn without a configured replica backend.
+  cleanup unlinks only known files through the pinned capture descriptor and
+  removes the capture through its pinned parent after an identity check. A
+  replicated request fails before spawn without a configured replica backend.
+- Raw line metadata counts LF bytes from the unmodified capture stream rather
+  than deriving the count from redacted or control-normalized output.
 - The Python engine, v1 manifest writer, direct-argv process semantics,
   concurrent drainers, quota, path, and retrieval safety remain unchanged.
 
@@ -57,22 +63,22 @@ toolchain path (Cargo 1.97.0, rustc/rustfmt/clippy 1.97.0, GCC 15.3.0):
   with the installed Nix Rust 1.97.0 toolchain; exact 1.85.1 compatibility is
   the remaining environment-dependent limitation.
 
-- `cargo test --workspace --all-targets --no-fail-fast`: 39 Rust tests passed
-  (34 engine, 4 CLI, 1 contracts); the benchmark target also ran.
+- `cargo test --workspace --all-targets --no-fail-fast`: 41 Rust tests passed
+  (36 engine, 4 CLI, 1 contracts); the benchmark target also ran.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - `cargo-fmt --all -- --check`: passed. The host Cargo binary does not expose
   the `fmt` subcommand, so the installed `cargo-fmt` companion was invoked
   directly; this is a command-invocation deviation in addition to the pinned
   Rust 1.85.1 availability limitation above.
 - `cargo bench -p outctl-engine --bench presentation`: passed; incremental
-  3,888,913-byte fixture, five renders, 190–206 ms optimized render range in
+  3,888,913-byte fixture, five renders, 169–217 ms optimized render range in
   the final benchmark run, bounded exposure, candidate retention, safe-small,
   explicit-mode, tiny-budget, private-spill, and spill-replacement assertions
   all passed. The bounded sanitizer regression streamed 32 MiB unterminated
   OSC/CSI input without retaining the sequence; handle regressions rendered
   trusted bytes after adversarial capture-root and spill-path replacement.
 - `uv sync --all-extras --dev`: passed.
-- `uv run pytest`: **220 passed in 30.31s** with the Cargo/Rust/GCC path
+- `uv run pytest`: **220 passed in 28.30s** with the Cargo/Rust/GCC path
   exported.
 - `uv run ruff check .`: **All checks passed!**
 - `uv run mypy src`: **Success: no issues found in 31 source files**.

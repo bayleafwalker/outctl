@@ -153,14 +153,14 @@ pub fn capture_command(
     options: &CaptureOptions,
     cancellation: Option<&AtomicBool>,
 ) -> Result<CaptureResult, CaptureError> {
-    let (result, _pinned_capture) = capture_command_pinned(options, cancellation)?;
+    let (result, _pinned_capture, _captures_root) = capture_command_pinned(options, cancellation)?;
     Ok(result)
 }
 
 fn capture_command_pinned(
     options: &CaptureOptions,
     cancellation: Option<&AtomicBool>,
-) -> Result<(CaptureResult, PrivateDir), CaptureError> {
+) -> Result<(CaptureResult, PrivateDir, PrivateDir), CaptureError> {
     validate_options(options)?;
     let command_started = Instant::now();
     let capture_id = capture_id();
@@ -446,7 +446,7 @@ fn capture_command_pinned(
         },
         presentation: None,
     };
-    Ok((result, spool.partial))
+    Ok((result, spool.partial, spool.captures_root))
 }
 
 /// Capture and render a command result using the native W4 presentation
@@ -476,7 +476,8 @@ pub fn capture_command_with_presentation(
                 .to_owned(),
         ));
     }
-    let (mut result, pinned_capture) = capture_command_pinned(options, cancellation)?;
+    let (mut result, pinned_capture, captures_root) =
+        capture_command_pinned(options, cancellation)?;
     let stdout = pinned_capture.open_file("stdout.raw").map_err(|source| {
         CaptureError::Presentation(Box::new(PresentationFailure {
             capture_id: result.capture_id.clone(),
@@ -522,7 +523,10 @@ pub fn capture_command_with_presentation(
         // These modes are intentionally not represented by a durable capture
         // reference.  Remove the host-local material before returning so a
         // process-local result cannot be mistaken for host persistence.
-        if let Err(source) = std::fs::remove_dir_all(&result.path) {
+        drop(stdout);
+        drop(stderr);
+        let cleanup = cleanup_ephemeral_capture(pinned_capture, captures_root, &result.capture_id);
+        if let Err(source) = cleanup {
             presentation.persistence.status = "cleanup-failed".to_owned();
             presentation.persistence.honest = false;
             return Err(CaptureError::Finalize {
@@ -535,6 +539,27 @@ pub fn capture_command_with_presentation(
     }
     result.presentation = Some(presentation);
     Ok(result)
+}
+
+fn cleanup_ephemeral_capture(
+    pinned_capture: PrivateDir,
+    captures_root: PrivateDir,
+    capture_id: &str,
+) -> io::Result<()> {
+    for name in ["stdout.raw", "stderr.raw", "events.ndjson", "manifest.json"] {
+        pinned_capture.remove_file(name)?;
+    }
+    pinned_capture.sync()?;
+    let current = captures_root.open_dir(capture_id)?;
+    if !pinned_capture.same_directory(&current)? {
+        return Err(io::Error::other(
+            "capture path was replaced before ephemeral cleanup",
+        ));
+    }
+    drop(current);
+    drop(pinned_capture);
+    captures_root.remove_dir(capture_id)?;
+    captures_root.sync()
 }
 
 fn validate_options(options: &CaptureOptions) -> Result<(), CaptureError> {
@@ -862,10 +887,11 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_command, capture_command_with_presentation, CaptureError, CaptureOptions,
-        MAX_CAPTURE_BYTES,
+        capture_command, capture_command_with_presentation, cleanup_ephemeral_capture,
+        CaptureError, CaptureOptions, MAX_CAPTURE_BYTES,
     };
     use crate::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
+    use crate::storage::PrivateDir;
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
@@ -1155,6 +1181,33 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, CaptureError::InvalidRequest(_)));
         assert!(!rejected_root.exists());
+    }
+
+    #[test]
+    fn ephemeral_cleanup_does_not_remove_replaced_capture_directory() {
+        let root = temporary_root("ephemeral-replacement");
+        let captures = PrivateDir::ensure(&root).unwrap();
+        let capture_id = "capture-replaced";
+        let capture = captures.create_dir(capture_id).unwrap();
+        for name in ["stdout.raw", "stderr.raw", "events.ndjson", "manifest.json"] {
+            capture.write_new(name, b"trusted").unwrap();
+        }
+        let moved = root.with_extension("moved");
+        fs::rename(root.join(capture_id), &moved).unwrap();
+        fs::create_dir(root.join(capture_id)).unwrap();
+
+        let error = cleanup_ephemeral_capture(capture, captures, capture_id).unwrap_err();
+        assert!(error.to_string().contains("replaced"));
+        assert!(root.join(capture_id).is_dir());
+        assert!(fs::read_dir(root.join(capture_id))
+            .unwrap()
+            .next()
+            .is_none());
+        assert!(fs::read_dir(&moved).unwrap().next().is_none());
+
+        fs::remove_dir(root.join(capture_id)).unwrap();
+        fs::remove_dir(root).unwrap();
+        fs::remove_dir(moved).unwrap();
     }
 
     #[test]

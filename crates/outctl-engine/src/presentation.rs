@@ -9,7 +9,7 @@ use crate::storage::PrivateDir;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -325,6 +325,8 @@ pub struct SpillBuffer {
     memory: Vec<u8>,
     spill: Option<File>,
     spill_root: Option<PathBuf>,
+    spill_parent: Option<PrivateDir>,
+    spill_name: Option<String>,
     spill_directory: Option<PrivateDir>,
     len: u64,
     max_bytes: Option<u64>,
@@ -345,6 +347,8 @@ impl SpillBuffer {
             memory: Vec::with_capacity(memory_limit.min(READ_BYTES)),
             spill: None,
             spill_root: spill_root.map(Path::to_path_buf),
+            spill_parent: None,
+            spill_name: None,
             spill_directory: None,
             len: 0,
             max_bytes: None,
@@ -388,10 +392,11 @@ impl SpillBuffer {
                     "spill root is required when the memory limit is exceeded",
                 )
             })?;
-            self.spill_directory = Some(PrivateDir::create_private_temp_dir(
-                &root,
-                "outctl-w4-spill",
-            )?);
+            let (parent, name, directory) =
+                PrivateDir::create_private_temp_dir(&root, "outctl-w4-spill")?;
+            self.spill_parent = Some(parent);
+            self.spill_name = Some(name);
+            self.spill_directory = Some(directory);
             let file = self
                 .spill_directory
                 .as_ref()
@@ -452,9 +457,20 @@ impl SpillBuffer {
     fn cleanup_spill_directory(&mut self) {
         if let Some(directory) = self.spill_directory.take() {
             let _ = directory.remove_file(SPILL_FILE_NAME);
-            let path = directory.display_path().to_path_buf();
-            drop(directory);
-            let _ = fs::remove_dir(path);
+            if let (Some(parent), Some(name)) = (self.spill_parent.take(), self.spill_name.take()) {
+                let matches = parent
+                    .try_open_dir(&name)
+                    .and_then(|candidate| {
+                        candidate
+                            .as_ref()
+                            .map_or(Ok(false), |candidate| directory.same_directory(candidate))
+                    })
+                    .unwrap_or(false);
+                drop(directory);
+                if matches {
+                    let _ = parent.remove_dir(&name);
+                }
+            }
         }
     }
 }
@@ -862,12 +878,16 @@ fn read_stream(
     let mut candidates = StreamingCandidates::new(options)?;
     let mut redactor = ExactRedactor::new(&options.exact_redaction_values);
     let mut sanitizer = ControlSanitizer::new();
+    let mut raw_lines = 0_u64;
     let mut buffer = [0_u8; READ_BYTES];
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
         }
+        raw_lines = raw_lines
+            .checked_add(buffer[..read].iter().filter(|byte| **byte == b'\n').count() as u64)
+            .ok_or_else(|| io::Error::other("raw line count overflow"))?;
         consume_transformed(
             &mut candidates,
             &mut redactor,
@@ -884,7 +904,7 @@ fn read_stream(
         stream: name.to_owned(),
         raw_bytes,
         normalized_bytes: candidates.normalized_bytes(),
-        raw_lines: candidates.normalized_lines(),
+        raw_lines,
         candidate_lines: candidates.candidate_lines(),
         redacted: redactor.redacted,
         normalized: sanitizer.normalized,
@@ -1340,7 +1360,7 @@ mod tests {
         render_capture_files, render_capture_files_from_handles,
         render_capture_files_from_handles_with_status, ControlSanitizer, PersistenceMode,
         PresentationMode, PresentationOptions, SpillBuffer, StreamingCandidates,
-        MAX_REDACTION_VALUES, SPILL_FILE_NAME,
+        MAX_REDACTION_VALUES,
     };
     use crate::storage::PrivateDir;
     use std::fs::{self, File};
@@ -1388,8 +1408,10 @@ mod tests {
             .path();
         fs::rename(&private_directory, &attacker_directory).unwrap();
         fs::create_dir(&private_directory).unwrap();
-        fs::write(private_directory.join(SPILL_FILE_NAME), b"attacker").unwrap();
         assert_eq!(buffer.read_prefix(7).unwrap(), b"trusted");
+        assert!(private_directory.is_dir());
+        assert!(fs::read_dir(&private_directory).unwrap().next().is_none());
+        assert!(fs::read_dir(&attacker_directory).unwrap().next().is_none());
         fs::remove_dir_all(directory).unwrap();
         fs::remove_dir_all(attacker_directory).unwrap();
     }
@@ -1591,6 +1613,27 @@ mod tests {
         assert_ne!(result.kind, "empty-success");
         assert!(result.body.unwrap().contains("command failed"));
         assert_eq!(result.savings.reason, "empty-command-failure");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn raw_line_count_is_not_derived_from_normalized_output() {
+        let directory = root("raw-lines");
+        fs::create_dir_all(&directory).unwrap();
+        let stdout = directory.join("stdout.raw");
+        let stderr = directory.join("stderr.raw");
+        fs::write(&stdout, b"first\rsecond\x1b]discarded\x07").unwrap();
+        fs::write(&stderr, b"").unwrap();
+        let result = render_capture_files(
+            &stdout,
+            &stderr,
+            "capture-raw-lines",
+            &PresentationOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.raw_lines, 0);
+        assert_eq!(result.streams[0].raw_lines, 0);
+        assert!(result.streams[0].normalized);
         fs::remove_dir_all(directory).unwrap();
     }
 

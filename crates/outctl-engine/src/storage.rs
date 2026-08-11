@@ -119,6 +119,17 @@ impl PrivateDir {
         }
     }
 
+    pub(crate) fn remove_dir(&self, name: &str) -> io::Result<()> {
+        let name = c_name(name)?;
+        let result =
+            unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+        if result == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
     pub(crate) fn open_file(&self, name: &str) -> io::Result<File> {
         validate_name(name)?;
         let file = openat_file(self.file.as_raw_fd(), name, libc::O_RDONLY, 0)?;
@@ -144,6 +155,13 @@ impl PrivateDir {
         self.file.sync_all()
     }
 
+    pub(crate) fn same_directory(&self, other: &Self) -> io::Result<bool> {
+        let left = self.file.metadata()?;
+        let right = other.file.metadata()?;
+        use std::os::unix::fs::MetadataExt;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+
     pub(crate) fn names(&self) -> io::Result<Vec<OsString>> {
         let proc_path = PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()));
         fs::read_dir(proc_path)?
@@ -151,7 +169,10 @@ impl PrivateDir {
             .collect()
     }
 
-    pub(crate) fn create_private_temp_dir(parent_path: &Path, prefix: &str) -> io::Result<Self> {
+    pub(crate) fn create_private_temp_dir(
+        parent_path: &Path,
+        prefix: &str,
+    ) -> io::Result<(Self, String, Self)> {
         let parent = Self::open(parent_path)?;
         let mut random = File::open("/dev/urandom")?;
         for _ in 0..32 {
@@ -163,7 +184,7 @@ impl PrivateDir {
                 .collect::<String>();
             let name = format!("{prefix}-{suffix}");
             match parent.create_dir(&name) {
-                Ok(directory) => return Ok(directory),
+                Ok(directory) => return Ok((parent, name, directory)),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
