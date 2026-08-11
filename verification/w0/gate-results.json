@@ -1,0 +1,18 @@
+{
+  "schema_version": "vuoro.outctl.w0-gate-results/v1",
+  "roadmap_commit": "1c8d6aeaa6f3526c50cb3626d6d7e301930f2b7d",
+  "normative_w0_gate_status": "passed",
+  "checks": [
+    {"command": "uv sync --all-extras --dev", "status": "passed", "toolchain": "cached uv environment"},
+    {"command": "uv run pytest", "status": "passed", "result": "175 passed"},
+    {"command": "uv run ruff check .", "status": "passed"},
+    {"command": "uv run mypy src", "status": "passed", "result": "23 source files"},
+    {"command": "uv build", "status": "passed", "artifacts": "sdist and wheel"},
+    {"command": "pytest W0 targeted set", "status": "passed", "result": "64 passed, 1 skipped"},
+    {"command": "validate_verification_artifacts.py --root .", "status": "passed", "result": "manifest valid; no AgentOps context/result artifacts"},
+    {"command": "fresh isolated wheel environment", "status": "passed", "result": "outctl wheel installed with cached runtime dependencies"},
+    {"command": "verification/w0_baseline.py", "status": "passed", "result": "benchmark, startup, profiles, and raw-free metadata regenerated"}
+  ],
+  "raw_free": true,
+  "raw_output_in_report": false
+}

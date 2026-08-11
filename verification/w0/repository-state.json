@@ -1,0 +1,32 @@
+{
+  "schema_version": "vuoro.outctl.w0-repository-state/v1",
+  "baseline_commit": "156e8e10af041ac5b35c8d5dac0e2adbcbcec4ab",
+  "baseline_branch": "codex/outctl-2132",
+  "baseline_upstream": "origin/main",
+  "baseline_worktree_clean": true,
+  "baseline_remote_head": "156e8e10af041ac5b35c8d5dac0e2adbcbcec4ab",
+  "worktree_base": "origin/main",
+  "worktree_paths_recorded": true,
+  "worktrees": [
+    {"path": "/projects/dev/outctl", "head": "156e8e10af041ac5b35c8d5dac0e2adbcbcec4ab", "state": "branch:main"},
+    {"path": "/projects/dev/_projects/vuoro-dispatch-ready/.workers/outctl-2132", "head": "156e8e10af041ac5b35c8d5dac0e2adbcbcec4ab", "state": "branch:codex/outctl-2132"},
+    {"path": "/projects/dev/_projects/vuoro-dispatch-ready/members/outctl", "head": "156e8e10af041ac5b35c8d5dac0e2adbcbcec4ab", "state": "branch:agentops-project"},
+    {"path": "/projects/dev/_projects/vuoro-outctl-ready/members/outctl", "head": "8ea7060a61d1590583d2bed7e6bfd323d674fbf0", "state": "detached"},
+    {"path": "/tmp/outctl-devbox-exec-jsonl-harness", "head": "9b4a96f997c1d81a4f53d0e4186637dfcd04bf89", "state": "branch:devbox-exec-jsonl-harness"},
+    {"path": "/tmp/outctl-devbox-pilot-implementation", "head": "abb1c046275360bdf2a35ff56b192e4a28d6779e", "state": "branch:devbox-pilot-implementation"},
+    {"path": "/tmp/outctl-k3-coordination", "head": "8ea7060a61d1590583d2bed7e6bfd323d674fbf0", "state": "detached"},
+    {"path": "/tmp/outctl-kimi-wave1", "head": "1d71eb5c4e62519b2327cb5943d0c3915c643164", "state": "detached"},
+    {"path": "/tmp/outctl-kimi-wave2", "head": "11e5dbbf5c718457da5bd742a3d58b813fd678e0", "state": "detached"},
+    {"path": "/tmp/outctl-kimi-wave2-remediation", "head": "c472d1cf54b33c38022eeb8d83a7c52fa5147ce4", "state": "detached"},
+    {"path": "/tmp/outctl-wave3-projection", "head": "07331cec023d5c17e4ab4db08556c0c5d107ec58", "state": "detached"},
+    {"path": "/tmp/outctl-workstation-pilot", "head": "fa991d48c39e4ae50831bc4a5e086d7c3569dcb7", "state": "branch:review/workstation-pilot-hardening"}
+  ],
+  "roadmap_provenance_commit": "1c8d6aeaa6f3526c50cb3626d6d7e301930f2b7d",
+  "roadmap_materialized_in_worktree": false,
+  "applicable_risk_surfaces": [
+    "process-semantics",
+    "evidence-integrity-and-redaction"
+  ],
+  "raw_free": true,
+  "raw_output_in_report": false
+}

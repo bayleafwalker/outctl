@@ -1,0 +1,229 @@
+{
+  "host": "devbox",
+  "platform": "Linux-6.18.40-x86_64-with-glibc2.42",
+  "probes": {
+    "direct-source": {
+      "command": [
+        "/tmp/outctl-w0-wheel-env-final/bin/python",
+        "-m",
+        "outctl.cli",
+        "--help"
+      ],
+      "fresh_processes": 7,
+      "syscalls": {
+        "calls_max": 3723,
+        "calls_median": 3722,
+        "calls_min": 3722,
+        "errors_max": 477,
+        "samples": [
+          {
+            "syscall_calls": 3723,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.015165999999999999
+          },
+          {
+            "syscall_calls": 3722,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.018333000000000006
+          },
+          {
+            "syscall_calls": 3723,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.018565000000000005
+          },
+          {
+            "syscall_calls": 3723,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.01601600000000001
+          },
+          {
+            "syscall_calls": 3722,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.016885000000000008
+          },
+          {
+            "syscall_calls": 3722,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.010938
+          },
+          {
+            "syscall_calls": 3722,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.017190999999999994
+          }
+        ],
+        "status": "available"
+      },
+      "wall_time_ms": {
+        "max": 609.992,
+        "min": 502.905,
+        "p50": 534.718,
+        "p95": 596.315,
+        "p99": 607.257,
+        "samples": [
+          502.905,
+          609.992,
+          564.402,
+          534.718,
+          554.902,
+          532.042,
+          524.805
+        ]
+      }
+    },
+    "installed": {
+      "command": [
+        "/tmp/outctl-w0-wheel-env-final/bin/python",
+        "-m",
+        "outctl.cli",
+        "--help"
+      ],
+      "fresh_processes": 7,
+      "syscalls": {
+        "calls_max": 3626,
+        "calls_median": 3626,
+        "calls_min": 3625,
+        "errors_max": 477,
+        "samples": [
+          {
+            "syscall_calls": 3625,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.018927000000000003
+          },
+          {
+            "syscall_calls": 3626,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.017679
+          },
+          {
+            "syscall_calls": 3626,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.018073
+          },
+          {
+            "syscall_calls": 3625,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.016305000000000004
+          },
+          {
+            "syscall_calls": 3626,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.012581000000000005
+          },
+          {
+            "syscall_calls": 3626,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.016246
+          },
+          {
+            "syscall_calls": 3626,
+            "syscall_errors": 477,
+            "syscall_seconds": 0.011263999999999998
+          }
+        ],
+        "status": "available"
+      },
+      "wall_time_ms": {
+        "max": 561.867,
+        "min": 455.457,
+        "p50": 539.425,
+        "p95": 558.947,
+        "p99": 561.283,
+        "samples": [
+          552.135,
+          561.867,
+          544.857,
+          499.636,
+          455.457,
+          536.93,
+          539.425
+        ]
+      }
+    },
+    "uv-run": {
+      "command": [
+        "uv",
+        "run",
+        "--offline",
+        "--no-project",
+        "--python",
+        "/tmp/outctl-w0-wheel-env-final/bin/python",
+        "python",
+        "-m",
+        "outctl.cli",
+        "--help"
+      ],
+      "fresh_processes": 7,
+      "syscalls": {
+        "calls_max": 4178,
+        "calls_median": 4172,
+        "calls_min": 4171,
+        "errors_max": 591,
+        "samples": [
+          {
+            "syscall_calls": 4175,
+            "syscall_errors": 590,
+            "syscall_seconds": 0.20950999999999995
+          },
+          {
+            "syscall_calls": 4178,
+            "syscall_errors": 591,
+            "syscall_seconds": 0.25664900000000007
+          },
+          {
+            "syscall_calls": 4171,
+            "syscall_errors": 589,
+            "syscall_seconds": 0.215894
+          },
+          {
+            "syscall_calls": 4171,
+            "syscall_errors": 588,
+            "syscall_seconds": 0.28452799999999995
+          },
+          {
+            "syscall_calls": 4172,
+            "syscall_errors": 589,
+            "syscall_seconds": 0.2851229999999999
+          },
+          {
+            "syscall_calls": 4171,
+            "syscall_errors": 588,
+            "syscall_seconds": 0.20674999999999996
+          },
+          {
+            "syscall_calls": 4175,
+            "syscall_errors": 590,
+            "syscall_seconds": 0.2608710000000001
+          }
+        ],
+        "status": "available"
+      },
+      "wall_time_ms": {
+        "max": 608.739,
+        "min": 541.422,
+        "p50": 581.789,
+        "p95": 605.762,
+        "p99": 608.144,
+        "samples": [
+          596.988,
+          553.28,
+          541.422,
+          581.789,
+          608.739,
+          598.815,
+          563.74
+        ]
+      }
+    }
+  },
+  "python": "3.12.13",
+  "schema_version": "vuoro.outctl.w0-startup-syscalls/v1",
+  "strace": "/run/current-system/sw/bin/strace",
+  "syscall_parser": {
+    "excluded_rows": [
+      "total"
+    ],
+    "format": "strace -c summary",
+    "seconds_column": "seconds"
+  }
+}

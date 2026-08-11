@@ -1,0 +1,334 @@
+{
+  "classification": "local-only",
+  "host": "devbox",
+  "manifest_references": [
+    {
+      "capture_id": "960089c186a147cdb282d07280528ff4",
+      "label": "large-middle-marker",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/960089c186a147cdb282d07280528ff4/manifest.json",
+      "manifest_sha256": "sha256:43faf5594328752caa58eb9642079a5a30877521b7c88b50e0cf1b9260eb41ce",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "7988c8fbc6294c0685dd3e08dcd194e4",
+      "label": "mixed-streams",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/7988c8fbc6294c0685dd3e08dcd194e4/manifest.json",
+      "manifest_sha256": "sha256:bd702ae3a4341fb7f1c2f0b0ac4677e09aa114b7090128c4aa2e5cd440c77ca7",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "d54997efa11f4c86bf51806116fdd922",
+      "label": "failure-in-noise",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/d54997efa11f4c86bf51806116fdd922/manifest.json",
+      "manifest_sha256": "sha256:aeca4f842c5299926e8040173b2ccb4142cbaf96145ec79b22c8b21938fa4cfb",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "9142648d765842c28223a5e65542f738",
+      "label": "registered-secret",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/9142648d765842c28223a5e65542f738/manifest.json",
+      "manifest_sha256": "sha256:51e3e2bacc90e807cedde49150a87311baf9e0572b9b224e7df2af2cb73caf95",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "fc8d3997d87740a19bd8906f828881cd",
+      "label": "direct-source/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/fc8d3997d87740a19bd8906f828881cd/manifest.json",
+      "manifest_sha256": "ff01eb9e9c10bc8eaa82cea17ada0f76b8912b12ebc812389eea3d4ed90ebb17",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "46a54451d7244dd8a9ffd105432df049",
+      "label": "direct-source/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/46a54451d7244dd8a9ffd105432df049/manifest.json",
+      "manifest_sha256": "0c90699c4d49149d4679ba1b343c7794fb6eadbe93b68365281e01e1d20ce4ed",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "d6c2001abf0e4d7eb7febe4b4e81d64d",
+      "label": "direct-source/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/d6c2001abf0e4d7eb7febe4b4e81d64d/manifest.json",
+      "manifest_sha256": "58ca16274f059d53c68699c6f49f4f834d357514a27a655c6df30e82d04be679",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "8a262a1ffc4e4a3f9631e93ca8288f75",
+      "label": "direct-source/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/8a262a1ffc4e4a3f9631e93ca8288f75/manifest.json",
+      "manifest_sha256": "d48531ed54339b42310fa426647cdde8ed8e942c081835d88bbb3b7c555f025b",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "6d3e03058efc49cdbef0f56e54858c77",
+      "label": "direct-source/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/6d3e03058efc49cdbef0f56e54858c77/manifest.json",
+      "manifest_sha256": "88189be01041d31f49641ee3e6183793cf4a22ac437f95e7c49e5c8417a645fd",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "30d3870813c44f0a8d480f444550b164",
+      "label": "direct-source/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/30d3870813c44f0a8d480f444550b164/manifest.json",
+      "manifest_sha256": "bf87e6e71bfc57b7179c9bd1eb396a67a3cc9f3f9c047b0a2cdd22737aef8ae2",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "b9a4ceaa6c6e4193b1e364bb37d68f1b",
+      "label": "direct-source/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/b9a4ceaa6c6e4193b1e364bb37d68f1b/manifest.json",
+      "manifest_sha256": "a1e41dec6910aabe28c5bc2d61fcd79edbd98253dbb62b8c0e90bc298eb40449",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "273267585e5e480cbe112a1cc7145432",
+      "label": "direct-source/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/273267585e5e480cbe112a1cc7145432/manifest.json",
+      "manifest_sha256": "59e5bf4ba44344b31da898861d9dd2c3c2d8b38d0ff7fc2ba40a6b2e9dc3ee03",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "ee3a88b89d9a4be8a6851c027d217bbd",
+      "label": "direct-source/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/ee3a88b89d9a4be8a6851c027d217bbd/manifest.json",
+      "manifest_sha256": "090d503e83e3b0bd97f856634fc9e7339116d34e7d3926f703e6d07e46e37eff",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "9fb7a2d4dae243e7b0a3882ce1a4e40c",
+      "label": "direct-source/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/9fb7a2d4dae243e7b0a3882ce1a4e40c/manifest.json",
+      "manifest_sha256": "f45f9f246ae9c3650694a808f7ddb2ed40d5eeb24500a1b517d7c25563b51d5c",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "16209afa8c5342a68b3b82c43e399f84",
+      "label": "direct-source/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/16209afa8c5342a68b3b82c43e399f84/manifest.json",
+      "manifest_sha256": "4a564428f413c5450fad8883f21d7968919e807eded920fe3f605b29510f3e67",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "040a000f695040eb86853064eecae0bb",
+      "label": "direct-source/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/040a000f695040eb86853064eecae0bb/manifest.json",
+      "manifest_sha256": "6ec7740bc0e052629210d28baec2f5aecf178a107b1cda576d69126b3c284aa5",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "ed2adff156b24f1ea86e27711d6bcf35",
+      "label": "direct-source/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/ed2adff156b24f1ea86e27711d6bcf35/manifest.json",
+      "manifest_sha256": "6f6b06e2ea9a61cc7243f9c361ec270e4c5eb49be13bf471158829b462c8f201",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "b7d257debbdf45b881be9d68e3d4f30f",
+      "label": "direct-source/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/b7d257debbdf45b881be9d68e3d4f30f/manifest.json",
+      "manifest_sha256": "a63f1a42a2f7747b1f8f86064c1d0fe0497aea9cfa991ea889eb02c4b3e18e7d",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "acee8b682c9e4f46aa570f67b70aee72",
+      "label": "installed/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/acee8b682c9e4f46aa570f67b70aee72/manifest.json",
+      "manifest_sha256": "b985c38602d5f6cf4c2e79dd67eb7fe5000f1f30c2539f056841ac3df1936528",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "3df93edb2d084528b69baa69c9fe5843",
+      "label": "installed/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/3df93edb2d084528b69baa69c9fe5843/manifest.json",
+      "manifest_sha256": "75010a68fa8a8dca7d55896f1db82b0fc168d3c6f5eeb1854dbae2aa873c7383",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "ade42e7b05ce4eaebf3e6c21ef1cbedf",
+      "label": "installed/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/ade42e7b05ce4eaebf3e6c21ef1cbedf/manifest.json",
+      "manifest_sha256": "0ac49879db9871b3e0658ce954e7bebfef1721a9a049b995b6ec446543f5aa8d",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "fde242610cc045bdadc26a16742076cd",
+      "label": "installed/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/fde242610cc045bdadc26a16742076cd/manifest.json",
+      "manifest_sha256": "d4297677366f961dee719643378add80aaaff02ec5d0ae01c674bb138396db3b",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "a90f326f9099480985916c60048bf1c4",
+      "label": "installed/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/a90f326f9099480985916c60048bf1c4/manifest.json",
+      "manifest_sha256": "41d54a7339c2e1bc31510f0ea01f46b25f0ea53394f1da8d84e0d5850977ef55",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "210fbb738a454269a0b0f5c6973fdd66",
+      "label": "installed/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/210fbb738a454269a0b0f5c6973fdd66/manifest.json",
+      "manifest_sha256": "a88346d1f5ff64110bcf377e0a3493f98c025fe860e493195fbe109480c763ab",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "96dbda90e3cc4dacaccf489a42eacf8d",
+      "label": "installed/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/96dbda90e3cc4dacaccf489a42eacf8d/manifest.json",
+      "manifest_sha256": "03d7a4c0a85ebbb079af6748dca019f5669cbcfaec55bf63e8354b3b2b103b7b",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "74165f515a1f47f2aa58f0041d859d8c",
+      "label": "installed/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/74165f515a1f47f2aa58f0041d859d8c/manifest.json",
+      "manifest_sha256": "5bbf38dcb30bae8076f001b313bb3f353561d56f9c0cbd126108d553e90b4191",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "a37a03b241684acb9df14d06315d365e",
+      "label": "installed/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/a37a03b241684acb9df14d06315d365e/manifest.json",
+      "manifest_sha256": "7a036b1a467d5f4d1167f83aa53dc3cbc0a2e1ca0eadc4238230708ccafb4448",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "8db13db476194ffbbf3911ccc6616622",
+      "label": "installed/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/8db13db476194ffbbf3911ccc6616622/manifest.json",
+      "manifest_sha256": "deb001267ecbf00b5da78c9dcc7f0defc77d4480af1c7a69e83a9cf1c34c8954",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "e531234fffb24444a56bf2f54df30133",
+      "label": "installed/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/e531234fffb24444a56bf2f54df30133/manifest.json",
+      "manifest_sha256": "967523062e280da161d383d00222f03d3ea320e93a3953a973791428e9ea0024",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "61051617e5394e41915084793ef4dbcc",
+      "label": "installed/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/61051617e5394e41915084793ef4dbcc/manifest.json",
+      "manifest_sha256": "d3e60ebe6971ad229149d771f8a5aabd6b7c62ef40f9e28a08e9b259528bd0d0",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "fee2d2c3fdb34270b4356e84f87fca02",
+      "label": "installed/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/fee2d2c3fdb34270b4356e84f87fca02/manifest.json",
+      "manifest_sha256": "a19b7da3934a232c9e2b1be2b8e93f07384fe139c362d98be78f9a54551f46d7",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "98710b65738844169929e30430299282",
+      "label": "installed/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/98710b65738844169929e30430299282/manifest.json",
+      "manifest_sha256": "28b5c30f8a6e904104597cb67235ee0cb51e57afdae08de59803d0e2a54fe0a7",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "f075f5f249e14b89a9c806e93edcfe44",
+      "label": "uv-run/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/f075f5f249e14b89a9c806e93edcfe44/manifest.json",
+      "manifest_sha256": "b25edde4e4a86befba5136ae080f58dd4d003295c892fc7f8cf850500325870c",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "2bb0f369e54b4552bb5820b844e3aa58",
+      "label": "uv-run/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/2bb0f369e54b4552bb5820b844e3aa58/manifest.json",
+      "manifest_sha256": "8bc06c51672129cc219f642b90fc98b76e8b017e60bc8b95b89025ff36a13c4e",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "7ae67610cb6d4e24a0b63c1a13fc4edb",
+      "label": "uv-run/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/7ae67610cb6d4e24a0b63c1a13fc4edb/manifest.json",
+      "manifest_sha256": "e8614c1c66bdf57abfaf9532c2fbd47f0e166df21579b40922215e6d370debfb",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "62a7467dce9545a9b685f32c5a4e02b2",
+      "label": "uv-run/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/62a7467dce9545a9b685f32c5a4e02b2/manifest.json",
+      "manifest_sha256": "9ee3c27c0a3babb215749d8724cc2ad1bd115326fc89897a6d14c239f73b0cc7",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "32f4e96dd9c5441e8311b5012a4397cd",
+      "label": "uv-run/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/32f4e96dd9c5441e8311b5012a4397cd/manifest.json",
+      "manifest_sha256": "6f43d0c85ca8a153dfeff01633fbecd10369ca63a56447989708229d59bbab27",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "7b41556bb7bb4fd7b2aff662593d6c45",
+      "label": "uv-run/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/7b41556bb7bb4fd7b2aff662593d6c45/manifest.json",
+      "manifest_sha256": "4744b64c45a50ac1bb885fc72ad9f4aedd578a760c2e4936ad657a32250b96a7",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "7796d6a521b141068f6efba2bc832bb3",
+      "label": "uv-run/empty",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/7796d6a521b141068f6efba2bc832bb3/manifest.json",
+      "manifest_sha256": "dd7ab940d416e6eec153ce8136d8e2d031b87cb639e4401138e2557f52570e4c",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "39ea7f8641d94e6aa892d1c6bfbfa53f",
+      "label": "uv-run/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/39ea7f8641d94e6aa892d1c6bfbfa53f/manifest.json",
+      "manifest_sha256": "67c2af591b33ceb6db52ac73695003ac3dc8b887d24767d59dfc12a370b54f8f",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "726d319ef8994346a8b3e23288ba6108",
+      "label": "uv-run/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/726d319ef8994346a8b3e23288ba6108/manifest.json",
+      "manifest_sha256": "031441a4d120500036befc8279c3882af6acb5543190cf36b756d4b9e7d9b18d",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "3a068caeddc44afe8b18da9a0feebb89",
+      "label": "uv-run/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/3a068caeddc44afe8b18da9a0feebb89/manifest.json",
+      "manifest_sha256": "6366966e19b2ad12ea9603fea9352260ced628cadeba2fa54d1202e47f091fa0",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "635d1bb7c31f42778b2ed1e887dc3e26",
+      "label": "uv-run/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/635d1bb7c31f42778b2ed1e887dc3e26/manifest.json",
+      "manifest_sha256": "0ccb1fa0049043caef209e9c944619da6f077d5ab7a02901ec52506411df4df0",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "aba673dc70c04eebb39483ff249a751e",
+      "label": "uv-run/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/aba673dc70c04eebb39483ff249a751e/manifest.json",
+      "manifest_sha256": "ba445ce21c6add720d7f60b2dff3e9098496767e77b722495452cd589571eb99",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "8a0fc715312a47f5928b55502c596395",
+      "label": "uv-run/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/8a0fc715312a47f5928b55502c596395/manifest.json",
+      "manifest_sha256": "498ff1c9de14e08768f72df55496c6f263ecea44fc56276ea8dd41c92e913ccb",
+      "raw_streams": "host-local; not included in Git"
+    },
+    {
+      "capture_id": "2e5e4b3c303b499d92eb3c637ba57df7",
+      "label": "uv-run/one-line",
+      "manifest": "/tmp/outctl-w0-captures-final/captures/2e5e4b3c303b499d92eb3c637ba57df7/manifest.json",
+      "manifest_sha256": "7b3157c2004ee42c5428ff6b15788dbbc392308c9af568b01d709ce1ee1da770",
+      "raw_streams": "host-local; not included in Git"
+    }
+  ],
+  "portable": false,
+  "raw_free": true,
+  "raw_output_in_report": false,
+  "schema_version": "vuoro.outctl.w0-host-local-references/v1",
+  "spool_mode": "0o700",
+  "spool_root": "/tmp/outctl-w0-captures-final"
+}

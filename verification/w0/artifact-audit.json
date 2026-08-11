@@ -1,0 +1,69 @@
+{
+  "schema_version": "vuoro.outctl.w0-artifact-audit/v1",
+  "roadmap_commit": "1c8d6aeaa6f3526c50cb3626d6d7e301930f2b7d",
+  "worktree_base": "origin/main",
+  "runtime_behavior_changes": false,
+  "raw_operational_data_in_git": false,
+  "artifacts": [
+    {
+      "path": "docs/W0_BASELINE.md",
+      "authorized_by": "W0 publish baseline reports",
+      "decision": "retain",
+      "raw_free": true
+    },
+    {
+      "path": "verification/w0_baseline.py",
+      "authorized_by": "W0 benchmark and report reproduction",
+      "decision": "retain",
+      "raw_free": true
+    },
+    {
+      "path": "verification/w0/README.md",
+      "authorized_by": "W0 baseline report index",
+      "decision": "retain",
+      "raw_free": true
+    },
+    {
+      "path": "verification/w0/baseline-report.json",
+      "authorized_by": "W0 baseline report",
+      "decision": "retain",
+      "raw_free": true
+    },
+    {
+      "path": "verification/w0/golden-metadata.json",
+      "authorized_by": "W0 raw-free golden metadata",
+      "decision": "retain",
+      "raw_free": true
+    },
+    {
+      "path": "verification/w0/host-local-references.json",
+      "authorized_by": "W0 local-only raw fixture references",
+      "decision": "retain",
+      "raw_free": true
+    },
+    {
+      "path": "verification/w0/repository-state.json",
+      "authorized_by": "W0 HEAD/status/worktree record",
+      "decision": "retain",
+      "raw_free": true
+    },
+    {
+      "path": "verification/w0/startup-syscalls.json",
+      "authorized_by": "W0 startup and syscall baseline report",
+      "decision": "retain",
+      "raw_free": true
+    },
+    {
+      "path": "verification/w0/artifact-audit.json",
+      "authorized_by": "requested W0 artifact audit",
+      "decision": "retain",
+      "raw_free": true
+    },
+    {
+      "path": "verification/w0/gate-results.json",
+      "authorized_by": "W0 baseline gate report",
+      "decision": "retain",
+      "raw_free": true
+    }
+  ]
+}
