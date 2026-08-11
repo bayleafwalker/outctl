@@ -1,3 +1,6 @@
+use crate::presentation::{
+    render_capture_files, PersistenceMode, PresentationOptions, PresentationResult,
+};
 use crate::storage::{capture_id, rename_entry, PrivateDir, CHUNK_BYTES};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -65,6 +68,8 @@ pub struct CaptureResult {
     pub event_sha256: String,
     pub event_count: u64,
     pub timings: CaptureTiming,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<PresentationResult>,
 }
 
 #[derive(Debug)]
@@ -413,7 +418,68 @@ pub fn capture_command(
             finalize_ms,
             drain_grace_exhausted,
         },
+        presentation: None,
     })
+}
+
+/// Capture and render a command result using the native W4 presentation
+/// boundary.  The existing `capture_command` remains the compatibility API;
+/// callers that do not opt into W4 continue to receive the W3 capture only.
+pub fn capture_command_with_presentation(
+    options: &CaptureOptions,
+    presentation_options: &PresentationOptions,
+    cancellation: Option<&AtomicBool>,
+) -> Result<CaptureResult, CaptureError> {
+    presentation_options
+        .validate()
+        .map_err(|error| CaptureError::InvalidRequest(error.to_string()))?;
+    if options.required_capture
+        && matches!(
+            presentation_options.persistence,
+            PersistenceMode::MemoryOnly | PersistenceMode::ProcessLocal
+        )
+    {
+        return Err(CaptureError::InvalidRequest(
+            "required capture cannot use memory-only or process-local persistence".to_owned(),
+        ));
+    }
+    if presentation_options.persistence == PersistenceMode::Replicated {
+        return Err(CaptureError::InvalidRequest(
+            "replicated persistence requires a configured replica backend; command not started"
+                .to_owned(),
+        ));
+    }
+    let mut result = capture_command(options, cancellation)?;
+    let stdout = result.path.join("stdout.raw");
+    let stderr = result.path.join("stderr.raw");
+    let mut presentation =
+        render_capture_files(&stdout, &stderr, &result.capture_id, presentation_options).map_err(
+            |source| CaptureError::Finalize {
+                capture_id: result.capture_id.clone(),
+                path: result.path.clone(),
+                source,
+            },
+        )?;
+    if matches!(
+        presentation_options.persistence,
+        PersistenceMode::MemoryOnly | PersistenceMode::ProcessLocal
+    ) {
+        // These modes are intentionally not represented by a durable capture
+        // reference.  Remove the host-local material before returning so a
+        // process-local result cannot be mistaken for host persistence.
+        if let Err(source) = std::fs::remove_dir_all(&result.path) {
+            presentation.persistence.status = "cleanup-failed".to_owned();
+            presentation.persistence.honest = false;
+            return Err(CaptureError::Finalize {
+                capture_id: result.capture_id.clone(),
+                path: result.path.clone(),
+                source,
+            });
+        }
+        result.path = PathBuf::new();
+    }
+    result.presentation = Some(presentation);
+    Ok(result)
 }
 
 fn validate_options(options: &CaptureOptions) -> Result<(), CaptureError> {
@@ -740,7 +806,11 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{capture_command, CaptureError, CaptureOptions, MAX_CAPTURE_BYTES};
+    use super::{
+        capture_command, capture_command_with_presentation, CaptureError, CaptureOptions,
+        MAX_CAPTURE_BYTES,
+    };
+    use crate::presentation::{PersistenceMode, PresentationOptions};
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
@@ -843,6 +913,77 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!rejected_root.exists());
+    }
+
+    #[test]
+    fn ephemeral_persistence_is_explicit_and_leaves_no_capture_reference() {
+        let root = temporary_root("ephemeral");
+        let result = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                persistence: PersistenceMode::ProcessLocal,
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(result.path.as_os_str().is_empty());
+        let presentation = result.presentation.unwrap();
+        assert_eq!(presentation.persistence.durability, "none");
+        assert_eq!(presentation.persistence.reference, None);
+        assert!(presentation.persistence.honest);
+        assert!(!root.join("captures").join(&result.capture_id).exists());
+        fs::remove_dir_all(root).unwrap();
+
+        let required_root = temporary_root("required-ephemeral");
+        let error = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: required_root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: true,
+            },
+            &PresentationOptions {
+                persistence: PersistenceMode::MemoryOnly,
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!required_root.exists());
+
+        let rejected_root = temporary_root("replica-unavailable");
+        let error = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: rejected_root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                persistence: PersistenceMode::Replicated,
+                ..PresentationOptions::default()
             },
             None,
         )
