@@ -130,6 +130,27 @@ def test_policy_snapshot_rejects_trust_capture_and_cache_contradictions() -> Non
     restricted_unredacted["sinks"][1]["disclosure"] = "safe-unredacted"  # type: ignore[index]
     _assert_invalid("policy-snapshot.schema.json", restricted_unredacted)
 
+    sanitized_without_redaction = deepcopy(base)
+    sanitized_without_redaction["sinks"][1]["redaction_required"] = False  # type: ignore[index]
+    _assert_invalid("policy-snapshot.schema.json", sanitized_without_redaction)
+
+    unsupported_sink = deepcopy(base)
+    unsupported_sink["sinks"][0]["name"] = "telemetry"  # type: ignore[index]
+    _assert_invalid("policy-snapshot.schema.json", unsupported_sink)
+
+    trust_widening = deepcopy(base)
+    trust_widening["session"]["trust_domain"] = "restricted"  # type: ignore[index]
+    trust_widening["session"]["commissioned"] = False  # type: ignore[index]
+    _assert_invalid("policy-snapshot.schema.json", trust_widening)
+
+    weak_trusted_capture = deepcopy(base)
+    weak_trusted_capture["capture"] = {  # type: ignore[assignment]
+        "commitment": "process-local",
+        "durability": "none",
+        "required": False,
+    }
+    _assert_invalid("policy-snapshot.schema.json", weak_trusted_capture)
+
 
 def test_results_reject_cross_outcome_status_states() -> None:
     bypass = _example("run-result.bypassed.json")

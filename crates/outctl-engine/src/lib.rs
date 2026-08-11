@@ -1,6 +1,7 @@
 //! Native Linux command capture and v1-compatible evidence reads.
 
 pub mod capture;
+pub mod policy;
 pub mod presentation;
 pub mod retrieval;
 mod storage;
@@ -11,12 +12,12 @@ use outctl_contracts::{
     ENGINE_CAPABILITIES_SCHEMA_VERSION,
 };
 
-pub const ENGINE_ID: &str = "rust-w4-presentation";
+pub const ENGINE_ID: &str = "rust-w5-policy";
 
 /// The native package version is also the reported engine version.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Return the capabilities implemented by the W4 native process/capture path.
+/// Return the capabilities implemented by the W5 native policy/capture path.
 pub fn capabilities() -> EngineCapabilities {
     EngineCapabilities {
         schema_version: ENGINE_CAPABILITIES_SCHEMA_VERSION.to_owned(),
@@ -26,10 +27,11 @@ pub fn capabilities() -> EngineCapabilities {
             platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         },
         contract_versions: ContractVersions {
-            // W3 still does not consume the v2 run or policy contracts. It
-            // does read Python v1 captures without claiming to write v1.
-            run_request: Vec::new(),
-            policy_snapshot: Vec::new(),
+            // W5 evaluates these contracts through the native library. The
+            // structured capture result is not yet a v2 RunResult writer, so
+            // that family stays unadvertised.
+            run_request: vec!["v2".to_owned()],
+            policy_snapshot: vec!["v2".to_owned()],
             run_result: Vec::new(),
             capture_manifest: vec!["v1alpha1".to_owned()],
         },
@@ -65,8 +67,8 @@ mod tests {
         assert!(!value.features.stdin);
         assert!(value.features.retrieval);
         assert!(value.features.one_version_back_read);
-        assert!(value.contract_versions.run_request.is_empty());
-        assert!(value.contract_versions.policy_snapshot.is_empty());
+        assert_eq!(value.contract_versions.run_request, ["v2"]);
+        assert_eq!(value.contract_versions.policy_snapshot, ["v2"]);
         assert!(value.contract_versions.run_result.is_empty());
         assert_eq!(value.contract_versions.capture_manifest, ["v1alpha1"]);
         assert_eq!(value.limits.max_capture_bytes, MAX_CAPTURE_BYTES);

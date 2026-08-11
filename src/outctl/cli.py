@@ -22,6 +22,12 @@ from outctl.adapter import (
 from outctl.benchmark import benchmark, rollback_check
 from outctl.capture import recover_partials
 from outctl.contracts import ContractValidationError, validate_contract
+from outctl.control import (
+    commissioning_context_from_dict,
+    compile_policy_source,
+    explain_policy,
+    lint_policy_source,
+)
 from outctl.enablement import EnablementEvidenceError, evaluate_enablement
 from outctl.enforcement import (
     EnforcementError,
@@ -183,6 +189,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     enforcement_compile.add_argument("policy", type=Path)
     enforcement_compile.add_argument("observation", type=Path)
+    policy = commands.add_parser("policy", help="compile and inspect W5 trust policy")
+    policy_commands = policy.add_subparsers(dest="policy_command", required=True)
+    for name in ("lint", "explain"):
+        policy_command = policy_commands.add_parser(
+            name, help=f"{name} a root-confined W5 policy source"
+        )
+        policy_command.add_argument("--policy-root", type=Path, required=True)
+        policy_command.add_argument("--context", type=Path, required=True)
+        policy_command.add_argument("source", type=Path)
     return parser
 
 
@@ -606,6 +621,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "policy":
+            context_value = load_json_object(args.context)
+            context = commissioning_context_from_dict(context_value)
+            if args.policy_command == "lint":
+                result = lint_policy_source(args.policy_root, args.source, context)
+                _json(result.to_dict())
+                return 0 if result.valid else 2
+            if args.policy_command == "explain":
+                compiled = compile_policy_source(args.policy_root, args.source, context)
+                _json(explain_policy(compiled).to_dict())
+                return 0
+            raise AssertionError(f"unknown policy command {args.policy_command!r}")
     except (
         EnforcementError,
         OSError,

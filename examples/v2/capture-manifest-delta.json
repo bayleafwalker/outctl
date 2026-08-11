@@ -5,7 +5,7 @@
   "manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
   "engine": {"id": "python-reference", "version": "0.1.0.dev0"},
   "request_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-  "policy": {"snapshot_id": "snapshot-1", "ref": "policy://interactive-v2", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "policy": {"snapshot_id": "snapshot-1659c92d7d8258ff83096347c5d6259d", "ref": "policy://interactive-w5", "digest": "sha256:1659c92d7d8258ff83096347c5d6259dcc1888af5504c88323ea4fe8f3d76b61"},
   "commitment": "host-persistent",
   "durability": "host",
   "presentation": "bounded-projection",

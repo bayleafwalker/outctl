@@ -5,6 +5,7 @@ use crate::presentation::{
 use crate::storage::{capture_id, rename_entry, PrivateDir, CHUNK_BYTES};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -26,6 +27,15 @@ pub struct CaptureOptions {
     pub cwd: Option<PathBuf>,
     pub workspace_id: Option<String>,
     pub required_capture: bool,
+    pub environment: CommandEnvironment,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum CommandEnvironment {
+    #[default]
+    Inherited,
+    Empty,
+    Allowlist(Vec<OsString>),
 }
 
 pub const MAX_CAPTURE_BYTES: u64 = 268_435_456;
@@ -183,6 +193,20 @@ fn capture_command_pinned(
 
     let mut command = Command::new(&options.argv[0]);
     command.args(&options.argv[1..]);
+    match &options.environment {
+        CommandEnvironment::Inherited => {}
+        CommandEnvironment::Empty => {
+            command.env_clear();
+        }
+        CommandEnvironment::Allowlist(names) => {
+            let retained = names
+                .iter()
+                .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+                .collect::<Vec<_>>();
+            command.env_clear();
+            command.envs(retained);
+        }
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     command.process_group(0);
     if let Some(cwd) = &options.cwd {
@@ -574,6 +598,24 @@ fn validate_options(options: &CaptureOptions) -> Result<(), CaptureError> {
             "argv contains a NUL byte".to_owned(),
         ));
     }
+    if let CommandEnvironment::Allowlist(names) = &options.environment {
+        if names.is_empty()
+            || names.len() > 256
+            || names.iter().collect::<BTreeSet<_>>().len() != names.len()
+            || names.iter().any(|name| {
+                name.is_empty()
+                    || name.len() > 256
+                    || name
+                        .as_encoded_bytes()
+                        .iter()
+                        .any(|byte| *byte == 0 || *byte == b'=')
+            })
+        {
+            return Err(CaptureError::InvalidRequest(
+                "environment allowlist is empty, duplicated, oversized, or invalid".to_owned(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -875,7 +917,7 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
 mod tests {
     use super::{
         capture_command, capture_command_with_presentation, cleanup_ephemeral_capture,
-        CaptureError, CaptureOptions, MAX_CAPTURE_BYTES,
+        CaptureError, CaptureOptions, CommandEnvironment, MAX_CAPTURE_BYTES,
     };
     use crate::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
     use crate::storage::PrivateDir;
@@ -913,6 +955,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             None,
         )
@@ -942,6 +985,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             None,
         )
@@ -964,6 +1008,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             None,
         )
@@ -981,6 +1026,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             None,
         )
@@ -1001,6 +1047,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             &PresentationOptions {
                 full_if_bytes: u64::MAX,
@@ -1025,6 +1072,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             &PresentationOptions {
                 exact_redaction_values: vec![vec![b'x'; 64 * 1024]; 5],
@@ -1049,6 +1097,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             &PresentationOptions::default(),
             None,
@@ -1072,6 +1121,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             &PresentationOptions {
                 persistence: PersistenceMode::ProcessLocal,
@@ -1104,6 +1154,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             &PresentationOptions {
                 mode: PresentationMode::Safe,
@@ -1142,6 +1193,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: true,
+                environment: CommandEnvironment::Inherited,
             },
             &PresentationOptions {
                 persistence: PersistenceMode::MemoryOnly,
@@ -1163,6 +1215,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             &PresentationOptions {
                 persistence: PersistenceMode::Replicated,
@@ -1232,6 +1285,7 @@ mod tests {
                 cwd: None,
                 workspace_id: None,
                 required_capture: false,
+                environment: CommandEnvironment::Inherited,
             },
             Some(&token),
         )

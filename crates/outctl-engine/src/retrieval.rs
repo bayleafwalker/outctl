@@ -717,6 +717,7 @@ mod tests {
                 cwd: None,
                 workspace_id: workspace_id.map(str::to_owned),
                 required_capture: false,
+                environment: crate::capture::CommandEnvironment::Inherited,
             },
             None,
         )

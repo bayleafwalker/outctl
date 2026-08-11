@@ -41,8 +41,8 @@ def test_native_capabilities_are_schema_valid_and_v2_run_is_not_negotiable() -> 
     jsonschema.Draft202012Validator(schema).validate(document)
 
     assert document["contract_versions"] == {
-        "run_request": [],
-        "policy_snapshot": [],
+        "run_request": ["v2"],
+        "policy_snapshot": ["v2"],
         "run_result": [],
         "capture_manifest": ["v1alpha1"],
     }

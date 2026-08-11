@@ -395,6 +395,7 @@ fn execute_run(request: RunRequest) -> Result<(String, u8), CliError> {
             cwd: request.cwd,
             workspace_id: request.workspace_id,
             required_capture: request.required_capture,
+            environment: outctl_engine::capture::CommandEnvironment::Inherited,
         },
         &request.presentation,
         None,

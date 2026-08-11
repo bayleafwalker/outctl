@@ -1,17 +1,63 @@
 {
   "schema_version": "vuoro.outctl.policy-snapshot/v2",
-  "snapshot_id": "snapshot-1",
-  "policy_ref": "policy://interactive-v2",
-  "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "source": {"ref": "git:config/output-policies.example.yaml", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
-  "cache": {"key": "policy-cache://snapshot/snapshot-1", "snapshot_id": "snapshot-1", "owner": "python-policy-control", "max_age_ms": 3600000},
-  "session": {"session_id": "session-1", "trust_domain": "trusted-local", "commissioned": true},
+  "snapshot_id": "snapshot-1659c92d7d8258ff83096347c5d6259d",
+  "policy_ref": "policy://interactive-w5",
+  "policy_digest": "sha256:1659c92d7d8258ff83096347c5d6259dcc1888af5504c88323ea4fe8f3d76b61",
+  "source": {
+    "ref": "policy-source://w5-policy.example.yaml",
+    "digest": "sha256:a052dd6c6a6e06e0fafcd918094e0a31c206bab127d2e2a786e2f2bf7ac3ba90"
+  },
+  "cache": {
+    "key": "policy-cache://snapshot/snapshot-1659c92d7d8258ff83096347c5d6259d",
+    "snapshot_id": "snapshot-1659c92d7d8258ff83096347c5d6259d",
+    "owner": "python-policy-control",
+    "max_age_ms": 3600000
+  },
+  "session": {
+    "session_id": "session-1",
+    "trust_domain": "trusted-local",
+    "commissioned": true
+  },
   "sinks": [
-    {"name": "trusted-model", "trust_domain": "trusted-local", "disclosure": "safe-unredacted", "redaction_required": false, "classification_ceiling": "secret"},
-    {"name": "restricted-handoff", "trust_domain": "restricted", "disclosure": "sanitized", "redaction_required": true, "classification_ceiling": "confidential"}
+    {
+      "name": "audit-receipt",
+      "trust_domain": "metadata-only",
+      "disclosure": "metadata-only",
+      "redaction_required": true,
+      "classification_ceiling": "internal"
+    },
+    {
+      "name": "handoff",
+      "trust_domain": "restricted",
+      "disclosure": "sanitized",
+      "redaction_required": true,
+      "classification_ceiling": "confidential"
+    },
+    {
+      "name": "model",
+      "trust_domain": "trusted-local",
+      "disclosure": "safe-unredacted",
+      "redaction_required": false,
+      "classification_ceiling": "secret"
+    },
+    {
+      "name": "runner",
+      "trust_domain": "export",
+      "disclosure": "deny",
+      "redaction_required": true,
+      "classification_ceiling": "public"
+    }
   ],
-  "capture": {"commitment": "host-persistent", "durability": "host", "required": true},
-  "execution_authority": {"owner": "external-runner", "can_authorize_execution": false, "can_retry": false},
-  "issued_at": "2026-08-11T17:00:00Z",
-  "expires_at": "2026-08-11T18:00:00Z"
+  "capture": {
+    "commitment": "host-persistent",
+    "durability": "host",
+    "required": true
+  },
+  "execution_authority": {
+    "owner": "external-runner",
+    "can_authorize_execution": false,
+    "can_retry": false
+  },
+  "issued_at": "2026-08-12T08:00:00.000Z",
+  "expires_at": "2026-08-12T09:00:00.000Z"
 }

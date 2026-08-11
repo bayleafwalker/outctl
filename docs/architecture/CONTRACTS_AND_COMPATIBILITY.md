@@ -39,3 +39,10 @@ claims:
   stream bytes without claiming byte-exact v1 manifest serialization;
 - direct argv is the W1 baseline and explicit shell remains a negotiated,
   unsupported capability in the W1 engine.
+
+W5 implements native `RunRequest`/`PolicySnapshot` evaluation without claiming
+that the W4 capture envelope is a v2 `RunResult` writer. Capability metadata
+advertises those two evaluated families and leaves `run_result` empty until its
+writer and manifest compatibility boundary are implemented. The canonical W5
+snapshot under `examples/v2` is compiled by Python and revalidated by Rust as a
+cross-language digest and sink-action vector.

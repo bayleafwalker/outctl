@@ -19,3 +19,18 @@ Required invariants:
   publication;
 - command output remains untrusted data, including prompt-like text and
   terminal control sequences.
+
+W5 compiles commissioning evidence and source policy in Python, then verifies
+the immutable semantic digest and request binding again in Rust. Commissioning
+claim provenance is raw-free and cryptographically committed by the snapshot's
+source digest. Sink targets are exact named joins: callers cannot widen or
+silently downgrade the compiled trust/action pair. Exact values enter only a
+bounded protected in-memory registry and are resolved only for a sanitized
+sink action; they never enter policy JSON, explanation output, decision
+metadata, receipts, or telemetry.
+
+Policy evaluation remains a constraint, not an execution grant. Native
+decision metadata therefore always records `execution_authorized=false`; the
+external runner separately asserts command authorization to the policy-bound
+capture entry point, which derives command, environment, capture, presentation,
+and redaction options from the same verified request/snapshot pair.
