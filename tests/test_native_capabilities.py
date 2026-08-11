@@ -15,7 +15,7 @@ ROOT = Path(__file__).parents[1]
 pytestmark = pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is required")
 
 
-def test_native_capabilities_are_schema_valid_and_not_negotiable() -> None:
+def test_native_capabilities_are_schema_valid_and_v2_run_is_not_negotiable() -> None:
     completed = subprocess.run(
         [
             "cargo",
@@ -44,13 +44,13 @@ def test_native_capabilities_are_schema_valid_and_not_negotiable() -> None:
         "run_request": [],
         "policy_snapshot": [],
         "run_result": [],
-        "capture_manifest": [],
+        "capture_manifest": ["v1alpha1"],
     }
     assert document["features"] == {
         "direct_argv": True,
         "explicit_shell": False,
         "stdin": False,
-        "retrieval": False,
+        "retrieval": True,
         "one_version_back_read": True,
     }
 

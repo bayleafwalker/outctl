@@ -28,4 +28,6 @@ verify: test lint typecheck package-test native-check
 native-check:
     cargo fmt --all -- --check
     cargo check --workspace --all-targets
+    cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
+    uv run pytest tests/test_native_capabilities.py tests/test_w3_native.py

@@ -62,5 +62,7 @@ def test_built_wheel_contains_python_and_native_skeleton_members() -> None:
         "outctl/control/__init__.py",
         "outctl/extensions/__init__.py",
         "outctl/native/__init__.py",
+        "outctl/native/differential.py",
+        "outctl/native/selector.py",
     }.issubset(names)
     assert not {"outctl.py", "outctl_native.py"}.intersection(names)
