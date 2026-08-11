@@ -12,20 +12,35 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const DEFAULT_MAX_PROJECTION_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_PROJECTION_LINES: usize = 1_200;
 pub const DEFAULT_MAX_PROJECTION_TOKENS: usize = 12_000;
+pub const MAX_SAFE_PROVISIONAL_BYTES: usize = 64 * 1024;
+const MAX_RECORD_BYTES: usize = 16 * 1024;
 const READ_BYTES: usize = 16 * 1024;
 const DEFAULT_FULL_IF_BYTES: u64 = 16 * 1024;
 const DEFAULT_HEAD_LINES: usize = 24;
 const DEFAULT_TAIL_LINES: usize = 80;
 const DEFAULT_CANDIDATE_LINES: usize = 160;
 const DEFAULT_MAX_LOGICAL_LINE_BYTES: usize = 1024 * 1024;
+const MAX_REDACTION_VALUE_BYTES: usize = 64 * 1024;
+
+static PROVISIONAL_SPILL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn provisional_spill_path() -> PathBuf {
+    let sequence = PROVISIONAL_SPILL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "outctl-w4-provisional-{}-{sequence}.raw",
+        std::process::id()
+    ))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresentationMode {
     Auto,
+    MinimumSavings,
     Safe,
     Compact,
     Projected,
@@ -36,6 +51,7 @@ impl PresentationMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
+            Self::MinimumSavings => "minimum-savings",
             Self::Safe => "safe",
             Self::Compact => "compact",
             Self::Projected => "projected",
@@ -60,6 +76,10 @@ impl PersistenceMode {
             Self::HostPersistent => "host-persistent",
             Self::Replicated => "replicated",
         }
+    }
+
+    pub fn is_ephemeral(self) -> bool {
+        matches!(self, Self::MemoryOnly | Self::ProcessLocal)
     }
 }
 
@@ -112,6 +132,15 @@ impl PresentationOptions {
                 "presentation budgets must be positive",
             ));
         }
+        if self.full_if_bytes > MAX_SAFE_PROVISIONAL_BYTES as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "full-if-bytes exceeds the bounded native provisional limit of {}",
+                    MAX_SAFE_PROVISIONAL_BYTES
+                ),
+            ));
+        }
         if self.max_bytes > 1024 * 1024 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -122,6 +151,35 @@ impl PresentationOptions {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "projection budget exceeds the native safety limit",
+            ));
+        }
+        let max_marker_bytes = omission_marker(false)
+            .len()
+            .max(omission_marker(true).len());
+        if self.max_bytes < max_marker_bytes
+            || self.max_lines < 1
+            || self.max_estimated_tokens < estimate_tokens(max_marker_bytes)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "projection budget cannot represent an explicit omission marker",
+            ));
+        }
+        if self.head_lines > 10_000 || self.tail_lines > 10_000 || self.candidate_context > 10_000 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "presentation record limits exceed the native bounded limit",
+            ));
+        }
+        if self.max_logical_line_bytes > DEFAULT_MAX_LOGICAL_LINE_BYTES
+            || self
+                .exact_redaction_values
+                .iter()
+                .any(|value| value.len() > MAX_REDACTION_VALUE_BYTES)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "presentation transform limits exceed the native bounded limit",
             ));
         }
         if self.exact_redaction_values.iter().any(Vec::is_empty) {
@@ -142,6 +200,7 @@ pub struct PersistenceResult {
     pub status: String,
     pub honest: bool,
     pub reference: Option<String>,
+    pub retrieval_available: bool,
 }
 
 impl PersistenceResult {
@@ -154,6 +213,7 @@ impl PersistenceResult {
                 status: "available-during-call-only".to_owned(),
                 honest: true,
                 reference: None,
+                retrieval_available: false,
             },
             PersistenceMode::ProcessLocal => Self {
                 requested: mode.as_str().to_owned(),
@@ -162,6 +222,7 @@ impl PersistenceResult {
                 status: "available-during-call-only".to_owned(),
                 honest: true,
                 reference: None,
+                retrieval_available: false,
             },
             PersistenceMode::HostPersistent => Self {
                 requested: mode.as_str().to_owned(),
@@ -170,6 +231,7 @@ impl PersistenceResult {
                 status: "host-persistent".to_owned(),
                 honest: true,
                 reference: Some(format!("outctl://capture/{capture_id}")),
+                retrieval_available: true,
             },
             PersistenceMode::Replicated => Self {
                 requested: mode.as_str().to_owned(),
@@ -178,6 +240,7 @@ impl PersistenceResult {
                 status: "unavailable-no-replica-backend".to_owned(),
                 honest: true,
                 reference: None,
+                retrieval_available: false,
             },
         }
     }
@@ -233,6 +296,7 @@ pub struct SpillBuffer {
     spill: Option<File>,
     spill_path: Option<PathBuf>,
     len: u64,
+    max_bytes: Option<u64>,
 }
 
 impl SpillBuffer {
@@ -249,13 +313,38 @@ impl SpillBuffer {
             spill: None,
             spill_path: spill_path.map(Path::to_path_buf),
             len: 0,
+            max_bytes: None,
         })
     }
 
+    pub fn with_max_bytes(
+        memory_limit: usize,
+        max_bytes: u64,
+        spill_path: Option<&Path>,
+    ) -> io::Result<Self> {
+        let mut buffer = Self::new(memory_limit, spill_path)?;
+        buffer.max_bytes = Some(max_bytes);
+        Ok(buffer)
+    }
+
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.len = self.len.saturating_add(bytes.len() as u64);
-        if self.spill.is_none() && self.memory.len() + bytes.len() <= self.memory_limit {
+        let next_len = self.len.checked_add(bytes.len() as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::WriteZero, "spill buffer length overflow")
+        })?;
+        if let Some(max_bytes) = self.max_bytes {
+            if next_len > max_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "spill buffer maximum exceeded",
+                ));
+            }
+        }
+        let memory_len = self.memory.len().checked_add(bytes.len()).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::WriteZero, "spill memory length overflow")
+        })?;
+        if self.spill.is_none() && memory_len <= self.memory_limit {
             self.memory.extend_from_slice(bytes);
+            self.len = next_len;
             return Ok(());
         }
         if self.spill.is_none() {
@@ -277,7 +366,9 @@ impl SpillBuffer {
         self.spill
             .as_mut()
             .expect("spill initialized")
-            .write_all(bytes)
+            .write_all(bytes)?;
+        self.len = next_len;
+        Ok(())
     }
 
     pub fn len(&self) -> u64 {
@@ -292,7 +383,10 @@ impl SpillBuffer {
         self.spill.is_some()
     }
 
-    pub fn read_all(mut self) -> io::Result<Vec<u8>> {
+    /// Read at most `max_bytes`; this API cannot rematerialize an unbounded
+    /// spill into memory.
+    pub fn read_prefix(&mut self, max_bytes: usize) -> io::Result<Vec<u8>> {
+        let prefix_len = self.len.min(max_bytes as u64) as usize;
         if let Some(mut file) = self.spill.take() {
             file.flush()?;
             let path = self
@@ -300,11 +394,25 @@ impl SpillBuffer {
                 .take()
                 .ok_or_else(|| io::Error::other("spilled buffer lost its backing path"))?;
             drop(file);
-            let bytes = fs::read(&path)?;
+            let mut bytes = Vec::with_capacity(prefix_len);
+            let reader = File::open(&path)?;
+            reader.take(prefix_len as u64).read_to_end(&mut bytes)?;
             let _ = fs::remove_file(path);
+            self.len = 0;
             Ok(bytes)
         } else {
-            Ok(self.memory)
+            let mut bytes = std::mem::take(&mut self.memory);
+            bytes.truncate(prefix_len);
+            self.len = 0;
+            Ok(bytes)
+        }
+    }
+}
+
+impl Drop for SpillBuffer {
+    fn drop(&mut self) {
+        if let Some(path) = self.spill_path.take() {
+            let _ = fs::remove_file(path);
         }
     }
 }
@@ -333,13 +441,18 @@ pub struct StreamingCandidates {
     normalized_lines: u64,
     candidate_lines: u64,
     clipped_line: bool,
-    small_output: Vec<u8>,
+    provisional: SpillBuffer,
+    provisional_len: usize,
     small_output_limit: usize,
+    head_bytes: usize,
+    tail_bytes: usize,
+    candidate_bytes: usize,
 }
 
 impl StreamingCandidates {
-    pub fn new(options: &PresentationOptions) -> Self {
-        Self {
+    pub fn new(options: &PresentationOptions) -> io::Result<Self> {
+        let spill_path = provisional_spill_path();
+        Ok(Self {
             head_limit: options.head_lines,
             tail_limit: options.tail_lines,
             candidate_limit: options.candidate_context,
@@ -355,20 +468,30 @@ impl StreamingCandidates {
             normalized_lines: 0,
             candidate_lines: 0,
             clipped_line: false,
-            small_output: Vec::new(),
-            small_output_limit: options.full_if_bytes.min(usize::MAX as u64) as usize + 1,
-        }
+            provisional: SpillBuffer::with_max_bytes(
+                MAX_SAFE_PROVISIONAL_BYTES / 4,
+                options.full_if_bytes.min(MAX_SAFE_PROVISIONAL_BYTES as u64),
+                Some(&spill_path),
+            )?,
+            provisional_len: 0,
+            small_output_limit: options.full_if_bytes.min(MAX_SAFE_PROVISIONAL_BYTES as u64)
+                as usize,
+            head_bytes: 0,
+            tail_bytes: 0,
+            candidate_bytes: 0,
+        })
     }
 
-    pub fn consume(&mut self, text: &str) {
+    pub fn consume(&mut self, text: &str) -> io::Result<()> {
         let bytes = text.as_bytes();
         self.normalized_bytes = self.normalized_bytes.saturating_add(bytes.len() as u64);
-        if self.small_output.len() <= self.small_output_limit {
-            let room = self
-                .small_output_limit
-                .saturating_sub(self.small_output.len());
-            self.small_output
-                .extend_from_slice(&bytes[..bytes.len().min(room)]);
+        if self.provisional_len < self.small_output_limit {
+            let room = self.small_output_limit - self.provisional_len;
+            let prefix = &bytes[..bytes.len().min(room)];
+            if !prefix.is_empty() {
+                self.provisional.write(prefix)?;
+                self.provisional_len += prefix.len();
+            }
         }
         self.pending.extend_from_slice(bytes);
         while let Some(index) = self.pending.iter().position(|byte| *byte == b'\n') {
@@ -379,6 +502,7 @@ impl StreamingCandidates {
             self.pending.truncate(self.max_line_bytes);
             self.clipped_line = true;
         }
+        Ok(())
     }
 
     pub fn finish(&mut self) {
@@ -406,15 +530,31 @@ impl StreamingCandidates {
             line: self.line_number,
             text,
         };
-        if self.head.len() < self.head_limit {
+        let record_bytes = record.text.len().saturating_add(1);
+        let record_limit = self.projection_bytes.min(MAX_RECORD_BYTES);
+        if self.head.len() < self.head_limit
+            && self.head_bytes.saturating_add(record_bytes) <= record_limit
+        {
             self.head.push(record.clone());
+            self.head_bytes = self.head_bytes.saturating_add(record_bytes);
         }
-        self.tail.push_back(record.clone());
-        while self.tail.len() > self.tail_limit {
-            self.tail.pop_front();
+        if record_bytes <= record_limit {
+            self.tail.push_back(record.clone());
+            self.tail_bytes = self.tail_bytes.saturating_add(record_bytes);
+            while self.tail.len() > self.tail_limit || self.tail_bytes > record_limit {
+                if let Some(removed) = self.tail.pop_front() {
+                    self.tail_bytes = self
+                        .tail_bytes
+                        .saturating_sub(removed.text.len().saturating_add(1));
+                }
+            }
         }
-        if is_candidate(&record.text) && self.candidates.len() < self.candidate_limit {
+        if is_candidate(&record.text)
+            && self.candidates.len() < self.candidate_limit
+            && self.candidate_bytes.saturating_add(record_bytes) <= record_limit
+        {
             self.candidates.push(record);
+            self.candidate_bytes = self.candidate_bytes.saturating_add(record_bytes);
             self.candidate_lines += 1;
         }
     }
@@ -431,17 +571,20 @@ impl StreamingCandidates {
         self.candidate_lines
     }
 
-    fn full_text(&self) -> Option<String> {
-        if self.normalized_bytes > self.small_output_limit.saturating_sub(1) as u64 {
+    fn full_text(&mut self) -> Option<String> {
+        if self.normalized_bytes > self.small_output_limit as u64 {
             return None;
         }
-        Some(String::from_utf8_lossy(&self.small_output).into_owned())
+        let bytes = self.provisional.read_prefix(self.small_output_limit).ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn records_for(&self, mode: PresentationMode) -> Vec<LineRecord> {
         let mut records = match mode {
             PresentationMode::Compact => self.head.clone(),
-            PresentationMode::Projected | PresentationMode::Auto => self.projected_records(),
+            PresentationMode::Projected
+            | PresentationMode::Auto
+            | PresentationMode::MinimumSavings => self.projected_records(),
             PresentationMode::Safe | PresentationMode::Metadata => Vec::new(),
         };
         records.sort_by_key(|record| record.line);
@@ -562,6 +705,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 struct ControlSanitizer {
     escape: Vec<u8>,
     escape_kind: u8,
+    osc_st_pending: bool,
     in_escape: bool,
     normalized: bool,
 }
@@ -571,6 +715,7 @@ impl ControlSanitizer {
         Self {
             escape: Vec::new(),
             escape_kind: 0,
+            osc_st_pending: false,
             in_escape: false,
             normalized: false,
         }
@@ -592,11 +737,24 @@ impl ControlSanitizer {
                         self.in_escape = false;
                         self.escape.clear();
                     }
-                } else if (self.escape_kind == 1 && *byte >= 0x40 && *byte <= 0x7e)
-                    || (self.escape_kind == 2 && *byte == 0x07)
-                {
+                } else if self.escape_kind == 1 && *byte >= 0x40 && *byte <= 0x7e {
                     self.in_escape = false;
                     self.escape.clear();
+                } else if self.escape_kind == 2 {
+                    if self.osc_st_pending {
+                        if *byte == b'\\' {
+                            self.in_escape = false;
+                            self.escape.clear();
+                            self.osc_st_pending = false;
+                        } else {
+                            self.osc_st_pending = *byte == 0x1b;
+                        }
+                    } else if *byte == 0x07 {
+                        self.in_escape = false;
+                        self.escape.clear();
+                    } else if *byte == 0x1b {
+                        self.osc_st_pending = true;
+                    }
                 }
                 continue;
             }
@@ -604,6 +762,7 @@ impl ControlSanitizer {
                 self.in_escape = true;
                 self.escape.clear();
                 self.escape_kind = 0;
+                self.osc_st_pending = false;
                 self.normalized = true;
             } else if *byte == b'\n' {
                 output.push(*byte);
@@ -624,6 +783,7 @@ impl ControlSanitizer {
             self.in_escape = false;
             self.escape.clear();
             self.escape_kind = 0;
+            self.osc_st_pending = false;
         }
         String::from_utf8_lossy(&output).into_owned()
     }
@@ -635,12 +795,13 @@ fn consume_transformed(
     sanitizer: &mut ControlSanitizer,
     bytes: &[u8],
     final_chunk: bool,
-) {
+) -> io::Result<()> {
     let redacted = redactor.feed(bytes, final_chunk);
     if !redacted.is_empty() {
         let text = sanitizer.feed(&redacted, final_chunk);
-        candidates.consume(&text);
+        candidates.consume(&text)?;
     }
+    Ok(())
 }
 
 fn read_stream(
@@ -650,7 +811,7 @@ fn read_stream(
 ) -> io::Result<(StreamingCandidates, StreamPresentationStats, bool)> {
     let mut file = File::open(path)?;
     let raw_bytes = file.metadata()?.len();
-    let mut candidates = StreamingCandidates::new(options);
+    let mut candidates = StreamingCandidates::new(options)?;
     let mut redactor = ExactRedactor::new(&options.exact_redaction_values);
     let mut sanitizer = ControlSanitizer::new();
     let mut buffer = [0_u8; READ_BYTES];
@@ -665,11 +826,11 @@ fn read_stream(
             &mut sanitizer,
             &buffer[..read],
             false,
-        );
+        )?;
     }
     let redacted = redactor.feed(&[], true);
     let text = sanitizer.feed(&redacted, true);
-    candidates.consume(&text);
+    candidates.consume(&text)?;
     candidates.finish();
     let stats = StreamPresentationStats {
         stream: name.to_owned(),
@@ -722,8 +883,9 @@ impl<'a> BoundedWriter<'a> {
     }
 
     fn finish(mut self) -> (Vec<u8>, bool) {
-        if self.omitted {
-            let marker = b"[... output omitted; retrieve the capture for complete evidence]\n";
+        let omitted = self.omitted;
+        if omitted {
+            let marker = omission_marker(self.options.persistence.is_ephemeral());
             while self.bytes.len() + marker.len() > self.options.max_bytes && !self.bytes.is_empty()
             {
                 self.bytes.pop();
@@ -735,10 +897,20 @@ impl<'a> BoundedWriter<'a> {
             {
                 self.bytes.extend_from_slice(marker);
                 self.lines += 1;
-            } else if self.bytes.is_empty() {
-                self.bytes.extend_from_slice(b".");
+            } else {
+                // `PresentationOptions::validate` proves that the marker is
+                // representable from an empty writer.  This branch is only a
+                // defensive fallback if a future budget rule changes.
+                self.bytes.clear();
+                self.bytes.extend_from_slice(marker);
+                self.lines = 1;
+                self.tokens = estimate_tokens(self.bytes.len());
             }
         }
+        (self.bytes, omitted)
+    }
+
+    fn finish_without_marker(self) -> (Vec<u8>, bool) {
         (self.bytes, self.omitted)
     }
 }
@@ -773,11 +945,23 @@ fn render_records(records: &[LineRecord], options: &PresentationOptions) -> (Vec
             writer.add_line(text);
         }
     }
-    writer.finish()
+    writer.finish_without_marker()
 }
 
 fn estimate_tokens(bytes: usize) -> usize {
     bytes.div_ceil(4)
+}
+
+fn estimate_tokens_u64(bytes: u64) -> usize {
+    usize::try_from(bytes.div_ceil(4)).unwrap_or(usize::MAX)
+}
+
+fn omission_marker(ephemeral: bool) -> &'static [u8] {
+    if ephemeral {
+        b"[... output omitted; evidence unavailable after this call]\n"
+    } else {
+        b"[... output omitted; retrieve the capture for complete evidence]\n"
+    }
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -792,77 +976,72 @@ pub fn render_capture_files(
     options: &PresentationOptions,
 ) -> io::Result<PresentationResult> {
     options.validate()?;
-    let (stdout_candidates, stdout_stats, stdout_changed) = read_stream(stdout, "stdout", options)?;
-    let (stderr_candidates, stderr_stats, stderr_changed) = read_stream(stderr, "stderr", options)?;
-    let raw_bytes = stdout_stats.raw_bytes + stderr_stats.raw_bytes;
-    let raw_lines = stdout_stats.raw_lines + stderr_stats.raw_lines;
+    let (mut stdout_candidates, stdout_stats, stdout_changed) =
+        read_stream(stdout, "stdout", options)?;
+    let (mut stderr_candidates, stderr_stats, stderr_changed) =
+        read_stream(stderr, "stderr", options)?;
+    let raw_bytes = stdout_stats
+        .raw_bytes
+        .checked_add(stderr_stats.raw_bytes)
+        .ok_or_else(|| io::Error::other("raw byte count overflow"))?;
+    let raw_lines = stdout_stats
+        .raw_lines
+        .checked_add(stderr_stats.raw_lines)
+        .ok_or_else(|| io::Error::other("raw line count overflow"))?;
     let normalized = stdout_changed || stderr_changed;
     let redacted = stdout_stats.redacted || stderr_stats.redacted;
-    let total_normalized =
-        stdout_candidates.normalized_bytes() + stderr_candidates.normalized_bytes();
-    let requested = match options.mode {
-        PresentationMode::Auto if total_normalized <= options.full_if_bytes => {
-            PresentationMode::Safe
+    let total_normalized = stdout_candidates
+        .normalized_bytes()
+        .checked_add(stderr_candidates.normalized_bytes())
+        .ok_or_else(|| io::Error::other("normalized byte count overflow"))?;
+    let empty_success = total_normalized == 0;
+    let rendered = if empty_success {
+        RenderedBody {
+            mode: PresentationMode::Safe,
+            kind: "empty-success",
+            body: Some(Vec::new()),
+            omission: false,
         }
-        PresentationMode::Auto => PresentationMode::Projected,
-        other => other,
-    };
-    let (mut body_bytes, mut omission, kind) = match requested {
-        PresentationMode::Metadata => (None, true, "metadata-only"),
-        PresentationMode::Safe => {
-            let mut writer = BoundedWriter::new(options);
-            let mut omitted = false;
-            for (label, candidate) in [
-                ("[stdout]", &stdout_candidates),
-                ("[stderr]", &stderr_candidates),
-            ] {
-                if candidate.normalized_bytes() > 0 {
-                    writer.add_line(label);
-                }
-                if let Some(text) = candidate.full_text() {
-                    for line in text.lines() {
-                        writer.add_line(line);
-                    }
+    } else {
+        match options.mode {
+            PresentationMode::Auto | PresentationMode::MinimumSavings => {
+                let safe = render_mode_body(
+                    PresentationMode::Safe,
+                    &mut stdout_candidates,
+                    &mut stderr_candidates,
+                    options,
+                );
+                let projected = render_mode_body(
+                    PresentationMode::Projected,
+                    &mut stdout_candidates,
+                    &mut stderr_candidates,
+                    options,
+                );
+                if !safe.omission && body_cost(&safe) <= body_cost(&projected) {
+                    safe
                 } else {
-                    omitted = true;
+                    projected
                 }
             }
-            let (body, writer_omitted) = writer.finish();
-            (Some(body), omitted || writer_omitted, "raw-safe")
+            mode => render_mode_body(
+                mode,
+                &mut stdout_candidates,
+                &mut stderr_candidates,
+                options,
+            ),
         }
-        PresentationMode::Compact => {
-            let (stdout_body, stdout_omitted) =
-                render_records(&stdout_candidates.records_for(requested), options);
-            let (stderr_body, stderr_omitted) =
-                render_records(&stderr_candidates.records_for(requested), options);
-            let body = stream_sections(stdout_body, stderr_body);
-            (
-                Some(body),
-                stdout_omitted || stderr_omitted,
-                "bounded-projection",
-            )
-        }
-        PresentationMode::Projected => {
-            let (stdout_body, stdout_omitted) =
-                render_records(&stdout_candidates.records_for(requested), options);
-            let (stderr_body, stderr_omitted) =
-                render_records(&stderr_candidates.records_for(requested), options);
-            let body = stream_sections(stdout_body, stderr_body);
-            (
-                Some(body),
-                stdout_omitted || stderr_omitted,
-                "bounded-projection",
-            )
-        }
-        PresentationMode::Auto => unreachable!("auto is resolved above"),
     };
-    omission = omission
-        || body_bytes.as_ref().is_some_and(|body| {
-            total_normalized > body.len() as u64
-                || body.len() > options.max_bytes
-                || body.iter().filter(|byte| **byte == b'\n').count() > options.max_lines
-                || estimate_tokens(body.len()) > options.max_estimated_tokens
-        });
+    let requested = rendered.mode;
+    let mut body_bytes = rendered.body;
+    let mut omission = rendered.omission;
+    if body_bytes.as_ref().is_some_and(|body| {
+        total_normalized > body.len() as u64
+            || body.len() > options.max_bytes
+            || body.iter().filter(|byte| **byte == b'\n').count() > options.max_lines
+            || estimate_tokens(body.len()) > options.max_estimated_tokens
+    }) {
+        omission = true;
+    }
     if let Some(body) = body_bytes.take() {
         let (bounded, bounded_omission) = enforce_body_budget(body, options, omission);
         body_bytes = Some(bounded);
@@ -883,22 +1062,28 @@ pub fn render_capture_files(
         }
         None => (None, 0, 0, 0, None),
     };
-    let raw_tokens = estimate_tokens(raw_bytes as usize);
+    let raw_tokens = estimate_tokens_u64(raw_bytes);
     let savings = SavingsDecision {
         raw_estimated_tokens: raw_tokens,
         exposed_estimated_tokens: exposed_tokens,
         estimated_tokens_saved: raw_tokens.saturating_sub(exposed_tokens),
         exposure_reduced: exposed_tokens < raw_tokens,
-        reason: if requested == PresentationMode::Safe && !omission {
+        reason: if requested == PresentationMode::Safe && exposed_tokens < raw_tokens {
             "safe-small-output-is-cheaper".to_owned()
+        } else if requested == PresentationMode::Safe {
+            "safe-rendered-without-savings".to_owned()
         } else if requested == PresentationMode::Metadata {
             "metadata-only-policy".to_owned()
         } else {
             "bounded-presentation-required".to_owned()
         },
     };
+    let mut persistence = PersistenceResult::for_capture(options.persistence, capture_id);
+    if options.persistence.is_ephemeral() && omission {
+        persistence.status = "lossy-evidence-unavailable".to_owned();
+    }
     Ok(PresentationResult {
-        kind: kind.to_owned(),
+        kind: rendered.kind.to_owned(),
         body,
         lossy: omission || normalized || redacted,
         redacted,
@@ -913,8 +1098,86 @@ pub fn render_capture_files(
         mode: requested.as_str().to_owned(),
         streams: vec![stdout_stats, stderr_stats],
         savings,
-        persistence: PersistenceResult::for_capture(options.persistence, capture_id),
+        persistence,
     })
+}
+
+#[derive(Clone, Debug)]
+struct RenderedBody {
+    mode: PresentationMode,
+    kind: &'static str,
+    body: Option<Vec<u8>>,
+    omission: bool,
+}
+
+fn body_cost(body: &RenderedBody) -> (usize, usize, usize) {
+    let bytes = body.body.as_ref().map_or(0, Vec::len);
+    (
+        bytes,
+        estimate_tokens(bytes),
+        body_lines(body.body.as_deref().unwrap_or_default()),
+    )
+}
+
+fn body_lines(body: &[u8]) -> usize {
+    body.iter().filter(|byte| **byte == b'\n').count()
+}
+
+fn render_mode_body(
+    mode: PresentationMode,
+    stdout: &mut StreamingCandidates,
+    stderr: &mut StreamingCandidates,
+    options: &PresentationOptions,
+) -> RenderedBody {
+    match mode {
+        PresentationMode::Metadata => RenderedBody {
+            mode,
+            kind: "metadata-only",
+            body: None,
+            omission: true,
+        },
+        PresentationMode::Safe => {
+            let mut writer = BoundedWriter::new(options);
+            let mut omission = false;
+            for (label, candidate) in [("[stdout]", stdout), ("[stderr]", stderr)] {
+                if candidate.normalized_bytes() > 0 {
+                    writer.add_line(label);
+                }
+                if let Some(text) = candidate.full_text() {
+                    for line in text.lines() {
+                        writer.add_line(line);
+                    }
+                } else {
+                    omission = true;
+                }
+            }
+            let (body, writer_omission) = writer.finish_without_marker();
+            let (body, bounded_omission) =
+                enforce_body_budget(body, options, omission || writer_omission);
+            RenderedBody {
+                mode,
+                kind: "raw-safe",
+                body: Some(body),
+                omission: bounded_omission,
+            }
+        }
+        PresentationMode::Compact | PresentationMode::Projected => {
+            let (stdout_body, stdout_omission) = render_records(&stdout.records_for(mode), options);
+            let (stderr_body, stderr_omission) = render_records(&stderr.records_for(mode), options);
+            let body = stream_sections(stdout_body, stderr_body);
+            let initial_omission = stdout_omission || stderr_omission;
+            let (body, omission) = enforce_body_budget(body, options, initial_omission);
+            RenderedBody {
+                mode,
+                kind: "bounded-projection",
+                body: Some(body),
+                omission,
+            }
+        }
+        PresentationMode::Auto | PresentationMode::MinimumSavings => {
+            unreachable!("adaptive modes are resolved before rendering")
+        }
+    }
 }
 
 fn stream_sections(stdout: Vec<u8>, stderr: Vec<u8>) -> Vec<u8> {
@@ -946,7 +1209,7 @@ fn enforce_body_budget(
 #[cfg(test)]
 mod tests {
     use super::{
-        render_capture_files, PersistenceMode, PresentationOptions, SpillBuffer,
+        render_capture_files, PersistenceMode, PresentationMode, PresentationOptions, SpillBuffer,
         StreamingCandidates,
     };
     use std::fs;
@@ -970,8 +1233,14 @@ mod tests {
         buffer.write(b"12345").unwrap();
         assert!(buffer.spilled());
         assert_eq!(buffer.len(), 5);
-        assert_eq!(buffer.read_all().unwrap(), b"12345");
+        assert_eq!(buffer.read_prefix(5).unwrap(), b"12345");
         assert!(!path.exists());
+        let bounded_path = directory.join("bounded.raw");
+        let mut bounded = SpillBuffer::with_max_bytes(4, 5, Some(&bounded_path)).unwrap();
+        bounded.write(b"12345").unwrap();
+        assert!(bounded.write(b"6").is_err());
+        assert_eq!(bounded.len(), 5);
+        assert_eq!(bounded.read_prefix(5).unwrap(), b"12345");
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -983,8 +1252,10 @@ mod tests {
             tail_lines: 1,
             ..PresentationOptions::default()
         };
-        let mut candidates = StreamingCandidates::new(&options);
-        candidates.consume("one\nnoise\nERROR marker\nlast\n");
+        let mut candidates = StreamingCandidates::new(&options).unwrap();
+        candidates
+            .consume("one\nnoise\nERROR marker\nlast\n")
+            .unwrap();
         candidates.finish();
         assert_eq!(candidates.candidate_lines(), 1);
         assert_eq!(candidates.normalized_lines(), 4);
@@ -1012,6 +1283,118 @@ mod tests {
         assert!(!body.contains('\u{1b}'));
         assert!(!body.contains("title"));
         assert_eq!(result.persistence.durability, "none");
+        assert_eq!(result.persistence.status, "lossy-evidence-unavailable");
+        assert!(!result.persistence.retrieval_available);
+        assert!(!body.contains("retrieve the capture"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn osc_string_st_terminator_preserves_following_output() {
+        let directory = root("osc-st");
+        fs::create_dir_all(&directory).unwrap();
+        let stdout = directory.join("stdout.raw");
+        let stderr = directory.join("stderr.raw");
+        let mut bytes = vec![b'x'; 16_377];
+        bytes.extend_from_slice(b"\x1b]title");
+        bytes.extend_from_slice(b"\x1b\\\nERROR after-st\n");
+        fs::write(&stdout, bytes).unwrap();
+        fs::write(&stderr, b"").unwrap();
+        let options = PresentationOptions {
+            max_bytes: 512,
+            max_lines: 32,
+            max_estimated_tokens: 128,
+            full_if_bytes: 32,
+            ..PresentationOptions::default()
+        };
+        let result = render_capture_files(&stdout, &stderr, "capture-osc-st", &options).unwrap();
+        let body = result.body.unwrap();
+        assert!(body.contains("ERROR after-st"));
+        assert!(!body.contains("title"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn empty_success_is_explicitly_raw_safe() {
+        let directory = root("empty");
+        fs::create_dir_all(&directory).unwrap();
+        let stdout = directory.join("stdout.raw");
+        let stderr = directory.join("stderr.raw");
+        fs::write(&stdout, b"").unwrap();
+        fs::write(&stderr, b"").unwrap();
+        let result = render_capture_files(
+            &stdout,
+            &stderr,
+            "capture-empty",
+            &PresentationOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.kind, "empty-success");
+        assert_eq!(result.mode, "safe");
+        assert_eq!(result.body.as_deref(), Some(""));
+        assert!(!result.lossy);
+        assert!(!result.omission);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn too_small_budget_is_rejected_before_rendering() {
+        let options = PresentationOptions {
+            max_bytes: 1,
+            max_lines: 1,
+            max_estimated_tokens: 1,
+            ..PresentationOptions::default()
+        };
+        assert!(options.validate().is_err());
+    }
+
+    #[test]
+    fn adaptive_cost_uses_final_rendered_body() {
+        let directory = root("economics");
+        fs::create_dir_all(&directory).unwrap();
+        let stdout = directory.join("stdout.raw");
+        let stderr = directory.join("stderr.raw");
+        fs::write(&stdout, b"x\n").unwrap();
+        fs::write(&stderr, b"").unwrap();
+        let options = PresentationOptions {
+            mode: PresentationMode::Auto,
+            full_if_bytes: 64,
+            ..PresentationOptions::default()
+        };
+        let result = render_capture_files(&stdout, &stderr, "capture-economics", &options).unwrap();
+        assert_eq!(result.mode, "safe");
+        assert_eq!(result.savings.reason, "safe-rendered-without-savings");
+        assert!(result.savings.exposed_estimated_tokens >= result.savings.raw_estimated_tokens);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn explicit_modes_report_their_contract_kinds() {
+        let directory = root("modes");
+        fs::create_dir_all(&directory).unwrap();
+        let stdout = directory.join("stdout.raw");
+        let stderr = directory.join("stderr.raw");
+        fs::write(&stdout, b"ERROR marker\nordinary\n").unwrap();
+        fs::write(&stderr, b"warning\n").unwrap();
+        for (mode, kind, has_body) in [
+            (PresentationMode::Safe, "raw-safe", true),
+            (PresentationMode::Compact, "bounded-projection", true),
+            (PresentationMode::Projected, "bounded-projection", true),
+            (PresentationMode::Metadata, "metadata-only", false),
+        ] {
+            let result = render_capture_files(
+                &stdout,
+                &stderr,
+                mode.as_str(),
+                &PresentationOptions {
+                    mode,
+                    ..PresentationOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.kind, kind);
+            assert_eq!(result.body.is_some(), has_body);
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 

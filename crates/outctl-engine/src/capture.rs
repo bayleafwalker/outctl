@@ -810,7 +810,7 @@ mod tests {
         capture_command, capture_command_with_presentation, CaptureError, CaptureOptions,
         MAX_CAPTURE_BYTES,
     };
-    use crate::presentation::{PersistenceMode, PresentationOptions};
+    use crate::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
@@ -922,6 +922,30 @@ mod tests {
     }
 
     #[test]
+    fn presentation_overflow_is_rejected_before_spawn_or_spool_creation() {
+        let root = temporary_root("presentation-overflow");
+        let error = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                full_if_bytes: u64::MAX,
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!root.exists());
+    }
+
+    #[test]
     fn ephemeral_persistence_is_explicit_and_leaves_no_capture_reference() {
         let root = temporary_root("ephemeral");
         let result = capture_command_with_presentation(
@@ -948,6 +972,45 @@ mod tests {
         assert!(presentation.persistence.honest);
         assert!(!root.join("captures").join(&result.capture_id).exists());
         fs::remove_dir_all(root).unwrap();
+
+        let lossy_root = temporary_root("ephemeral-lossy");
+        let lossy_result = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![
+                    OsString::from("python3"),
+                    OsString::from("-c"),
+                    OsString::from("print('x' * 10000)"),
+                ],
+                spool_root: lossy_root.clone(),
+                max_bytes: 16 * 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                mode: PresentationMode::Safe,
+                persistence: PersistenceMode::ProcessLocal,
+                full_if_bytes: 1,
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap();
+        let lossy_presentation = lossy_result.presentation.unwrap();
+        assert!(lossy_presentation.omission);
+        assert_eq!(
+            lossy_presentation.persistence.status,
+            "lossy-evidence-unavailable"
+        );
+        assert!(!lossy_presentation.persistence.retrieval_available);
+        assert!(!lossy_presentation
+            .body
+            .as_deref()
+            .unwrap_or_default()
+            .contains("retrieve the capture"));
+        assert!(lossy_result.path.as_os_str().is_empty());
+        fs::remove_dir_all(lossy_root).unwrap();
 
         let required_root = temporary_root("required-ephemeral");
         let error = capture_command_with_presentation(

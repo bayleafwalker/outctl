@@ -231,6 +231,7 @@ where
 fn parse_presentation_mode(value: OsString) -> Result<PresentationMode, CliError> {
     match value.to_string_lossy().as_ref() {
         "auto" => Ok(PresentationMode::Auto),
+        "minimum-savings" | "minimum" => Ok(PresentationMode::MinimumSavings),
         "safe" | "raw-safe" => Ok(PresentationMode::Safe),
         "compact" => Ok(PresentationMode::Compact),
         "projected" | "bounded-projection" => Ok(PresentationMode::Projected),
@@ -473,7 +474,7 @@ pub fn version_output() -> &'static str {
     outctl_engine::ENGINE_VERSION
 }
 
-pub const HELP_OUTPUT: &str = "outctl-native capabilities [--json]\noutctl-native version\noutctl-native run [--spool-root PATH] [--max-bytes N] [--timeout-ms N] [--cwd PATH] [--workspace-id ID] [--required-capture] [--presentation-mode auto|safe|compact|projected|metadata] [--persist memory-only|process-local|host-persistent|replicated] [--max-projection-bytes N] [--max-projection-lines N] [--max-projection-tokens N] [--full-if-bytes N] -- ARGV...\noutctl-native inspect [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native verify [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native recover [--spool-root PATH]\n";
+pub const HELP_OUTPUT: &str = "outctl-native capabilities [--json]\noutctl-native version\noutctl-native run [--spool-root PATH] [--max-bytes N] [--timeout-ms N] [--cwd PATH] [--workspace-id ID] [--required-capture] [--presentation-mode auto|minimum-savings|safe|compact|projected|metadata] [--persist memory-only|process-local|host-persistent|replicated] [--max-projection-bytes N] [--max-projection-lines N] [--max-projection-tokens N] [--full-if-bytes N] -- ARGV...\noutctl-native inspect [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native verify [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native recover [--spool-root PATH]\n";
 
 #[cfg(test)]
 mod tests {
@@ -498,5 +499,17 @@ mod tests {
         let error = parse_args(args(&["run", "--"])).unwrap_err();
         assert_eq!(error.exit_code(), 125);
         assert!(error.message().contains("direct argv"));
+    }
+
+    #[test]
+    fn minimum_savings_presentation_mode_is_parseable() {
+        assert!(parse_args(args(&[
+            "run",
+            "--presentation-mode",
+            "minimum-savings",
+            "--",
+            "true",
+        ]))
+        .is_ok());
     }
 }
