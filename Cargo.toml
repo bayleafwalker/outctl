@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/outctl-contracts",
+    "crates/outctl-engine",
+    "crates/outctl-cli",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+publish = false
