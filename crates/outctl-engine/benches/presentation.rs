@@ -7,7 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn render_once(stdout: &std::path::Path, stderr: &std::path::Path) -> (u128, usize, bool) {
     let options = PresentationOptions {
-        mode: PresentationMode::Auto,
+        // Keep the large-candidate stress path explicit so it proves candidate
+        // retention independently of adaptive cost selection.
+        mode: PresentationMode::Projected,
         max_bytes: 64 * 1024,
         max_lines: 1_200,
         max_estimated_tokens: 12_000,

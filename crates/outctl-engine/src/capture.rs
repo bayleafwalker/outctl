@@ -1,5 +1,5 @@
 use crate::presentation::{
-    render_capture_files, PersistenceMode, PresentationOptions, PresentationResult,
+    render_capture_files_from_handles, PersistenceMode, PresentationOptions, PresentationResult,
 };
 use crate::storage::{capture_id, rename_entry, PrivateDir, CHUNK_BYTES};
 use serde::Serialize;
@@ -135,6 +135,14 @@ pub fn capture_command(
     options: &CaptureOptions,
     cancellation: Option<&AtomicBool>,
 ) -> Result<CaptureResult, CaptureError> {
+    let (result, _pinned_capture) = capture_command_pinned(options, cancellation)?;
+    Ok(result)
+}
+
+fn capture_command_pinned(
+    options: &CaptureOptions,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(CaptureResult, PrivateDir), CaptureError> {
     validate_options(options)?;
     let command_started = Instant::now();
     let capture_id = capture_id();
@@ -401,7 +409,7 @@ pub fn capture_command(
             source,
         })?;
     let finalize_ms = finalize_started.elapsed().as_millis();
-    Ok(CaptureResult {
+    let result = CaptureResult {
         capture_id,
         path: spool.final_path,
         command: command_result,
@@ -419,7 +427,8 @@ pub fn capture_command(
             drain_grace_exhausted,
         },
         presentation: None,
-    })
+    };
+    Ok((result, spool.partial))
 }
 
 /// Capture and render a command result using the native W4 presentation
@@ -449,17 +458,34 @@ pub fn capture_command_with_presentation(
                 .to_owned(),
         ));
     }
-    let mut result = capture_command(options, cancellation)?;
-    let stdout = result.path.join("stdout.raw");
-    let stderr = result.path.join("stderr.raw");
-    let mut presentation =
-        render_capture_files(&stdout, &stderr, &result.capture_id, presentation_options).map_err(
-            |source| CaptureError::Finalize {
+    let (mut result, pinned_capture) = capture_command_pinned(options, cancellation)?;
+    let stdout =
+        pinned_capture
+            .open_file("stdout.raw")
+            .map_err(|source| CaptureError::Finalize {
                 capture_id: result.capture_id.clone(),
                 path: result.path.clone(),
                 source,
-            },
-        )?;
+            })?;
+    let stderr =
+        pinned_capture
+            .open_file("stderr.raw")
+            .map_err(|source| CaptureError::Finalize {
+                capture_id: result.capture_id.clone(),
+                path: result.path.clone(),
+                source,
+            })?;
+    let mut presentation = render_capture_files_from_handles(
+        &stdout,
+        &stderr,
+        &result.capture_id,
+        presentation_options,
+    )
+    .map_err(|source| CaptureError::Finalize {
+        capture_id: result.capture_id.clone(),
+        path: result.path.clone(),
+        source,
+    })?;
     if matches!(
         presentation_options.persistence,
         PersistenceMode::MemoryOnly | PersistenceMode::ProcessLocal

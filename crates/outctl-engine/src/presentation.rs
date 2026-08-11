@@ -5,6 +5,7 @@
 //! keeps candidate records bounded; presentation backpressure can therefore
 //! never block the W3 pipe drainers.
 
+use crate::storage::PrivateDir;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
@@ -703,7 +704,6 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 struct ControlSanitizer {
-    escape: Vec<u8>,
     escape_kind: u8,
     osc_st_pending: bool,
     in_escape: bool,
@@ -713,7 +713,6 @@ struct ControlSanitizer {
 impl ControlSanitizer {
     fn new() -> Self {
         Self {
-            escape: Vec::new(),
             escape_kind: 0,
             osc_st_pending: false,
             in_escape: false,
@@ -725,9 +724,8 @@ impl ControlSanitizer {
         let mut output = Vec::new();
         for byte in bytes {
             if self.in_escape {
-                self.escape.push(*byte);
                 self.normalized = true;
-                if self.escape.len() == 1 {
+                if self.escape_kind == 0 {
                     self.escape_kind = match *byte {
                         b'[' => 1, // CSI: terminate at a final byte.
                         b']' => 2, // OSC: terminate at BEL or ST.
@@ -735,23 +733,20 @@ impl ControlSanitizer {
                     };
                     if self.escape_kind == 3 {
                         self.in_escape = false;
-                        self.escape.clear();
                     }
                 } else if self.escape_kind == 1 && *byte >= 0x40 && *byte <= 0x7e {
                     self.in_escape = false;
-                    self.escape.clear();
                 } else if self.escape_kind == 2 {
-                    if self.osc_st_pending {
+                    if *byte == 0x07 {
+                        self.in_escape = false;
+                        self.osc_st_pending = false;
+                    } else if self.osc_st_pending {
                         if *byte == b'\\' {
                             self.in_escape = false;
-                            self.escape.clear();
                             self.osc_st_pending = false;
                         } else {
                             self.osc_st_pending = *byte == 0x1b;
                         }
-                    } else if *byte == 0x07 {
-                        self.in_escape = false;
-                        self.escape.clear();
                     } else if *byte == 0x1b {
                         self.osc_st_pending = true;
                     }
@@ -760,7 +755,6 @@ impl ControlSanitizer {
             }
             if *byte == 0x1b {
                 self.in_escape = true;
-                self.escape.clear();
                 self.escape_kind = 0;
                 self.osc_st_pending = false;
                 self.normalized = true;
@@ -781,7 +775,6 @@ impl ControlSanitizer {
         }
         if final_chunk && self.in_escape {
             self.in_escape = false;
-            self.escape.clear();
             self.escape_kind = 0;
             self.osc_st_pending = false;
         }
@@ -805,12 +798,19 @@ fn consume_transformed(
 }
 
 fn read_stream(
-    path: &Path,
+    source: &File,
     name: &str,
     options: &PresentationOptions,
 ) -> io::Result<(StreamingCandidates, StreamPresentationStats, bool)> {
-    let mut file = File::open(path)?;
-    let raw_bytes = file.metadata()?.len();
+    let metadata = source.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "capture stream handle is not a regular file",
+        ));
+    }
+    let mut file = source.try_clone()?;
+    let raw_bytes = metadata.len();
     let mut candidates = StreamingCandidates::new(options)?;
     let mut redactor = ExactRedactor::new(&options.exact_redaction_values);
     let mut sanitizer = ControlSanitizer::new();
@@ -975,6 +975,56 @@ pub fn render_capture_files(
     capture_id: &str,
     options: &PresentationOptions,
 ) -> io::Result<PresentationResult> {
+    let stdout_parent = stdout.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "stdout capture path has no parent",
+        )
+    })?;
+    let stderr_parent = stderr.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "stderr capture path has no parent",
+        )
+    })?;
+    if stdout_parent != stderr_parent {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "capture streams must share a parent directory",
+        ));
+    }
+    let directory = PrivateDir::open(stdout_parent)?;
+    let stdout_name = stdout
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stdout capture name is invalid",
+            )
+        })?;
+    let stderr_name = stderr
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "stderr capture name is invalid",
+            )
+        })?;
+    let stdout_file = directory.open_file(stdout_name)?;
+    let stderr_file = directory.open_file(stderr_name)?;
+    render_capture_files_from_handles(&stdout_file, &stderr_file, capture_id, options)
+}
+
+/// Render already-pinned capture files.  The caller owns the directory/file
+/// descriptors, so presentation cannot follow a later pathname replacement.
+pub fn render_capture_files_from_handles(
+    stdout: &File,
+    stderr: &File,
+    capture_id: &str,
+    options: &PresentationOptions,
+) -> io::Result<PresentationResult> {
     options.validate()?;
     let (mut stdout_candidates, stdout_stats, stdout_changed) =
         read_stream(stdout, "stdout", options)?;
@@ -994,13 +1044,20 @@ pub fn render_capture_files(
         .normalized_bytes()
         .checked_add(stderr_candidates.normalized_bytes())
         .ok_or_else(|| io::Error::other("normalized byte count overflow"))?;
-    let empty_success = total_normalized == 0;
+    let empty_success = total_normalized == 0 && raw_bytes == 0;
     let rendered = if empty_success {
         RenderedBody {
             mode: PresentationMode::Safe,
             kind: "empty-success",
             body: Some(Vec::new()),
             omission: false,
+        }
+    } else if total_normalized == 0 {
+        RenderedBody {
+            mode: PresentationMode::Safe,
+            kind: "raw-safe",
+            body: Some(Vec::new()),
+            omission: true,
         }
     } else {
         match options.mode {
@@ -1017,7 +1074,7 @@ pub fn render_capture_files(
                     &mut stderr_candidates,
                     options,
                 );
-                if !safe.omission && body_cost(&safe) <= body_cost(&projected) {
+                if body_cost(&safe) <= body_cost(&projected) {
                     safe
                 } else {
                     projected
@@ -1068,8 +1125,10 @@ pub fn render_capture_files(
         exposed_estimated_tokens: exposed_tokens,
         estimated_tokens_saved: raw_tokens.saturating_sub(exposed_tokens),
         exposure_reduced: exposed_tokens < raw_tokens,
-        reason: if requested == PresentationMode::Safe && exposed_tokens < raw_tokens {
+        reason: if requested == PresentationMode::Safe && !omission && exposed_tokens < raw_tokens {
             "safe-small-output-is-cheaper".to_owned()
+        } else if requested == PresentationMode::Safe && omission {
+            "safe-bounded-body-is-cheapest".to_owned()
         } else if requested == PresentationMode::Safe {
             "safe-rendered-without-savings".to_owned()
         } else if requested == PresentationMode::Metadata {
@@ -1209,9 +1268,10 @@ fn enforce_body_budget(
 #[cfg(test)]
 mod tests {
     use super::{
-        render_capture_files, PersistenceMode, PresentationMode, PresentationOptions, SpillBuffer,
-        StreamingCandidates,
+        render_capture_files, render_capture_files_from_handles, ControlSanitizer, PersistenceMode,
+        PresentationMode, PresentationOptions, SpillBuffer, StreamingCandidates,
     };
+    use crate::storage::PrivateDir;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1287,6 +1347,88 @@ mod tests {
         assert!(!result.persistence.retrieval_available);
         assert!(!body.contains("retrieve the capture"));
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unterminated_controls_stay_bounded_across_large_input() {
+        assert!(std::mem::size_of::<ControlSanitizer>() <= 16);
+        let mut sanitizer = ControlSanitizer::new();
+        let chunk = [b'x'; 16 * 1024];
+        sanitizer.feed(b"\x1b]", false);
+        for _ in 0..2_048 {
+            assert!(sanitizer.feed(&chunk, false).is_empty());
+        }
+        assert_eq!(sanitizer.feed(b"\x1b", false), "");
+        assert_eq!(sanitizer.feed(b"\\after\n", false), "after\n");
+
+        let mut csi = ControlSanitizer::new();
+        let csi_chunk = [b'1'; 16 * 1024];
+        csi.feed(b"\x1b[", false);
+        for _ in 0..2_048 {
+            assert!(csi.feed(&csi_chunk, false).is_empty());
+        }
+        assert_eq!(csi.feed(b"mafter\n", false), "after\n");
+
+        let mut other = ControlSanitizer::new();
+        other.feed(b"\x1b", false);
+        assert_eq!(other.feed(b"7after\n", false), "after\n");
+    }
+
+    #[test]
+    fn sanitized_nonempty_capture_is_not_empty_success() {
+        let directory = root("sanitized-empty");
+        fs::create_dir_all(&directory).unwrap();
+        let stdout = directory.join("stdout.raw");
+        let stderr = directory.join("stderr.raw");
+        fs::write(&stdout, b"\x1b]unterminated OSC").unwrap();
+        fs::write(&stderr, b"").unwrap();
+        let result = render_capture_files(
+            &stdout,
+            &stderr,
+            "capture-sanitized-empty",
+            &PresentationOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.kind, "raw-safe");
+        assert!(result.omission);
+        assert!(result.lossy);
+        assert!(result.normalized);
+        assert!(result.body.unwrap().contains("omitted"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn pinned_render_handles_ignore_capture_root_replacement() {
+        let directory = root("pinned-replacement");
+        let attacker_directory = root("pinned-attacker");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("stdout.raw"), b"trusted stdout\n").unwrap();
+        fs::write(directory.join("stderr.raw"), b"trusted stderr\n").unwrap();
+        let pinned = PrivateDir::open(&directory).unwrap();
+        let stdout = pinned.open_file("stdout.raw").unwrap();
+        let stderr = pinned.open_file("stderr.raw").unwrap();
+
+        fs::rename(&directory, &attacker_directory).unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("stdout.raw"), b"attacker stdout\n").unwrap();
+        fs::write(directory.join("stderr.raw"), b"attacker stderr\n").unwrap();
+
+        let result = render_capture_files_from_handles(
+            &stdout,
+            &stderr,
+            "capture-pinned",
+            &PresentationOptions {
+                mode: PresentationMode::Safe,
+                ..PresentationOptions::default()
+            },
+        )
+        .unwrap();
+        let body = result.body.unwrap();
+        assert!(body.contains("trusted stdout"));
+        assert!(body.contains("trusted stderr"));
+        assert!(!body.contains("attacker"));
+        fs::remove_dir_all(directory).unwrap();
+        fs::remove_dir_all(attacker_directory).unwrap();
     }
 
     #[test]
@@ -1369,6 +1511,69 @@ mod tests {
     }
 
     #[test]
+    fn auto_and_minimum_savings_choose_the_cheapest_encoded_body() {
+        let directory = root("encoded-cost");
+        fs::create_dir_all(&directory).unwrap();
+        let stdout = directory.join("stdout.raw");
+        let stderr = directory.join("stderr.raw");
+        let mut input = String::new();
+        for index in 0..100 {
+            input.push_str(&format!("ERROR marker-{index}\n"));
+        }
+        fs::write(&stdout, input).unwrap();
+        fs::write(&stderr, b"").unwrap();
+        let options = PresentationOptions {
+            max_bytes: 512,
+            max_lines: 32,
+            max_estimated_tokens: 128,
+            full_if_bytes: 1,
+            ..PresentationOptions::default()
+        };
+        let safe = render_capture_files(
+            &stdout,
+            &stderr,
+            "capture-encoded-safe",
+            &PresentationOptions {
+                mode: PresentationMode::Safe,
+                ..options.clone()
+            },
+        )
+        .unwrap();
+        let projected = render_capture_files(
+            &stdout,
+            &stderr,
+            "capture-encoded-projected",
+            &PresentationOptions {
+                mode: PresentationMode::Projected,
+                ..options.clone()
+            },
+        )
+        .unwrap();
+        assert!(safe.omission);
+        assert!(
+            safe.exposed_bytes < projected.exposed_bytes,
+            "safe={} projected={}",
+            safe.exposed_bytes,
+            projected.exposed_bytes
+        );
+        for mode in [PresentationMode::Auto, PresentationMode::MinimumSavings] {
+            let result = render_capture_files(
+                &stdout,
+                &stderr,
+                mode.as_str(),
+                &PresentationOptions {
+                    mode,
+                    ..options.clone()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.mode, "safe");
+            assert_eq!(result.exposed_bytes, safe.exposed_bytes);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn explicit_modes_report_their_contract_kinds() {
         let directory = root("modes");
         fs::create_dir_all(&directory).unwrap();
@@ -1412,6 +1617,7 @@ mod tests {
         fs::write(&stdout, bytes).unwrap();
         fs::write(&stderr, b"").unwrap();
         let options = PresentationOptions {
+            mode: PresentationMode::Projected,
             max_bytes: 512,
             max_lines: 32,
             max_estimated_tokens: 128,

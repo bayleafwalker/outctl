@@ -8,14 +8,22 @@ top of the reviewed W3 capture boundary.
 
 - Incremental exact-value redaction and control/ANSI neutralization happen
   before any presentation body is exposed.
+- Sanitizer state is scalar and bounded: unterminated OSC/CSI/control input is
+  discarded incrementally while OSC BEL and ST (`ESC \\`) termination remains
+  correct across chunk boundaries.
 - Streaming candidates retain bounded head, tail, and diagnostic records;
   oversized output selects a projected view with an explicit omission marker.
   Provisional safe output is a capped `SpillBuffer` (16 KiB memory threshold,
   64 KiB hard ceiling), and spill reads are prefix-bounded.
-- `auto` and `minimum-savings` compare final rendered byte/token/line costs;
+- Production presentation consumes descriptor-relative handles pinned before
+  W3 finalization rename; `openat(O_NOFOLLOW)` plus regular-file `fstat` checks
+  prevent capture-root/file pathname replacement from changing rendered bytes.
+- `auto` and `minimum-savings` compare final rendered byte/token/line costs,
+  including bounded safe bodies carrying omission markers;
   explicit safe, compact, projected, and metadata modes report `raw-safe`,
   `bounded-projection`, and `metadata-only` kinds. Empty successful output is
-  explicitly `empty-success` and raw-safe.
+  explicitly `empty-success` and raw-safe; nonempty content sanitized entirely
+  away is lossy and omission-marked rather than empty-success.
 - `full-if-bytes` and all presentation budgets are validated before spawn;
   checked arithmetic and bounded record/transform limits prevent overflow or
   unbounded provisional retention. Tiny budgets that cannot represent a loss
@@ -35,18 +43,27 @@ top of the reviewed W3 capture boundary.
 The final candidate was checked with Cargo visible to Python through the Nix
 toolchain path (Cargo 1.97.0, rustc/rustfmt/clippy 1.97.0, GCC 15.3.0):
 
-- `cargo test --workspace --all-targets --no-fail-fast`: 29 Rust tests passed;
-  the benchmark target also ran.
+- The repository pins Rust `1.85.1` in `rust-toolchain.toml`, but Rust 1.85.1
+  and `rustup` are unavailable on this host. All feasible native gates ran
+  with the installed Nix Rust 1.97.0 toolchain; exact 1.85.1 compatibility is
+  the remaining environment-dependent limitation.
+
+- `cargo test --workspace --all-targets --no-fail-fast`: 33 Rust tests passed
+  (29 engine, 3 CLI, 1 contracts); the benchmark target also ran.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - `cargo-fmt --all -- --check`: passed. The host Cargo binary does not expose
   the `fmt` subcommand, so the installed `cargo-fmt` companion was invoked
-  directly; this is the only toolchain deviation.
+  directly; this is a command-invocation deviation in addition to the pinned
+  Rust 1.85.1 availability limitation above.
 - `cargo bench -p outctl-engine --bench presentation`: passed; incremental
-  3,888,913-byte fixture, five renders, 183–226 ms optimized render range in
+  3,888,913-byte fixture, five renders, 186–247 ms optimized render range in
   the final benchmark run, bounded exposure, candidate retention, safe-small,
-  explicit-mode, tiny-budget, and spill assertions all passed.
+  explicit-mode, tiny-budget, and spill assertions all passed. The bounded
+  sanitizer regression streamed 32 MiB unterminated OSC/CSI input without
+  retaining the sequence; the handle regression rendered trusted bytes after
+  adversarial capture-root replacement.
 - `uv sync --all-extras --dev`: passed.
-- `uv run pytest`: **220 passed in 29.80s** with the Cargo/Rust/GCC path
+- `uv run pytest`: **220 passed in 30.31s** with the Cargo/Rust/GCC path
   exported.
 - `uv run ruff check .`: **All checks passed!**
 - `uv run mypy src`: **Success: no issues found in 31 source files**.
