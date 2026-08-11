@@ -14,11 +14,9 @@ top of the reviewed W3 capture boundary.
 - Streaming candidates retain bounded head, tail, and diagnostic records;
   oversized output selects a projected view with an explicit omission marker.
   Provisional safe output is a capped `SpillBuffer` (16 KiB memory threshold,
-  64 KiB hard ceiling) under a randomly named mode-0700 private directory;
-  spill reads use the retained read/write descriptor and descriptor-relative
-  unlink cleanup. Directory removal uses the pinned parent and first verifies
-  that the entry still names the pinned directory, so an empty path replacement
-  is never removed.
+  64 KiB hard ceiling) backed by an unnamed mode-0600 Linux `O_TMPFILE` opened
+  through the pinned spill-root descriptor. Reads retain that descriptor and
+  close is the only cleanup; there is no spill pathname or insecure fallback.
 - Production presentation consumes descriptor-relative handles pinned before
   W3 finalization rename; `openat(O_NOFOLLOW)` plus regular-file `fstat` checks
   prevent capture-root/file pathname replacement from changing rendered bytes.
@@ -43,11 +41,11 @@ top of the reviewed W3 capture boundary.
 - `SpillBuffer` provides bounded-memory buffering with mode `0600` spill files.
 - Persistence is reported independently from presentation. Host-persistent
   captures retain an opaque `outctl://capture/` reference; memory-only and
-  process-local captures remove their temporary material before return. Lossy
+  process-local captures descriptor-unlink all evidence before return. Lossy
   ephemeral results say evidence is unavailable and do not offer retrieval;
-  cleanup unlinks only known files through the pinned capture descriptor and
-  removes the capture through its pinned parent after an identity check. A
-  replicated request fails before spawn without a configured replica backend.
+  cleanup leaves only an empty, unreferenced capture-directory tombstone rather
+  than risk a pathname-racy directory removal. A replicated request fails
+  before spawn without a configured replica backend.
 - Raw line metadata counts LF bytes from the unmodified capture stream rather
   than deriving the count from redacted or control-normalized output.
 - The Python engine, v1 manifest writer, direct-argv process semantics,
@@ -71,7 +69,7 @@ toolchain path (Cargo 1.97.0, rustc/rustfmt/clippy 1.97.0, GCC 15.3.0):
   directly; this is a command-invocation deviation in addition to the pinned
   Rust 1.85.1 availability limitation above.
 - `cargo bench -p outctl-engine --bench presentation`: passed; incremental
-  3,888,913-byte fixture, five renders, 169–217 ms optimized render range in
+  3,888,913-byte fixture, five renders, 165–212 ms optimized render range in
   the final benchmark run, bounded exposure, candidate retention, safe-small,
   explicit-mode, tiny-budget, private-spill, and spill-replacement assertions
   all passed. The bounded sanitizer regression streamed 32 MiB unterminated
@@ -100,6 +98,12 @@ channel, or v2 `RunRequest` adapter in W4. Exact redaction values are accepted
 only by the native library boundary; exposing them as ordinary CLI arguments is
 intentionally not added. Replication and policy-snapshot evaluation remain
 later-wave responsibilities.
+
+Ephemeral invocations intentionally retain one empty directory inode. This is
+the safe W4 boundary because POSIX has no inode-conditional directory removal;
+same-UID pathname replacement makes any name-based `rmdir` unsafe. Retention
+and garbage collection must bound these tombstones in the planned W7 retention
+wave. Operators using ephemeral mode before W7 should monitor inode usage.
 
 Rollback remains the W3/Python boundary:
 

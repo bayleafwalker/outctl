@@ -92,10 +92,6 @@ impl PrivateDir {
         self.create_file_with_flags(name, libc::O_WRONLY)
     }
 
-    pub(crate) fn create_read_write_file(&self, name: &str) -> io::Result<File> {
-        self.create_file_with_flags(name, libc::O_RDWR)
-    }
-
     fn create_file_with_flags(&self, name: &str, access: i32) -> io::Result<File> {
         validate_name(name)?;
         let file = openat_file(
@@ -112,17 +108,6 @@ impl PrivateDir {
     pub(crate) fn remove_file(&self, name: &str) -> io::Result<()> {
         let name = c_name(name)?;
         let result = unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) };
-        if result == -1 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    }
-
-    pub(crate) fn remove_dir(&self, name: &str) -> io::Result<()> {
-        let name = c_name(name)?;
-        let result =
-            unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
         if result == -1 {
             Err(io::Error::last_os_error())
         } else {
@@ -155,13 +140,6 @@ impl PrivateDir {
         self.file.sync_all()
     }
 
-    pub(crate) fn same_directory(&self, other: &Self) -> io::Result<bool> {
-        let left = self.file.metadata()?;
-        let right = other.file.metadata()?;
-        use std::os::unix::fs::MetadataExt;
-        Ok(left.dev() == right.dev() && left.ino() == right.ino())
-    }
-
     pub(crate) fn names(&self) -> io::Result<Vec<OsString>> {
         let proc_path = PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()));
         fs::read_dir(proc_path)?
@@ -169,30 +147,20 @@ impl PrivateDir {
             .collect()
     }
 
-    pub(crate) fn create_private_temp_dir(
-        parent_path: &Path,
-        prefix: &str,
-    ) -> io::Result<(Self, String, Self)> {
-        let parent = Self::open(parent_path)?;
-        let mut random = File::open("/dev/urandom")?;
-        for _ in 0..32 {
-            let mut bytes = [0_u8; 16];
-            random.read_exact(&mut bytes)?;
-            let suffix = bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            let name = format!("{prefix}-{suffix}");
-            match parent.create_dir(&name) {
-                Ok(directory) => return Ok((parent, name, directory)),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not allocate a private temporary directory",
-        ))
+    pub(crate) fn create_unnamed_file(&self) -> io::Result<File> {
+        let dot = CString::new(".").expect("literal has no NUL");
+        let descriptor = unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                dot.as_ptr(),
+                libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        let file = descriptor_file(descriptor)?;
+        require_regular(&file)?;
+        set_file_mode(&file, 0o600)?;
+        Ok(file)
     }
 
     fn set_private_permissions(&self) -> io::Result<()> {

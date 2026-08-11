@@ -153,14 +153,14 @@ pub fn capture_command(
     options: &CaptureOptions,
     cancellation: Option<&AtomicBool>,
 ) -> Result<CaptureResult, CaptureError> {
-    let (result, _pinned_capture, _captures_root) = capture_command_pinned(options, cancellation)?;
+    let (result, _pinned_capture) = capture_command_pinned(options, cancellation)?;
     Ok(result)
 }
 
 fn capture_command_pinned(
     options: &CaptureOptions,
     cancellation: Option<&AtomicBool>,
-) -> Result<(CaptureResult, PrivateDir, PrivateDir), CaptureError> {
+) -> Result<(CaptureResult, PrivateDir), CaptureError> {
     validate_options(options)?;
     let command_started = Instant::now();
     let capture_id = capture_id();
@@ -446,7 +446,7 @@ fn capture_command_pinned(
         },
         presentation: None,
     };
-    Ok((result, spool.partial, spool.captures_root))
+    Ok((result, spool.partial))
 }
 
 /// Capture and render a command result using the native W4 presentation
@@ -476,8 +476,7 @@ pub fn capture_command_with_presentation(
                 .to_owned(),
         ));
     }
-    let (mut result, pinned_capture, captures_root) =
-        capture_command_pinned(options, cancellation)?;
+    let (mut result, pinned_capture) = capture_command_pinned(options, cancellation)?;
     let stdout = pinned_capture.open_file("stdout.raw").map_err(|source| {
         CaptureError::Presentation(Box::new(PresentationFailure {
             capture_id: result.capture_id.clone(),
@@ -521,11 +520,13 @@ pub fn capture_command_with_presentation(
         PersistenceMode::MemoryOnly | PersistenceMode::ProcessLocal
     ) {
         // These modes are intentionally not represented by a durable capture
-        // reference.  Remove the host-local material before returning so a
-        // process-local result cannot be mistaken for host persistence.
+        // reference. Unlink all evidence through the pinned directory before
+        // returning. The empty directory tombstone is retained deliberately:
+        // POSIX has no inode-conditional rmdir, so name-based cleanup could
+        // delete a same-UID attacker's replacement directory.
         drop(stdout);
         drop(stderr);
-        let cleanup = cleanup_ephemeral_capture(pinned_capture, captures_root, &result.capture_id);
+        let cleanup = cleanup_ephemeral_capture(pinned_capture);
         if let Err(source) = cleanup {
             presentation.persistence.status = "cleanup-failed".to_owned();
             presentation.persistence.honest = false;
@@ -541,25 +542,11 @@ pub fn capture_command_with_presentation(
     Ok(result)
 }
 
-fn cleanup_ephemeral_capture(
-    pinned_capture: PrivateDir,
-    captures_root: PrivateDir,
-    capture_id: &str,
-) -> io::Result<()> {
+fn cleanup_ephemeral_capture(pinned_capture: PrivateDir) -> io::Result<()> {
     for name in ["stdout.raw", "stderr.raw", "events.ndjson", "manifest.json"] {
         pinned_capture.remove_file(name)?;
     }
-    pinned_capture.sync()?;
-    let current = captures_root.open_dir(capture_id)?;
-    if !pinned_capture.same_directory(&current)? {
-        return Err(io::Error::other(
-            "capture path was replaced before ephemeral cleanup",
-        ));
-    }
-    drop(current);
-    drop(pinned_capture);
-    captures_root.remove_dir(capture_id)?;
-    captures_root.sync()
+    pinned_capture.sync()
 }
 
 fn validate_options(options: &CaptureOptions) -> Result<(), CaptureError> {
@@ -1098,7 +1085,9 @@ mod tests {
         assert_eq!(presentation.persistence.durability, "none");
         assert_eq!(presentation.persistence.reference, None);
         assert!(presentation.persistence.honest);
-        assert!(!root.join("captures").join(&result.capture_id).exists());
+        let tombstone = root.join("captures").join(&result.capture_id);
+        assert!(tombstone.is_dir());
+        assert!(fs::read_dir(&tombstone).unwrap().next().is_none());
         fs::remove_dir_all(root).unwrap();
 
         let lossy_root = temporary_root("ephemeral-lossy");
@@ -1138,6 +1127,9 @@ mod tests {
             .unwrap_or_default()
             .contains("retrieve the capture"));
         assert!(lossy_result.path.as_os_str().is_empty());
+        let lossy_tombstone = lossy_root.join("captures").join(&lossy_result.capture_id);
+        assert!(lossy_tombstone.is_dir());
+        assert!(fs::read_dir(&lossy_tombstone).unwrap().next().is_none());
         fs::remove_dir_all(lossy_root).unwrap();
 
         let required_root = temporary_root("required-ephemeral");
@@ -1196,8 +1188,7 @@ mod tests {
         fs::rename(root.join(capture_id), &moved).unwrap();
         fs::create_dir(root.join(capture_id)).unwrap();
 
-        let error = cleanup_ephemeral_capture(capture, captures, capture_id).unwrap_err();
-        assert!(error.to_string().contains("replaced"));
+        cleanup_ephemeral_capture(capture).unwrap();
         assert!(root.join(capture_id).is_dir());
         assert!(fs::read_dir(root.join(capture_id))
             .unwrap()

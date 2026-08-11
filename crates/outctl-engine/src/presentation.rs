@@ -325,14 +325,9 @@ pub struct SpillBuffer {
     memory: Vec<u8>,
     spill: Option<File>,
     spill_root: Option<PathBuf>,
-    spill_parent: Option<PrivateDir>,
-    spill_name: Option<String>,
-    spill_directory: Option<PrivateDir>,
     len: u64,
     max_bytes: Option<u64>,
 }
-
-const SPILL_FILE_NAME: &str = "buffer.raw";
 
 impl SpillBuffer {
     pub fn new(memory_limit: usize, spill_root: Option<&Path>) -> io::Result<Self> {
@@ -347,9 +342,6 @@ impl SpillBuffer {
             memory: Vec::with_capacity(memory_limit.min(READ_BYTES)),
             spill: None,
             spill_root: spill_root.map(Path::to_path_buf),
-            spill_parent: None,
-            spill_name: None,
-            spill_directory: None,
             len: 0,
             max_bytes: None,
         })
@@ -392,16 +384,8 @@ impl SpillBuffer {
                     "spill root is required when the memory limit is exceeded",
                 )
             })?;
-            let (parent, name, directory) =
-                PrivateDir::create_private_temp_dir(&root, "outctl-w4-spill")?;
-            self.spill_parent = Some(parent);
-            self.spill_name = Some(name);
-            self.spill_directory = Some(directory);
-            let file = self
-                .spill_directory
-                .as_ref()
-                .expect("spill directory initialized")
-                .create_read_write_file(SPILL_FILE_NAME)?;
+            let directory = PrivateDir::open(&root)?;
+            let file = directory.create_unnamed_file()?;
             self.spill = Some(file);
             self.spill
                 .as_mut()
@@ -441,7 +425,6 @@ impl SpillBuffer {
                 .take(prefix_len as u64)
                 .read_to_end(&mut bytes)?;
             drop(file);
-            self.cleanup_spill_directory();
             self.len = 0;
             Ok(bytes)
         } else {
@@ -453,32 +436,9 @@ impl SpillBuffer {
     }
 }
 
-impl SpillBuffer {
-    fn cleanup_spill_directory(&mut self) {
-        if let Some(directory) = self.spill_directory.take() {
-            let _ = directory.remove_file(SPILL_FILE_NAME);
-            if let (Some(parent), Some(name)) = (self.spill_parent.take(), self.spill_name.take()) {
-                let matches = parent
-                    .try_open_dir(&name)
-                    .and_then(|candidate| {
-                        candidate
-                            .as_ref()
-                            .map_or(Ok(false), |candidate| directory.same_directory(candidate))
-                    })
-                    .unwrap_or(false);
-                drop(directory);
-                if matches {
-                    let _ = parent.remove_dir(&name);
-                }
-            }
-        }
-    }
-}
-
 impl Drop for SpillBuffer {
     fn drop(&mut self) {
         let _ = self.spill.take();
-        self.cleanup_spill_directory();
     }
 }
 
@@ -1400,17 +1360,11 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let mut buffer = SpillBuffer::new(4, Some(&directory)).unwrap();
         buffer.write(b"trusted").unwrap();
-        let private_directory = fs::read_dir(&directory)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        fs::rename(&private_directory, &attacker_directory).unwrap();
-        fs::create_dir(&private_directory).unwrap();
+        assert!(fs::read_dir(&directory).unwrap().next().is_none());
+        fs::rename(&directory, &attacker_directory).unwrap();
+        fs::create_dir(&directory).unwrap();
         assert_eq!(buffer.read_prefix(7).unwrap(), b"trusted");
-        assert!(private_directory.is_dir());
-        assert!(fs::read_dir(&private_directory).unwrap().next().is_none());
+        assert!(fs::read_dir(&directory).unwrap().next().is_none());
         assert!(fs::read_dir(&attacker_directory).unwrap().next().is_none());
         fs::remove_dir_all(directory).unwrap();
         fs::remove_dir_all(attacker_directory).unwrap();
