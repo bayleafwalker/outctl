@@ -1,0 +1,7 @@
+{
+  "schema_version": "vuoro.outctl.engine-capabilities/v2",
+  "engine": {"id": "python-reference", "version": "0.1.0.dev0", "platform": "linux-x86_64"},
+  "contract_versions": {"run_request": ["v2"], "policy_snapshot": ["v2"], "run_result": ["v2"], "capture_manifest": ["v1alpha1", "v2"]},
+  "features": {"direct_argv": true, "explicit_shell": false, "stdin": false, "retrieval": true, "one_version_back_read": true},
+  "limits": {"max_argv_items": 256, "max_capture_bytes": 268435456, "max_projection_bytes": 65536}
+}

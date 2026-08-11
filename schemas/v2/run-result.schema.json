@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:run-result:v2",
+  "title": "Outctl v2 engine RunResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "engine", "policy", "outcome", "command", "capture", "presentation", "wrapper_error"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.run-result/v2"},
+    "request_id": {"type": "string", "minLength": 1},
+    "engine": {"type": "object", "additionalProperties": false, "required": ["id", "version"], "properties": {"id": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}},
+    "policy": {"type": "object", "additionalProperties": false, "required": ["snapshot_id", "ref", "digest"], "properties": {"snapshot_id": {"type": "string", "minLength": 1}, "ref": {"type": "string", "minLength": 1}, "digest": {"$ref": "#/$defs/digest"}}},
+    "outcome": {"enum": ["completed", "bypassed", "unsupported", "rejected", "capture-failed"]},
+    "command": {
+      "type": "object", "additionalProperties": false,
+      "required": ["started", "exit_code", "signal", "timed_out", "cancelled"],
+      "properties": {"started": {"type": "boolean"}, "exit_code": {"type": ["integer", "null"], "minimum": 0, "maximum": 255}, "signal": {"type": ["integer", "null"], "minimum": 1, "maximum": 64}, "timed_out": {"type": "boolean"}, "cancelled": {"type": "boolean"}},
+      "allOf": [
+        {"if": {"required": ["started"], "properties": {"started": {"const": false}}}, "then": {"properties": {"exit_code": {"const": null}, "signal": {"const": null}, "timed_out": {"const": false}, "cancelled": {"const": false}}}},
+        {"if": {"required": ["exit_code"], "properties": {"exit_code": {"type": "integer"}}}, "then": {"properties": {"signal": {"const": null}}}},
+        {"if": {"required": ["signal"], "properties": {"signal": {"type": "integer"}}}, "then": {"properties": {"exit_code": {"const": null}}}},
+        {"if": {"required": ["timed_out"], "properties": {"timed_out": {"const": true}}}, "then": {"properties": {"started": {"const": true}}}},
+        {"if": {"required": ["cancelled"], "properties": {"cancelled": {"const": true}}}, "then": {"properties": {"started": {"const": true}}}}
+      ]
+    },
+    "capture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "ref", "manifest_digest", "complete"],
+      "properties": {"status": {"enum": ["not-requested", "bypassed", "complete", "truncated", "degraded", "failed", "recovered-incomplete"]}, "ref": {"type": ["string", "null"], "pattern": "^outctl://capture/"}, "manifest_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"}, "complete": {"type": "boolean"}},
+      "allOf": [
+        {"if": {"required": ["status"], "properties": {"status": {"enum": ["not-requested", "bypassed"]}}}, "then": {"properties": {"ref": {"const": null}, "manifest_digest": {"const": null}, "complete": {"const": false}}}},
+        {"if": {"required": ["status"], "properties": {"status": {"const": "complete"}}}, "then": {"properties": {"ref": {"type": "string"}, "manifest_digest": {"type": "string"}, "complete": {"const": true}}}},
+        {"if": {"required": ["status"], "properties": {"status": {"enum": ["truncated", "degraded", "recovered-incomplete"]}}}, "then": {"properties": {"ref": {"type": "string"}, "manifest_digest": {"type": "string"}, "complete": {"const": false}}}}
+      ]
+    },
+    "presentation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "body", "lossy", "redacted", "digest"],
+      "properties": {"kind": {"enum": ["empty-success", "raw-safe", "bounded-projection", "metadata-only", "denied", "none"]}, "body": {"type": ["string", "null"], "maxLength": 1048576}, "lossy": {"type": "boolean"}, "redacted": {"type": "boolean"}, "digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"}},
+      "allOf": [
+        {"if": {"required": ["kind"], "properties": {"kind": {"const": "none"}}}, "then": {"properties": {"body": {"const": null}, "lossy": {"const": false}, "digest": {"const": null}}}},
+        {"if": {"required": ["kind"], "properties": {"kind": {"const": "denied"}}}, "then": {"properties": {"body": {"const": null}, "digest": {"const": null}}}}
+      ]
+    },
+    "wrapper_error": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["code", "phase", "message_key"],
+      "properties": {"code": {"enum": ["OUTCTL_PRESPAWN_INVALID_REQUEST", "OUTCTL_PRESPAWN_POLICY_REJECTED", "OUTCTL_PRESPAWN_UNSUPPORTED", "OUTCTL_PRESPAWN_CAPTURE_UNAVAILABLE", "OUTCTL_POSTSPAWN_CAPTURE_FAILED"]}, "phase": {"enum": ["pre-spawn", "post-spawn"]}, "message_key": {"type": "string", "minLength": 1}},
+      "allOf": [
+        {"if": {"required": ["code"], "properties": {"code": {"enum": ["OUTCTL_PRESPAWN_INVALID_REQUEST", "OUTCTL_PRESPAWN_POLICY_REJECTED", "OUTCTL_PRESPAWN_UNSUPPORTED", "OUTCTL_PRESPAWN_CAPTURE_UNAVAILABLE"]}}}, "then": {"properties": {"phase": {"const": "pre-spawn"}}}},
+        {"if": {"required": ["code"], "properties": {"code": {"const": "OUTCTL_POSTSPAWN_CAPTURE_FAILED"}}}, "then": {"properties": {"phase": {"const": "post-spawn"}}}}
+      ]
+    }
+  },
+  "allOf": [
+    {"if": {"required": ["outcome"], "properties": {"outcome": {"const": "bypassed"}}}, "then": {"properties": {"command": {"properties": {"started": {"const": true}}, "required": ["started"]}, "capture": {"properties": {"status": {"const": "bypassed"}}, "required": ["status"]}, "presentation": {"properties": {"kind": {"const": "none"}}, "required": ["kind"]}, "wrapper_error": {"const": null}}}},
+    {"if": {"required": ["outcome"], "properties": {"outcome": {"const": "unsupported"}}}, "then": {"properties": {"command": {"properties": {"started": {"const": false}}, "required": ["started"]}, "capture": {"properties": {"status": {"const": "not-requested"}}, "required": ["status"]}, "presentation": {"properties": {"kind": {"const": "denied"}}, "required": ["kind"]}, "wrapper_error": {"type": "object", "properties": {"code": {"const": "OUTCTL_PRESPAWN_UNSUPPORTED"}, "phase": {"const": "pre-spawn"}}, "required": ["code", "phase"]}}}},
+    {"if": {"required": ["outcome"], "properties": {"outcome": {"const": "rejected"}}}, "then": {"properties": {"command": {"properties": {"started": {"const": false}}, "required": ["started"]}, "capture": {"properties": {"status": {"const": "not-requested"}}, "required": ["status"]}, "presentation": {"properties": {"kind": {"const": "denied"}}, "required": ["kind"]}, "wrapper_error": {"type": "object", "properties": {"code": {"enum": ["OUTCTL_PRESPAWN_INVALID_REQUEST", "OUTCTL_PRESPAWN_POLICY_REJECTED", "OUTCTL_PRESPAWN_CAPTURE_UNAVAILABLE"]}, "phase": {"const": "pre-spawn"}}, "required": ["code", "phase"]}}}},
+    {"if": {"required": ["outcome"], "properties": {"outcome": {"const": "capture-failed"}}}, "then": {"properties": {"command": {"properties": {"started": {"const": true}}, "required": ["started"]}, "capture": {"properties": {"status": {"enum": ["degraded", "failed"]}}, "required": ["status"]}, "wrapper_error": {"type": "object", "properties": {"code": {"const": "OUTCTL_POSTSPAWN_CAPTURE_FAILED"}, "phase": {"const": "post-spawn"}}, "required": ["code", "phase"]}}}},
+    {"if": {"required": ["outcome"], "properties": {"outcome": {"const": "completed"}}}, "then": {"properties": {"command": {"properties": {"started": {"const": true}}, "required": ["started"]}, "capture": {"properties": {"status": {"enum": ["complete", "truncated", "recovered-incomplete"]}}, "required": ["status"]}, "wrapper_error": {"const": null}}}}
+  ],
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}
+}

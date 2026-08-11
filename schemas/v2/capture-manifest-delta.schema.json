@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:capture-manifest-delta:v2",
+  "title": "Outctl v2 additive capture manifest delta",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "base_schema_version", "capture_id", "manifest_digest", "engine", "request_digest", "policy", "commitment", "durability", "presentation", "compatibility"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.capture-manifest-delta/v2"},
+    "base_schema_version": {"const": "vuoro.outctl.capture/v1alpha1"},
+    "capture_id": {"type": "string", "minLength": 1},
+    "manifest_digest": {"$ref": "#/$defs/digest"},
+    "engine": {"type": "object", "additionalProperties": false, "required": ["id", "version"], "properties": {"id": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}},
+    "request_digest": {"$ref": "#/$defs/digest"},
+    "policy": {"type": "object", "additionalProperties": false, "required": ["snapshot_id", "ref", "digest"], "properties": {"snapshot_id": {"type": "string", "minLength": 1}, "ref": {"type": "string", "minLength": 1}, "digest": {"$ref": "#/$defs/digest"}}},
+    "commitment": {"enum": ["memory-only", "process-local", "host-persistent", "replicated"]},
+    "durability": {"enum": ["none", "host", "replica", "authoritative"]},
+    "presentation": {"enum": ["empty-success", "raw-safe", "bounded-projection", "metadata-only", "denied"]},
+    "compatibility": {
+      "type": "object", "additionalProperties": false,
+      "required": ["v1_reader", "v1_writer", "v1_stream_bytes_preserved", "v1_manifest_byte_exact", "unknown_fields_ignored"],
+      "properties": {"v1_reader": {"const": "readable"}, "v1_writer": {"const": "python-reference-only"}, "v1_stream_bytes_preserved": {"const": true}, "v1_manifest_byte_exact": {"const": false}, "unknown_fields_ignored": {"const": true}}
+    }
+  },
+  "allOf": [
+    {"if": {"required": ["commitment"], "properties": {"commitment": {"enum": ["memory-only", "process-local"]}}}, "then": {"properties": {"durability": {"const": "none"}}}},
+    {"if": {"required": ["commitment"], "properties": {"commitment": {"const": "host-persistent"}}}, "then": {"properties": {"durability": {"const": "host"}}}},
+    {"if": {"required": ["commitment"], "properties": {"commitment": {"const": "replicated"}}}, "then": {"properties": {"durability": {"enum": ["replica", "authoritative"]}}}}
+  ],
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}
+}

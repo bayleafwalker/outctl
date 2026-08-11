@@ -1,0 +1,9 @@
+{
+  "schema_version": "vuoro.outctl.run-request/v2",
+  "request_id": "req-restricted-1",
+  "command": {"argv": ["kubectl", "get", "pods", "-o", "json"], "execution_mode": "direct-argv", "shell_command": null, "cwd": "/workspace", "environment": {"mode": "allowlist", "allowlist": ["PATH"]}, "stdin": {"mode": "none", "ref": null}, "timeout_ms": 5000},
+  "policy": {"snapshot_id": "snapshot-1", "ref": "policy://interactive-v2", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "sink": {"trust_domain": "restricted", "target": "handoff", "disclosure": "sanitized"},
+  "secret_channel": {"mode": "protected-opaque", "refs": ["secret://request/db-token"]},
+  "bindings": {"workspace_id": "workspace-1", "session_id": "session-2", "correlation_id": "corr-2", "action_id": 2133, "attempt_id": "attempt-1"}
+}

@@ -1,4 +1,9 @@
-# Implementation handoff: `outctl` Phase 1
+# Historical implementation handoff: `outctl` Python Phase 1
+
+> **Status:** Baseline delivered. New migration work starts at
+> [`docs/architecture/README.md`](docs/architecture/README.md) and follows
+> [`docs/MIGRATION_ROADMAP.md`](docs/MIGRATION_ROADMAP.md) wave by wave. This
+> document remains the v1 compatibility record, not the active product plan.
 
 ## Objective
 

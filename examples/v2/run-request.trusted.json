@@ -1,0 +1,9 @@
+{
+  "schema_version": "vuoro.outctl.run-request/v2",
+  "request_id": "req-trusted-1",
+  "command": {"argv": ["printf", "safe\\n"], "execution_mode": "direct-argv", "shell_command": null, "cwd": "/workspace", "environment": {"mode": "empty"}, "stdin": {"mode": "none", "ref": null}, "timeout_ms": 1000},
+  "policy": {"snapshot_id": "snapshot-1", "ref": "policy://interactive-v2", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "sink": {"trust_domain": "trusted-local", "target": "model", "disclosure": "safe-unredacted"},
+  "secret_channel": {"mode": "none", "refs": []},
+  "bindings": {"workspace_id": "workspace-1", "session_id": "session-1", "correlation_id": "corr-1", "action_id": null, "attempt_id": null}
+}

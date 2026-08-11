@@ -1,0 +1,9 @@
+{
+  "schema_version": "vuoro.outctl.digest-vectors/v1",
+  "algorithm": "sha256-canonical-json-utf8-v1",
+  "vectors": [
+    {"id": "empty-object", "value": {}, "canonical_json": "{}", "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"},
+    {"id": "unicode-and-order", "value": {"b": "μ", "a": 1, "omit": null}, "canonical_json": "{\"a\":1,\"b\":\"μ\"}", "sha256": "sha256:a7e537e4208da0a2563cd36491664cc9b19a7e186dd72c37b6f05882b5e75d5d"},
+    {"id": "nested-values", "value": {"name": "outctl", "items": [1, {"z": null, "a": true}]}, "canonical_json": "{\"items\":[1,{\"a\":true}],\"name\":\"outctl\"}", "sha256": "sha256:d2142fa784c3b27d95a8ddfdc7f619bfdfa57741b122aa866f57c97413e69401"}
+  ]
+}
