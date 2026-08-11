@@ -360,15 +360,27 @@ struct Request {
     bindings: Bindings,
 }
 
+/// Decode an explicitly present value or null without giving the field serde's
+/// normal `Option<T>` missing-field default.
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Command {
     argv: Vec<String>,
     execution_mode: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     shell_command: Option<String>,
     cwd: String,
     environment: Environment,
     stdin: Stdin,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     timeout_ms: Option<u64>,
 }
 
@@ -383,6 +395,7 @@ struct Environment {
 #[serde(deny_unknown_fields)]
 struct Stdin {
     mode: String,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     r#ref: Option<String>,
 }
 
@@ -597,33 +610,7 @@ pub fn capture_request_with_policy(
 }
 
 fn parse_request(request_json: &[u8]) -> Result<Request, PolicyError> {
-    let value: Value = serde_json::from_slice(request_json)
-        .map_err(|error| PolicyError::InvalidDocument(format!("request JSON: {error}")))?;
-    let command = value
-        .get("command")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            PolicyError::InvalidDocument("request command must be an object".to_owned())
-        })?;
-    let stdin = command
-        .get("stdin")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            PolicyError::InvalidDocument("command stdin must be an object".to_owned())
-        })?;
-    for field in ["shell_command", "timeout_ms"] {
-        if !command.contains_key(field) {
-            return Err(PolicyError::InvalidDocument(format!(
-                "command is missing required nullable field {field}"
-            )));
-        }
-    }
-    if !stdin.contains_key("ref") {
-        return Err(PolicyError::InvalidDocument(
-            "command stdin is missing required nullable field ref".to_owned(),
-        ));
-    }
-    serde_json::from_value(value)
+    serde_json::from_slice(request_json)
         .map_err(|error| PolicyError::InvalidDocument(format!("request JSON: {error}")))
 }
 
@@ -1143,11 +1130,49 @@ mod tests {
         let snapshot_bytes = serde_json::to_vec(&snapshot).unwrap();
         let request_bytes = serde_json::to_vec(&request).unwrap();
 
+        let result = capture_request_with_policy(
+            PolicyCaptureOptions {
+                snapshot_json: &snapshot_bytes,
+                request_json: &request_bytes,
+                context: &context,
+                secrets: &secrets,
+                spool_root: spool.clone(),
+                max_capture_bytes: 1024,
+                runner_authorized: true,
+            },
+            None,
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("omitted required nullable field was accepted"),
+        };
+        assert!(
+            matches!(
+                error,
+                PolicyCaptureError::Policy(PolicyError::InvalidDocument(_))
+            ),
+            "unexpected omission error: {error:?}"
+        );
+        assert!(!spool.exists());
+    }
+
+    fn assert_duplicate_request_field_rejected(label: &str, needle: &str, replacement: &str) {
+        let (snapshot, request, context) = source_policy();
+        let request_json = serde_json::to_string(&request).unwrap();
+        assert!(request_json.contains(needle));
+        let duplicate_request = request_json.replacen(needle, replacement, 1);
+        let mut secrets = ProtectedSecretRegistry::new();
+        secrets
+            .register("secret://test/value".to_owned(), b"secret".to_vec())
+            .unwrap();
+        let spool = temporary_spool(label);
+        let snapshot_bytes = serde_json::to_vec(&snapshot).unwrap();
+
         assert!(matches!(
             capture_request_with_policy(
                 PolicyCaptureOptions {
                     snapshot_json: &snapshot_bytes,
-                    request_json: &request_bytes,
+                    request_json: duplicate_request.as_bytes(),
                     context: &context,
                     secrets: &secrets,
                     spool_root: spool.clone(),
@@ -1457,5 +1482,31 @@ mod tests {
     #[test]
     fn omitted_stdin_ref_rejects_before_spool_creation() {
         assert_missing_required_nullable_rejected("stdin.ref");
+    }
+
+    #[test]
+    fn duplicate_top_level_sink_rejects_before_spool_creation() {
+        let sink =
+            r#""sink":{"disclosure":"sanitized","target":"handoff","trust_domain":"restricted"}"#;
+        let duplicate = format!("{sink},{sink}");
+        assert_duplicate_request_field_rejected("duplicate-sink", sink, &duplicate);
+    }
+
+    #[test]
+    fn duplicate_command_cwd_rejects_before_spool_creation() {
+        assert_duplicate_request_field_rejected(
+            "duplicate-cwd",
+            r#""cwd":"/workspace""#,
+            r#""cwd":"/workspace","cwd":"/workspace""#,
+        );
+    }
+
+    #[test]
+    fn duplicate_stdin_ref_rejects_before_spool_creation() {
+        assert_duplicate_request_field_rejected(
+            "duplicate-stdin-ref",
+            r#""ref":null"#,
+            r#""ref":null,"ref":null"#,
+        );
     }
 }

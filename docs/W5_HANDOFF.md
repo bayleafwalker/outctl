@@ -34,8 +34,10 @@ unregistered exact secret.
   selects capture commitment plus presentation action. It preserves the schema
   distinction between omitted and explicit-null required request fields;
   omitted `shell_command`, `timeout_ms`, or `stdin.ref` values fail before
-  spool creation. Replicated persistence remains an explicit pre-spawn
-  unsupported outcome because no replica backend exists.
+  spool creation. Direct typed deserialization also rejects duplicate fields
+  at every request nesting level rather than applying last-value-wins
+  semantics. Replicated persistence remains an explicit pre-spawn unsupported
+  outcome because no replica backend exists.
 - Python and Rust protected-secret registries are bounded, in-memory-only APIs.
   They have no serializer, hide values from debug/errors, reject duplicates,
   and overwrite retained buffers on explicit cleanup/drop where their runtime
@@ -96,8 +98,8 @@ claims W7 retention semantics.
 The final candidate was checked with the installed Nix Rust 1.97.0 toolchain
 and Python 3.12.13:
 
-- `cargo test --workspace --all-targets --no-fail-fast`: 53 Rust tests passed
-  (48 engine, 4 CLI, 1 contracts); the presentation benchmark target also ran
+- `cargo test --workspace --all-targets --no-fail-fast`: 56 Rust tests passed
+  (51 engine, 4 CLI, 1 contracts); the presentation benchmark target also ran
   its bounded 3,888,913-byte fixture.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - `cargo-fmt --all -- --check`: passed.
