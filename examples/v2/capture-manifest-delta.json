@@ -1,0 +1,13 @@
+{
+  "schema_version": "vuoro.outctl.capture-manifest-delta/v2",
+  "base_schema_version": "vuoro.outctl.capture/v1alpha1",
+  "capture_id": "01K1W1CAPTURE",
+  "manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "engine": {"id": "python-reference", "version": "0.1.0.dev0"},
+  "request_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "policy": {"snapshot_id": "snapshot-1", "ref": "policy://interactive-v2", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "commitment": "host-persistent",
+  "durability": "host",
+  "presentation": "bounded-projection",
+  "compatibility": {"v1_reader": "readable", "v1_writer": "python-reference-only", "v1_stream_bytes_preserved": true, "v1_manifest_byte_exact": false, "unknown_fields_ignored": true}
+}

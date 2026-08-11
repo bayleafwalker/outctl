@@ -1,0 +1,61 @@
+{
+  "schema_version": "vuoro.outctl.comparison-matrix/v1",
+  "cases": [
+    {
+      "id": "exact-direct-result",
+      "expected": "pass",
+      "direct": {
+        "command": {"started": true, "exit_code": 0, "signal": null, "timed_out": false, "cancelled": false},
+        "capture": {"status": "complete", "complete": true, "stdout_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "stderr_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+        "policy": {"snapshot_id": "snapshot-1", "ref": "policy://interactive-v2", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      "wrapped": {
+        "command": {"started": true, "exit_code": 0, "signal": null, "timed_out": false, "cancelled": false},
+        "capture": {"status": "complete", "complete": true, "stdout_sha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "stderr_sha256": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+        "policy": {"snapshot_id": "snapshot-1", "ref": "policy://interactive-v2", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      "rules": {"exact": ["command.exit_code", "capture.stdout_sha256", "capture.stderr_sha256", "policy"], "semantic": ["command-outcome", "capture-completeness", "policy-binding"], "intentional": []}
+    },
+    {
+      "id": "semantic-with-declared-engine-differences",
+      "expected": "pass",
+      "direct": {
+        "engine": {"id": "python-reference", "version": "0.1.0"},
+        "command": {"started": true, "exit_code": 7, "signal": null, "timed_out": false, "cancelled": false},
+        "capture": {"status": "complete", "complete": true, "ref": "outctl://capture/direct"},
+        "policy": {"snapshot_id": "snapshot-1", "ref": "policy://interactive-v2", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      "wrapped": {
+        "engine": {"id": "rust-native", "version": "0.2.0"},
+        "command": {"started": true, "exit_code": 7, "signal": null, "timed_out": false, "cancelled": false},
+        "capture": {"status": "complete", "complete": true, "ref": "outctl://capture/native"},
+        "policy": {"snapshot_id": "snapshot-1", "ref": "policy://interactive-v2", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      },
+      "rules": {"exact": [], "semantic": ["command-outcome", "capture-completeness", "policy-binding"], "intentional": ["engine.id", "engine.version", "capture.ref"]}
+    },
+    {
+      "id": "negative-exact-stream-digest-mismatch",
+      "expected": "fail",
+      "expected_violations": ["exact mismatch: capture.stdout_sha256"],
+      "direct": {"capture": {"stdout_sha256": "sha256:3333333333333333333333333333333333333333333333333333333333333333"}},
+      "wrapped": {"capture": {"stdout_sha256": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}},
+      "rules": {"exact": ["capture.stdout_sha256"], "semantic": [], "intentional": []}
+    },
+    {
+      "id": "negative-semantic-command-mismatch",
+      "expected": "fail",
+      "expected_violations": ["semantic mismatch: command-outcome"],
+      "direct": {"command": {"started": true, "exit_code": 0, "signal": null, "timed_out": false, "cancelled": false}},
+      "wrapped": {"command": {"started": true, "exit_code": 1, "signal": null, "timed_out": false, "cancelled": false}},
+      "rules": {"exact": [], "semantic": ["command-outcome"], "intentional": []}
+    },
+    {
+      "id": "negative-undeclared-intentional-difference",
+      "expected": "fail",
+      "expected_violations": ["unclassified mismatch: engine.id"],
+      "direct": {"engine": {"id": "python-reference"}},
+      "wrapped": {"engine": {"id": "rust-native"}},
+      "rules": {"exact": [], "semantic": [], "intentional": []}
+    }
+  ]
+}

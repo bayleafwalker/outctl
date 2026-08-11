@@ -36,6 +36,8 @@ packages = ["src/outctl"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "schemas" = "outctl/schemas"
+"examples/v2" = "outctl/examples/v2"
+"conformance/v2" = "outctl/conformance/v2"
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-markers"

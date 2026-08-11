@@ -22,6 +22,9 @@ The design is deliberately narrow. `outctl` is not a scheduler, queue, workflow 
    shadow, study, enforcement, integration, and rollback gates.
 9. [`docs/CONTRACT_INTEGRATION.md`](docs/CONTRACT_INTEGRATION.md) — shared
    contracts and cross-repository attachment mappings.
+10. [`docs/architecture/README.md`](docs/architecture/README.md) and
+    [`docs/MIGRATION_ROADMAP.md`](docs/MIGRATION_ROADMAP.md) — accepted hybrid
+    architecture and W0-W8 migration boundary.
 
 ## Core decision
 

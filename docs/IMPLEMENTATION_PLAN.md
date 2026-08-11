@@ -1,4 +1,9 @@
-# Phase 1 implementation plan
+# Historical Python Phase 1 implementation plan
+
+> **Status:** Completed baseline. Do not reuse these four passes as the current
+> roadmap. The accepted hybrid migration plan is
+> [`MIGRATION_ROADMAP.md`](MIGRATION_ROADMAP.md), beginning with W0 baseline
+> freeze and preserving this implementation as the Python reference engine.
 
 This plan decomposes `IMPLEMENTATION_HANDOFF.md` into four independently
 reviewable passes. Each pass begins from a clean commit, reads the declared risk

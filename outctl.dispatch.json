@@ -19,12 +19,13 @@
     "overlays": [".agents/overlays/outctl.boundaries.md"]
   },
   "scope": {
-    "allowed_path_roots": ["src/", "tests/", "acceptance/", "config/", "docs/", "examples/", "schemas/", "verification/", ".agents/", ".github/", ".gitignore", ".python-version", "AGENTS.md", "IMPLEMENTATION_HANDOFF.md", "README.md", "pyproject.toml", "uv.lock", "outctl.dispatch.json"],
-    "out_of_scope": ["remote command execution or orchestration", "production or cluster mutation", "LLM summarization in the Phase 1 projection path", "raw command output in Git or served authority systems"]
+    "allowed_path_roots": ["src/", "python/", "crates/", "conformance/", "scripts/", "tests/", "acceptance/", "config/", "docs/", "examples/", "schemas/", "verification/", ".agents/", ".github/", ".gitignore", ".python-version", "AGENTS.md", "IMPLEMENTATION_HANDOFF.md", "README.md", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "mise.toml", "justfile", "pyproject.toml", "uv.lock", "outctl.dispatch.json"],
+    "out_of_scope": ["remote command execution or orchestration", "production or cluster mutation", "PTY or indefinite follow/watch support in the mature MVP", "LLM summarization in the core projection path", "dynamic native plugin ABI in the mature MVP", "raw command output in Git or served authority systems"]
   },
   "risk_surfaces": [
-    {"id": "process-semantics", "paths": ["src/outctl/**", "tests/**"], "skills": ["verify-state-protocols", "reconcile-project-contracts"], "default_depth": 2, "required_on_change": true},
-    {"id": "evidence-integrity-and-redaction", "paths": ["src/outctl/**", "schemas/**", "config/**", "acceptance/**"], "skills": ["verify-state-protocols", "reconcile-project-contracts"], "default_depth": 2, "required_on_change": true}
+    {"id": "process-semantics", "paths": ["src/outctl/**", "crates/outctl-runner/**", "crates/outctl-capture/**", "crates/outctl-cli/**", "conformance/**", "tests/**"], "skills": ["verify-state-protocols", "reconcile-project-contracts"], "default_depth": 2, "required_on_change": true},
+    {"id": "evidence-integrity-and-information-flow", "paths": ["src/outctl/**", "python/**", "crates/outctl-capture/**", "crates/outctl-projection/**", "crates/outctl-policy-runtime/**", "crates/outctl-storage-local/**", "schemas/**", "config/**", "conformance/**", "acceptance/**"], "skills": ["verify-state-protocols", "reconcile-project-contracts"], "default_depth": 2, "required_on_change": true},
+    {"id": "cross-engine-compatibility", "paths": ["src/outctl/**", "python/**", "crates/**", "schemas/**", "examples/**", "conformance/**", "tests/**"], "skills": ["verify-state-protocols", "reconcile-project-contracts"], "default_depth": 2, "required_on_change": true}
   ],
   "hybrid": {
     "enabled": true,
@@ -35,7 +36,7 @@
       "outctl.package": "uv build",
       "outctl.suite": "uv run pytest && uv run ruff check . && uv run mypy src && uv build"
     },
-    "protected_paths": ["schemas/**", "acceptance/**", "config/**", "docs/DESIGN.md", "docs/THREAT-MODEL.md", "outctl.dispatch.json", "AGENTS.md", ".agents/**", ".github/**", "pyproject.toml", "uv.lock"],
+    "protected_paths": ["schemas/**", "conformance/**", "acceptance/**", "config/**", "docs/architecture/**", "docs/adr/**", "docs/DESIGN.md", "docs/THREAT-MODEL.md", "docs/MIGRATION_ROADMAP.md", "docs/DECISION_GATES.md", "outctl.dispatch.json", "AGENTS.md", ".agents/**", ".github/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "pyproject.toml", "uv.lock"],
     "worktree_root": "/tmp/outctl-hybrid/worktrees",
     "max_timeout_seconds": 1800,
     "max_cost_usd": 3.0,

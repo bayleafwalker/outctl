@@ -1,0 +1,11 @@
+{
+  "schema_version": "vuoro.outctl.run-result/v2",
+  "request_id": "req-bypass-1",
+  "engine": {"id": "python-reference", "version": "0.1.0.dev0"},
+  "policy": {"snapshot_id": "snapshot-1", "ref": "policy://interactive-v2", "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+  "outcome": "bypassed",
+  "command": {"started": true, "exit_code": 0, "signal": null, "timed_out": false, "cancelled": false},
+  "capture": {"status": "bypassed", "ref": null, "manifest_digest": null, "complete": false},
+  "presentation": {"kind": "none", "body": null, "lossy": false, "redacted": false, "digest": null},
+  "wrapper_error": null
+}

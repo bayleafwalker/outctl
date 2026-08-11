@@ -1,9 +1,14 @@
 # Vuoro supplemental tooling design: bounded, recoverable command output
 
 **Working name:** `outctl`  
-**Status:** Proposed, implementation-ready starter  
+**Status:** Implemented Python v1 baseline; retained as the compatibility contract
 **Date:** 2026-08-03  
 **Intended consumers:** Vuoro, actionq/dispatcher, runner implementations, Claude Code/Codex/OpenCode adapters, sprintctl, auditctl, kctl, AgentOps project sessions
+
+> The accepted post-baseline direction is indexed in
+> [`architecture/README.md`](architecture/README.md). This document remains
+> normative for v1 behavior until each promise is replaced through the gated v2
+> compatibility process; it is no longer the migration roadmap.
 
 ---
 

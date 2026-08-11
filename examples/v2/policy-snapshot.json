@@ -1,0 +1,17 @@
+{
+  "schema_version": "vuoro.outctl.policy-snapshot/v2",
+  "snapshot_id": "snapshot-1",
+  "policy_ref": "policy://interactive-v2",
+  "policy_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "source": {"ref": "git:config/output-policies.example.yaml", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+  "cache": {"key": "policy-cache://snapshot/snapshot-1", "snapshot_id": "snapshot-1", "owner": "python-policy-control", "max_age_ms": 3600000},
+  "session": {"session_id": "session-1", "trust_domain": "trusted-local", "commissioned": true},
+  "sinks": [
+    {"name": "trusted-model", "trust_domain": "trusted-local", "disclosure": "safe-unredacted", "redaction_required": false, "classification_ceiling": "secret"},
+    {"name": "restricted-handoff", "trust_domain": "restricted", "disclosure": "sanitized", "redaction_required": true, "classification_ceiling": "confidential"}
+  ],
+  "capture": {"commitment": "host-persistent", "durability": "host", "required": true},
+  "execution_authority": {"owner": "external-runner", "can_authorize_execution": false, "can_retry": false},
+  "issued_at": "2026-08-11T17:00:00Z",
+  "expires_at": "2026-08-11T18:00:00Z"
+}
