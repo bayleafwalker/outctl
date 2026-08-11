@@ -36,7 +36,7 @@
     "presentation": {
       "type": "object", "additionalProperties": false,
       "required": ["kind", "body", "lossy", "redacted", "digest"],
-      "properties": {"kind": {"enum": ["empty-success", "raw-safe", "bounded-projection", "metadata-only", "denied", "none"]}, "body": {"type": ["string", "null"], "maxLength": 1048576}, "lossy": {"type": "boolean"}, "redacted": {"type": "boolean"}, "digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"}},
+      "properties": {"kind": {"enum": ["empty-success", "empty-command-failure", "raw-safe", "bounded-projection", "metadata-only", "denied", "none"]}, "body": {"type": ["string", "null"], "maxLength": 1048576}, "lossy": {"type": "boolean"}, "redacted": {"type": "boolean"}, "digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"}},
       "allOf": [
         {"if": {"required": ["kind"], "properties": {"kind": {"const": "none"}}}, "then": {"properties": {"body": {"const": null}, "lossy": {"const": false}, "digest": {"const": null}}}},
         {"if": {"required": ["kind"], "properties": {"kind": {"const": "denied"}}}, "then": {"properties": {"body": {"const": null}, "digest": {"const": null}}}}
@@ -46,10 +46,10 @@
       "type": ["object", "null"],
       "additionalProperties": false,
       "required": ["code", "phase", "message_key"],
-      "properties": {"code": {"enum": ["OUTCTL_PRESPAWN_INVALID_REQUEST", "OUTCTL_PRESPAWN_POLICY_REJECTED", "OUTCTL_PRESPAWN_UNSUPPORTED", "OUTCTL_PRESPAWN_CAPTURE_UNAVAILABLE", "OUTCTL_POSTSPAWN_CAPTURE_FAILED"]}, "phase": {"enum": ["pre-spawn", "post-spawn"]}, "message_key": {"type": "string", "minLength": 1}},
+      "properties": {"code": {"enum": ["OUTCTL_PRESPAWN_INVALID_REQUEST", "OUTCTL_PRESPAWN_POLICY_REJECTED", "OUTCTL_PRESPAWN_UNSUPPORTED", "OUTCTL_PRESPAWN_CAPTURE_UNAVAILABLE", "OUTCTL_POSTSPAWN_CAPTURE_FAILED", "OUTCTL_POSTSPAWN_PRESENTATION_FAILED"]}, "phase": {"enum": ["pre-spawn", "post-spawn"]}, "message_key": {"type": "string", "minLength": 1}},
       "allOf": [
         {"if": {"required": ["code"], "properties": {"code": {"enum": ["OUTCTL_PRESPAWN_INVALID_REQUEST", "OUTCTL_PRESPAWN_POLICY_REJECTED", "OUTCTL_PRESPAWN_UNSUPPORTED", "OUTCTL_PRESPAWN_CAPTURE_UNAVAILABLE"]}}}, "then": {"properties": {"phase": {"const": "pre-spawn"}}}},
-        {"if": {"required": ["code"], "properties": {"code": {"const": "OUTCTL_POSTSPAWN_CAPTURE_FAILED"}}}, "then": {"properties": {"phase": {"const": "post-spawn"}}}}
+        {"if": {"required": ["code"], "properties": {"code": {"enum": ["OUTCTL_POSTSPAWN_CAPTURE_FAILED", "OUTCTL_POSTSPAWN_PRESENTATION_FAILED"]}}}, "then": {"properties": {"phase": {"const": "post-spawn"}}}}
       ]
     }
   },

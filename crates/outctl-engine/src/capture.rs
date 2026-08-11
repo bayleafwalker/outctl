@@ -1,3 +1,7 @@
+use crate::presentation::{
+    render_capture_files_from_handles_with_status, PersistenceMode, PresentationOptions,
+    PresentationResult,
+};
 use crate::storage::{capture_id, rename_entry, PrivateDir, CHUNK_BYTES};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -65,6 +69,8 @@ pub struct CaptureResult {
     pub event_sha256: String,
     pub event_count: u64,
     pub timings: CaptureTiming,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<PresentationResult>,
 }
 
 #[derive(Debug)]
@@ -85,6 +91,16 @@ pub enum CaptureError {
         path: PathBuf,
         source: io::Error,
     },
+    Presentation(Box<PresentationFailure>),
+}
+
+#[derive(Debug)]
+pub struct PresentationFailure {
+    pub capture_id: String,
+    pub path: PathBuf,
+    pub command: CommandResult,
+    pub capture_status: String,
+    pub source: io::Error,
 }
 
 impl std::fmt::Display for CaptureError {
@@ -96,6 +112,13 @@ impl std::fmt::Display for CaptureError {
             Self::Cancelled { .. } => write!(formatter, "capture caller cancelled"),
             Self::Finalize { source, .. } => {
                 write!(formatter, "capture finalization failed: {source}")
+            }
+            Self::Presentation(failure) => {
+                write!(
+                    formatter,
+                    "presentation failed after capture: {}",
+                    failure.source
+                )
             }
         }
     }
@@ -130,6 +153,14 @@ pub fn capture_command(
     options: &CaptureOptions,
     cancellation: Option<&AtomicBool>,
 ) -> Result<CaptureResult, CaptureError> {
+    let (result, _pinned_capture) = capture_command_pinned(options, cancellation)?;
+    Ok(result)
+}
+
+fn capture_command_pinned(
+    options: &CaptureOptions,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(CaptureResult, PrivateDir), CaptureError> {
     validate_options(options)?;
     let command_started = Instant::now();
     let capture_id = capture_id();
@@ -396,7 +427,7 @@ pub fn capture_command(
             source,
         })?;
     let finalize_ms = finalize_started.elapsed().as_millis();
-    Ok(CaptureResult {
+    let result = CaptureResult {
         capture_id,
         path: spool.final_path,
         command: command_result,
@@ -413,7 +444,109 @@ pub fn capture_command(
             finalize_ms,
             drain_grace_exhausted,
         },
-    })
+        presentation: None,
+    };
+    Ok((result, spool.partial))
+}
+
+/// Capture and render a command result using the native W4 presentation
+/// boundary.  The existing `capture_command` remains the compatibility API;
+/// callers that do not opt into W4 continue to receive the W3 capture only.
+pub fn capture_command_with_presentation(
+    options: &CaptureOptions,
+    presentation_options: &PresentationOptions,
+    cancellation: Option<&AtomicBool>,
+) -> Result<CaptureResult, CaptureError> {
+    presentation_options
+        .validate()
+        .map_err(|error| CaptureError::InvalidRequest(error.to_string()))?;
+    if options.required_capture
+        && matches!(
+            presentation_options.persistence,
+            PersistenceMode::MemoryOnly | PersistenceMode::ProcessLocal
+        )
+    {
+        return Err(CaptureError::InvalidRequest(
+            "required capture cannot use memory-only or process-local persistence".to_owned(),
+        ));
+    }
+    if presentation_options.persistence == PersistenceMode::Replicated {
+        return Err(CaptureError::InvalidRequest(
+            "replicated persistence requires a configured replica backend; command not started"
+                .to_owned(),
+        ));
+    }
+    let (mut result, pinned_capture) = capture_command_pinned(options, cancellation)?;
+    let stdout = pinned_capture.open_file("stdout.raw").map_err(|source| {
+        CaptureError::Presentation(Box::new(PresentationFailure {
+            capture_id: result.capture_id.clone(),
+            path: result.path.clone(),
+            command: result.command.clone(),
+            capture_status: result.capture_status.clone(),
+            source,
+        }))
+    })?;
+    let stderr = pinned_capture.open_file("stderr.raw").map_err(|source| {
+        CaptureError::Presentation(Box::new(PresentationFailure {
+            capture_id: result.capture_id.clone(),
+            path: result.path.clone(),
+            command: result.command.clone(),
+            capture_status: result.capture_status.clone(),
+            source,
+        }))
+    })?;
+    let command_success = result.command.exit_code == Some(0)
+        && result.command.signal.is_none()
+        && !result.command.timed_out
+        && !result.command.cancelled;
+    let mut presentation = render_capture_files_from_handles_with_status(
+        &stdout,
+        &stderr,
+        &result.capture_id,
+        presentation_options,
+        command_success,
+    )
+    .map_err(|source| {
+        CaptureError::Presentation(Box::new(PresentationFailure {
+            capture_id: result.capture_id.clone(),
+            path: result.path.clone(),
+            command: result.command.clone(),
+            capture_status: result.capture_status.clone(),
+            source,
+        }))
+    })?;
+    if matches!(
+        presentation_options.persistence,
+        PersistenceMode::MemoryOnly | PersistenceMode::ProcessLocal
+    ) {
+        // These modes are intentionally not represented by a durable capture
+        // reference. Unlink all evidence through the pinned directory before
+        // returning. The empty directory tombstone is retained deliberately:
+        // POSIX has no inode-conditional rmdir, so name-based cleanup could
+        // delete a same-UID attacker's replacement directory.
+        drop(stdout);
+        drop(stderr);
+        let cleanup = cleanup_ephemeral_capture(pinned_capture);
+        if let Err(source) = cleanup {
+            presentation.persistence.status = "cleanup-failed".to_owned();
+            presentation.persistence.honest = false;
+            return Err(CaptureError::Finalize {
+                capture_id: result.capture_id.clone(),
+                path: result.path.clone(),
+                source,
+            });
+        }
+        result.path = PathBuf::new();
+    }
+    result.presentation = Some(presentation);
+    Ok(result)
+}
+
+fn cleanup_ephemeral_capture(pinned_capture: PrivateDir) -> io::Result<()> {
+    for name in ["stdout.raw", "stderr.raw", "events.ndjson", "manifest.json"] {
+        pinned_capture.remove_file(name)?;
+    }
+    pinned_capture.sync()
 }
 
 fn validate_options(options: &CaptureOptions) -> Result<(), CaptureError> {
@@ -740,7 +873,12 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{capture_command, CaptureError, CaptureOptions, MAX_CAPTURE_BYTES};
+    use super::{
+        capture_command, capture_command_with_presentation, cleanup_ephemeral_capture,
+        CaptureError, CaptureOptions, MAX_CAPTURE_BYTES,
+    };
+    use crate::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
+    use crate::storage::PrivateDir;
     use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
@@ -849,6 +987,218 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, CaptureError::InvalidRequest(_)));
         assert!(!rejected_root.exists());
+    }
+
+    #[test]
+    fn presentation_overflow_is_rejected_before_spawn_or_spool_creation() {
+        let root = temporary_root("presentation-overflow");
+        let error = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                full_if_bytes: u64::MAX,
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn excessive_redaction_transform_is_rejected_before_spawn_or_spool_creation() {
+        let root = temporary_root("redaction-overflow");
+        let error = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("false")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                exact_redaction_values: vec![vec![b'x'; 64 * 1024]; 5],
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn failed_empty_command_has_honest_presentation_kind() {
+        let root = temporary_root("empty-command-failure");
+        let result = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("false")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.command.exit_code, Some(1));
+        assert_eq!(result.capture_status, "COMPLETE");
+        assert_eq!(result.presentation.unwrap().kind, "empty-command-failure");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ephemeral_persistence_is_explicit_and_leaves_no_capture_reference() {
+        let root = temporary_root("ephemeral");
+        let result = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                persistence: PersistenceMode::ProcessLocal,
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(result.path.as_os_str().is_empty());
+        let presentation = result.presentation.unwrap();
+        assert_eq!(presentation.persistence.durability, "none");
+        assert_eq!(presentation.persistence.reference, None);
+        assert!(presentation.persistence.honest);
+        let tombstone = root.join("captures").join(&result.capture_id);
+        assert!(tombstone.is_dir());
+        assert!(fs::read_dir(&tombstone).unwrap().next().is_none());
+        fs::remove_dir_all(root).unwrap();
+
+        let lossy_root = temporary_root("ephemeral-lossy");
+        let lossy_result = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![
+                    OsString::from("python3"),
+                    OsString::from("-c"),
+                    OsString::from("print('x' * 10000)"),
+                ],
+                spool_root: lossy_root.clone(),
+                max_bytes: 16 * 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                mode: PresentationMode::Safe,
+                persistence: PersistenceMode::ProcessLocal,
+                full_if_bytes: 1,
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap();
+        let lossy_presentation = lossy_result.presentation.unwrap();
+        assert!(lossy_presentation.omission);
+        assert_eq!(
+            lossy_presentation.persistence.status,
+            "lossy-evidence-unavailable"
+        );
+        assert!(!lossy_presentation.persistence.retrieval_available);
+        assert!(!lossy_presentation
+            .body
+            .as_deref()
+            .unwrap_or_default()
+            .contains("retrieve the capture"));
+        assert!(lossy_result.path.as_os_str().is_empty());
+        let lossy_tombstone = lossy_root.join("captures").join(&lossy_result.capture_id);
+        assert!(lossy_tombstone.is_dir());
+        assert!(fs::read_dir(&lossy_tombstone).unwrap().next().is_none());
+        fs::remove_dir_all(lossy_root).unwrap();
+
+        let required_root = temporary_root("required-ephemeral");
+        let error = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: required_root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: true,
+            },
+            &PresentationOptions {
+                persistence: PersistenceMode::MemoryOnly,
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!required_root.exists());
+
+        let rejected_root = temporary_root("replica-unavailable");
+        let error = capture_command_with_presentation(
+            &CaptureOptions {
+                argv: vec![OsString::from("true")],
+                spool_root: rejected_root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+            },
+            &PresentationOptions {
+                persistence: PersistenceMode::Replicated,
+                ..PresentationOptions::default()
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!rejected_root.exists());
+    }
+
+    #[test]
+    fn ephemeral_cleanup_does_not_remove_replaced_capture_directory() {
+        let root = temporary_root("ephemeral-replacement");
+        let captures = PrivateDir::ensure(&root).unwrap();
+        let capture_id = "capture-replaced";
+        let capture = captures.create_dir(capture_id).unwrap();
+        for name in ["stdout.raw", "stderr.raw", "events.ndjson", "manifest.json"] {
+            capture.write_new(name, b"trusted").unwrap();
+        }
+        let moved = root.with_extension("moved");
+        fs::rename(root.join(capture_id), &moved).unwrap();
+        fs::create_dir(root.join(capture_id)).unwrap();
+
+        cleanup_ephemeral_capture(capture).unwrap();
+        assert!(root.join(capture_id).is_dir());
+        assert!(fs::read_dir(root.join(capture_id))
+            .unwrap()
+            .next()
+            .is_none());
+        assert!(fs::read_dir(&moved).unwrap().next().is_none());
+
+        fs::remove_dir(root.join(capture_id)).unwrap();
+        fs::remove_dir(root).unwrap();
+        fs::remove_dir(moved).unwrap();
     }
 
     #[test]

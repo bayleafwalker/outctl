@@ -1,7 +1,10 @@
 //! Native W3 command-capture CLI. Machine output is bounded metadata JSON;
 //! child stdout and stderr are retained only in the private spool.
 
-use outctl_engine::capture::{capture_command, recover_partials, CaptureError, CaptureOptions};
+use outctl_engine::capture::{
+    capture_command_with_presentation, recover_partials, CaptureError, CaptureOptions,
+};
+use outctl_engine::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
 use outctl_engine::retrieval::{
     inspect_capture_for_workspace, verify_capture_for_workspace, RetrievalStatus,
 };
@@ -40,6 +43,7 @@ pub struct RunRequest {
     pub cwd: Option<PathBuf>,
     pub workspace_id: Option<String>,
     pub required_capture: bool,
+    pub presentation: PresentationOptions,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -131,6 +135,7 @@ where
     let mut cwd = None;
     let mut workspace_id = None;
     let mut required_capture = false;
+    let mut presentation = PresentationOptions::default();
     let mut argv = Vec::new();
     let mut arguments = arguments.peekable();
     while let Some(argument) = arguments.next() {
@@ -164,6 +169,38 @@ where
                 )
             }
             "--required-capture" => required_capture = true,
+            "--presentation-mode" => {
+                let value = required_value(&mut arguments, "--presentation-mode")?;
+                presentation.mode = parse_presentation_mode(value)?;
+            }
+            "--persist" | "--persistence" => {
+                let value = required_value(&mut arguments, "--persist")?;
+                presentation.persistence = parse_persistence_mode(value)?;
+            }
+            "--max-projection-bytes" => {
+                presentation.max_bytes = parse_usize(
+                    required_value(&mut arguments, "--max-projection-bytes")?,
+                    "--max-projection-bytes",
+                )?;
+            }
+            "--max-projection-lines" => {
+                presentation.max_lines = parse_usize(
+                    required_value(&mut arguments, "--max-projection-lines")?,
+                    "--max-projection-lines",
+                )?;
+            }
+            "--max-projection-tokens" => {
+                presentation.max_estimated_tokens = parse_usize(
+                    required_value(&mut arguments, "--max-projection-tokens")?,
+                    "--max-projection-tokens",
+                )?;
+            }
+            "--full-if-bytes" => {
+                presentation.full_if_bytes = parse_u64(
+                    required_value(&mut arguments, "--full-if-bytes")?,
+                    "--full-if-bytes",
+                )?;
+            }
             _ if option.starts_with('-') => {
                 return Err(CliError::wrapper(format!(
                     "unsupported run option {option:?}"
@@ -187,7 +224,34 @@ where
         cwd,
         workspace_id,
         required_capture,
+        presentation,
     }))
+}
+
+fn parse_presentation_mode(value: OsString) -> Result<PresentationMode, CliError> {
+    match value.to_string_lossy().as_ref() {
+        "auto" => Ok(PresentationMode::Auto),
+        "minimum-savings" | "minimum" => Ok(PresentationMode::MinimumSavings),
+        "safe" | "raw-safe" => Ok(PresentationMode::Safe),
+        "compact" => Ok(PresentationMode::Compact),
+        "projected" | "bounded-projection" => Ok(PresentationMode::Projected),
+        "metadata" | "metadata-only" => Ok(PresentationMode::Metadata),
+        value => Err(CliError::wrapper(format!(
+            "unsupported presentation mode {value:?}"
+        ))),
+    }
+}
+
+fn parse_persistence_mode(value: OsString) -> Result<PersistenceMode, CliError> {
+    match value.to_string_lossy().as_ref() {
+        "memory-only" => Ok(PersistenceMode::MemoryOnly),
+        "process-local" => Ok(PersistenceMode::ProcessLocal),
+        "host-persistent" | "host" => Ok(PersistenceMode::HostPersistent),
+        "replicated" => Ok(PersistenceMode::Replicated),
+        value => Err(CliError::wrapper(format!(
+            "unsupported persistence mode {value:?}"
+        ))),
+    }
 }
 
 fn parse_capture_read<I>(arguments: I, operation: &str) -> Result<Request, CliError>
@@ -268,6 +332,13 @@ fn parse_u64(value: OsString, option: &str) -> Result<u64, CliError> {
         .map_err(|_| CliError::wrapper(format!("{option} requires a non-negative integer")))
 }
 
+fn parse_usize(value: OsString, option: &str) -> Result<usize, CliError> {
+    value
+        .to_string_lossy()
+        .parse()
+        .map_err(|_| CliError::wrapper(format!("{option} requires a non-negative integer")))
+}
+
 pub fn execute(request: Request) -> Result<(String, u8), CliError> {
     match request {
         Request::Capabilities => Ok((capabilities_output(), 0)),
@@ -315,7 +386,7 @@ pub fn execute(request: Request) -> Result<(String, u8), CliError> {
 }
 
 fn execute_run(request: RunRequest) -> Result<(String, u8), CliError> {
-    let result = capture_command(
+    let result = capture_command_with_presentation(
         &CaptureOptions {
             argv: request.argv,
             spool_root: request.spool_root,
@@ -325,6 +396,7 @@ fn execute_run(request: RunRequest) -> Result<(String, u8), CliError> {
             workspace_id: request.workspace_id,
             required_capture: request.required_capture,
         },
+        &request.presentation,
         None,
     )
     .map_err(capture_error)?;
@@ -343,6 +415,22 @@ fn execute_run(request: RunRequest) -> Result<(String, u8), CliError> {
 }
 
 fn capture_error(error: CaptureError) -> CliError {
+    if let CaptureError::Presentation(failure) = &error {
+        return CliError::wrapper(
+            json!({
+                "wrapper_error": {
+                    "code": "OUTCTL_POSTSPAWN_PRESENTATION_FAILED",
+                    "phase": "post-spawn",
+                    "message": error.to_string()
+                },
+                "capture_id": failure.capture_id,
+                "path": failure.path,
+                "capture_status": failure.capture_status,
+                "command": failure.command,
+            })
+            .to_string(),
+        );
+    }
     let (code, phase, capture_id, path) = match &error {
         CaptureError::InvalidRequest(_) => {
             ("OUTCTL_PRESPAWN_INVALID_REQUEST", "pre-spawn", None, None)
@@ -375,6 +463,7 @@ fn capture_error(error: CaptureError) -> CliError {
             Some(capture_id),
             Some(path),
         ),
+        CaptureError::Presentation(_) => unreachable!("presentation errors are handled above"),
     };
     CliError::wrapper(
         json!({
@@ -402,12 +491,14 @@ pub fn version_output() -> &'static str {
     outctl_engine::ENGINE_VERSION
 }
 
-pub const HELP_OUTPUT: &str = "outctl-native capabilities [--json]\noutctl-native version\noutctl-native run [--spool-root PATH] [--max-bytes N] [--timeout-ms N] [--cwd PATH] [--workspace-id ID] [--required-capture] -- ARGV...\noutctl-native inspect [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native verify [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native recover [--spool-root PATH]\n";
+pub const HELP_OUTPUT: &str = "outctl-native capabilities [--json]\noutctl-native version\noutctl-native run [--spool-root PATH] [--max-bytes N] [--timeout-ms N] [--cwd PATH] [--workspace-id ID] [--required-capture] [--presentation-mode auto|minimum-savings|safe|compact|projected|metadata] [--persist memory-only|process-local|host-persistent|replicated] [--max-projection-bytes N] [--max-projection-lines N] [--max-projection-tokens N] [--full-if-bytes N] -- ARGV...\noutctl-native inspect [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native verify [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native recover [--spool-root PATH]\n";
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_args, Request};
+    use super::{capture_error, parse_args, Request};
+    use outctl_engine::capture::{CaptureError, CommandResult};
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -427,5 +518,49 @@ mod tests {
         let error = parse_args(args(&["run", "--"])).unwrap_err();
         assert_eq!(error.exit_code(), 125);
         assert!(error.message().contains("direct argv"));
+    }
+
+    #[test]
+    fn minimum_savings_presentation_mode_is_parseable() {
+        assert!(parse_args(args(&[
+            "run",
+            "--presentation-mode",
+            "minimum-savings",
+            "--",
+            "true",
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn presentation_failure_is_not_labeled_capture_failure() {
+        let error = capture_error(CaptureError::Presentation(Box::new(
+            outctl_engine::capture::PresentationFailure {
+                capture_id: "capture-fault".to_owned(),
+                path: PathBuf::from("/private/capture-fault"),
+                command: CommandResult {
+                    started: true,
+                    exit_code: Some(0),
+                    signal: None,
+                    timed_out: false,
+                    cancelled: false,
+                    signals_sent: Vec::new(),
+                },
+                capture_status: "COMPLETE".to_owned(),
+                source: std::io::Error::other("injected presentation fault"),
+            },
+        )));
+        let value: serde_json::Value = serde_json::from_str(error.message()).unwrap();
+        assert_eq!(
+            value["wrapper_error"]["code"],
+            "OUTCTL_POSTSPAWN_PRESENTATION_FAILED"
+        );
+        assert_eq!(value["wrapper_error"]["phase"], "post-spawn");
+        assert_eq!(value["capture_status"], "COMPLETE");
+        assert_eq!(value["command"]["exit_code"], 0);
+        assert_ne!(
+            value["wrapper_error"]["code"],
+            "OUTCTL_POSTSPAWN_CAPTURE_FAILED"
+        );
     }
 }

@@ -1,6 +1,7 @@
 //! Native Linux command capture and v1-compatible evidence reads.
 
 pub mod capture;
+pub mod presentation;
 pub mod retrieval;
 mod storage;
 
@@ -10,12 +11,12 @@ use outctl_contracts::{
     ENGINE_CAPABILITIES_SCHEMA_VERSION,
 };
 
-pub const ENGINE_ID: &str = "rust-w3-capture";
+pub const ENGINE_ID: &str = "rust-w4-presentation";
 
 /// The native package version is also the reported engine version.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Return the capabilities implemented by the W3 process/capture slice.
+/// Return the capabilities implemented by the W4 native process/capture path.
 pub fn capabilities() -> EngineCapabilities {
     EngineCapabilities {
         schema_version: ENGINE_CAPABILITIES_SCHEMA_VERSION.to_owned(),
@@ -45,7 +46,7 @@ pub fn capabilities() -> EngineCapabilities {
         limits: EngineLimits {
             max_argv_items: 256,
             max_capture_bytes: MAX_CAPTURE_BYTES,
-            max_projection_bytes: 1,
+            max_projection_bytes: presentation::DEFAULT_MAX_PROJECTION_BYTES as u64,
         },
     }
 }
@@ -53,6 +54,7 @@ pub fn capabilities() -> EngineCapabilities {
 #[cfg(test)]
 mod tests {
     use super::{capabilities, ENGINE_ID, MAX_CAPTURE_BYTES};
+    use crate::presentation;
 
     #[test]
     fn skeleton_capabilities_are_conservative() {
@@ -68,7 +70,10 @@ mod tests {
         assert!(value.contract_versions.run_result.is_empty());
         assert_eq!(value.contract_versions.capture_manifest, ["v1alpha1"]);
         assert_eq!(value.limits.max_capture_bytes, MAX_CAPTURE_BYTES);
-        assert_eq!(value.limits.max_projection_bytes, 1);
+        assert_eq!(
+            value.limits.max_projection_bytes,
+            presentation::DEFAULT_MAX_PROJECTION_BYTES as u64
+        );
     }
 
     #[test]
