@@ -1,0 +1,19 @@
+schema_version: vuoro.outctl.policy-source/v1
+policy_ref: policy://interactive-w5
+cache:
+  max_age_ms: 3600000
+sinks:
+  - name: model
+    trust_domain: trusted-local
+    disclosure: safe-unredacted
+    redaction_required: false
+    classification_ceiling: secret
+  - name: handoff
+    trust_domain: restricted
+    disclosure: sanitized
+    redaction_required: true
+    classification_ceiling: confidential
+capture:
+  commitment: host-persistent
+  durability: host
+  required: true
