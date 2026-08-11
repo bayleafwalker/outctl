@@ -251,9 +251,7 @@ class EngineCapabilities:
                     _string_field(engine_data["platform"], "engine.platform"),
                 ),
                 _string_tuple(version_data["run_request"], "contract_versions.run_request"),
-                _string_tuple(
-                    version_data["policy_snapshot"], "contract_versions.policy_snapshot"
-                ),
+                _string_tuple(version_data["policy_snapshot"], "contract_versions.policy_snapshot"),
                 _string_tuple(version_data["run_result"], "contract_versions.run_result"),
                 _string_tuple(
                     version_data["capture_manifest"], "contract_versions.capture_manifest"
@@ -360,6 +358,8 @@ class PolicySnapshot:
             raise ControlContractError("trusted-local snapshots must be commissioned")
         if not self.sinks or not all(isinstance(sink, SinkPolicy) for sink in self.sinks):
             raise ControlContractError("policy snapshot must define at least one valid sink")
+        if len({sink.name for sink in self.sinks}) != len(self.sinks):
+            raise ControlContractError("policy snapshot sink names must be unique")
         if type(self.commissioned) is not bool:
             raise ControlContractError("commissioned must be a boolean")
         if type(self.capture_required) is not bool:
@@ -383,6 +383,20 @@ class PolicySnapshot:
             CaptureCommitment.PROCESS_LOCAL,
         }:
             raise ControlContractError("required capture must survive the process")
+        allowed_sink_domains = {
+            "trusted-local": {"trusted-local", "restricted", "export", "metadata-only"},
+            "restricted": {"restricted", "export", "metadata-only"},
+            "export": {"export", "metadata-only"},
+            "metadata-only": {"metadata-only"},
+        }[self.trust_domain]
+        if any(sink.trust_domain not in allowed_sink_domains for sink in self.sinks):
+            raise ControlContractError("sink widens the commissioned session trust domain")
+        if self.trust_domain == "trusted-local" and (
+            not self.capture_required
+            or self.capture_commitment
+            not in {CaptureCommitment.HOST_PERSISTENT, CaptureCommitment.REPLICATED}
+        ):
+            raise ControlContractError("trusted-local snapshots require persistent capture")
         _timestamp(self.issued_at, "issued_at")
         _timestamp(self.expires_at, "expires_at")
         issued = datetime.fromisoformat(self.issued_at.replace("Z", "+00:00"))
@@ -441,6 +455,8 @@ class SinkPolicy:
 
     def __post_init__(self) -> None:
         _non_empty(self.name, "sink name")
+        if self.name not in {"model", "runner", "audit-receipt", "handoff"}:
+            raise ControlContractError("unsupported sink name")
         if type(self.redaction_required) is not bool:
             raise ControlContractError("redaction_required must be a boolean")
         if self.trust_domain not in {"trusted-local", "restricted", "export", "metadata-only"}:
@@ -451,6 +467,8 @@ class SinkPolicy:
             self.trust_domain != "trusted-local" or self.redaction_required
         ):
             raise ControlContractError("safe-unredacted requires trusted-local without redaction")
+        if self.disclosure == "sanitized" and not self.redaction_required:
+            raise ControlContractError("sanitized sinks require redaction")
         if self.trust_domain == "metadata-only" and self.disclosure != "metadata-only":
             raise ControlContractError("metadata-only sinks require metadata-only disclosure")
         if self.trust_domain in {"restricted", "export"} and self.disclosure == "safe-unredacted":

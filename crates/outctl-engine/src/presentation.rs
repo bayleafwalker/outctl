@@ -76,7 +76,7 @@ impl PersistenceMode {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct PresentationOptions {
     pub mode: PresentationMode,
     pub persistence: PersistenceMode,
@@ -91,6 +91,30 @@ pub struct PresentationOptions {
     /// Exact values arrive through the protected runner boundary in library
     /// use.  They are never copied into result metadata or presentation text.
     pub exact_redaction_values: Vec<Vec<u8>>,
+}
+
+impl std::fmt::Debug for PresentationOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let exact_redaction_bytes: usize = self.exact_redaction_values.iter().map(Vec::len).sum();
+        formatter
+            .debug_struct("PresentationOptions")
+            .field("mode", &self.mode)
+            .field("persistence", &self.persistence)
+            .field("max_bytes", &self.max_bytes)
+            .field("max_lines", &self.max_lines)
+            .field("max_estimated_tokens", &self.max_estimated_tokens)
+            .field("full_if_bytes", &self.full_if_bytes)
+            .field("head_lines", &self.head_lines)
+            .field("tail_lines", &self.tail_lines)
+            .field("candidate_context", &self.candidate_context)
+            .field("max_logical_line_bytes", &self.max_logical_line_bytes)
+            .field(
+                "exact_redaction_value_count",
+                &self.exact_redaction_values.len(),
+            )
+            .field("exact_redaction_bytes", &exact_redaction_bytes)
+            .finish()
+    }
 }
 
 impl Default for PresentationOptions {

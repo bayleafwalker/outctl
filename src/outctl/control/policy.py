@@ -276,6 +276,9 @@ class ProtectedSecretRegistry:
         del protocol
         raise TypeError("protected secret registries cannot be serialized")
 
+    def __del__(self) -> None:
+        self.clear()
+
     @property
     def refs(self) -> tuple[str, ...]:
         return tuple(sorted(self._values))
@@ -580,6 +583,53 @@ def commissioning_provenance_digest(context: CommissioningContext) -> str:
     return _sha256([claim.to_dict() for claim in _provenance_claims(context)])
 
 
+def commissioning_context_from_dict(value: Mapping[str, object]) -> CommissioningContext:
+    """Parse a strict raw-free commissioning context for CLI/control callers."""
+    _exact_keys(
+        value,
+        required={
+            "session_id",
+            "trust_domain",
+            "commissioned",
+            "issued_at",
+            "valid_for_ms",
+            "claims",
+        },
+        label="commissioning context",
+    )
+    raw_claims = value["claims"]
+    if not isinstance(raw_claims, list):
+        raise PolicyCompileError("commissioning context claims must be a list")
+    claims: list[ClaimProvenance] = []
+    for raw_claim in raw_claims:
+        claim = _mapping(raw_claim, "commissioning claim")
+        _exact_keys(
+            claim,
+            required={"name", "value", "issuer", "evidence_ref", "evidence_digest"},
+            label="commissioning claim",
+        )
+        name = _non_empty_string(claim["name"], "commissioning claim name")
+        if name not in {"trust_domain", "commissioned"}:
+            raise PolicyCompileError("commissioning claim name is unsupported")
+        claims.append(
+            ClaimProvenance(
+                cast(Literal["trust_domain", "commissioned"], name),
+                cast(str | bool, claim["value"]),
+                _non_empty_string(claim["issuer"], "commissioning claim issuer"),
+                _non_empty_string(claim["evidence_ref"], "commissioning claim evidence_ref"),
+                _non_empty_string(claim["evidence_digest"], "commissioning claim evidence_digest"),
+            )
+        )
+    return CommissioningContext(
+        session_id=_non_empty_string(value["session_id"], "session_id"),
+        trust_domain=_non_empty_string(value["trust_domain"], "trust_domain"),
+        commissioned=_boolean(value["commissioned"], "commissioned"),
+        issued_at=_non_empty_string(value["issued_at"], "issued_at"),
+        valid_for_ms=_bounded_int(value["valid_for_ms"], "valid_for_ms", maximum=MAX_VALIDITY_MS),
+        claims=tuple(claims),
+    )
+
+
 def _provenance_claims(context: CommissioningContext) -> list[ClaimProvenanceRecord]:
     return [
         claim.public_metadata() for claim in sorted(context.claims, key=lambda claim: claim.name)
@@ -777,6 +827,7 @@ __all__ = [
     "ProtectedSecretRegistry",
     "SecretRegistryError",
     "canonical_policy_material",
+    "commissioning_context_from_dict",
     "commissioning_provenance_digest",
     "compile_policy_source",
     "explain_policy",

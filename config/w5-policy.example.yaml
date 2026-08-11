@@ -13,6 +13,16 @@ sinks:
     disclosure: sanitized
     redaction_required: true
     classification_ceiling: confidential
+  - name: audit-receipt
+    trust_domain: metadata-only
+    disclosure: metadata-only
+    redaction_required: true
+    classification_ceiling: internal
+  - name: runner
+    trust_domain: export
+    disclosure: deny
+    redaction_required: true
+    classification_ceiling: public
 capture:
   commitment: host-persistent
   durability: host
