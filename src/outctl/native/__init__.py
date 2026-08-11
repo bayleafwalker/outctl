@@ -1,7 +1,8 @@
-"""Contract-only native-engine boundary for W2.
+"""Native-engine contracts and explicit W3 engine selection.
 
-No subprocess, Rust extension, or Python reference-engine import is performed
-here.  W3 may provide an implementation behind these protocols.
+Importing this package remains side-effect free and does not load either
+execution engine. The differential runner is deliberately a separate opt-in
+module because it imports and executes the Python reference engine.
 """
 
 from __future__ import annotations
@@ -14,6 +15,12 @@ from outctl.control.contracts import (
     NegotiatedCapabilities,
     PolicySnapshot,
     negotiate_capabilities,
+)
+from outctl.native.selector import (
+    EngineChoice,
+    EngineSelection,
+    NativeEngineUnavailable,
+    select_engine,
 )
 
 
@@ -33,8 +40,12 @@ class NativeEngine(Protocol):
 __all__ = [
     "CapabilityRequirement",
     "EngineCapabilities",
+    "EngineChoice",
+    "EngineSelection",
     "NativeEngine",
+    "NativeEngineUnavailable",
     "NegotiatedCapabilities",
     "PolicySnapshot",
     "negotiate_capabilities",
+    "select_engine",
 ]

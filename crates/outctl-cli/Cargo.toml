@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 outctl-engine = { path = "../outctl-engine" }
+serde_json = "1"
 
 [[bin]]
 name = "outctl-native"
