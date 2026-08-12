@@ -85,7 +85,7 @@ auditctl, or kctl state is changed by the W8 candidate.
 
 The implementation worktree passed:
 
-- 319 Python tests with Cargo available, including the W8 bundle, staged
+- 321 Python tests with Cargo available, including the W8 bundle, staged
   selection, import-boundary, packaging, and installed differential paths;
 - Rust 1.97.0 format, all-target check, all-target Clippy with warnings denied,
   94 unit tests, and doc tests;
@@ -101,6 +101,20 @@ The rehearsal receipt is metadata-only and reported `passed: true`; no bundle
 or receipt was published. Rust 1.85.1 is not installed in this local
 environment, so the pinned-toolchain rerun remains an explicit integration and
 deployment-owner gate rather than a claim made by this candidate.
+
+## Review remediation
+
+An independent review of the packaging/rollout candidate found two selector
+fail-closed branches with no test coverage: the native-capabilities digest
+mismatch guard (a binary whose SHA-256 pin matches but whose probed
+capabilities document does not) and the `OUTCTL_RELEASE_MANIFEST_DIGEST`
+caller/evidence mismatch guard, whose own default-value fallback made it
+unreachable by any existing test. Both now have dedicated tests in
+`tests/test_w8_rollout.py`
+(`test_native_capabilities_digest_drift_fails_closed`,
+`test_release_manifest_digest_mismatch_fails_closed`); each was confirmed to
+fail when its corresponding guard is disabled, so neither is vacuous
+coverage.
 
 ## Rollback
 

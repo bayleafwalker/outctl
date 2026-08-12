@@ -314,6 +314,36 @@ def test_native_platform_drift_fails_closed(tmp_path: Path) -> None:
         )
 
 
+def test_native_capabilities_digest_drift_fails_closed(tmp_path: Path) -> None:
+    native = _native(tmp_path)
+    pinned_document = _capabilities()
+    limits = pinned_document["limits"]
+    assert isinstance(limits, dict)
+    limits["max_argv_items"] = 1
+    evidence = _evidence(native, capabilities=pinned_document)
+    with pytest.raises(NativeEngineUnavailable, match="capabilities"):
+        select_rollout_engines(
+            evidence,
+            mode=RolloutMode.SHADOW,
+            host_class=HOST,
+            native_executable=native,
+            environment={},
+        )
+
+
+def test_release_manifest_digest_mismatch_fails_closed(tmp_path: Path) -> None:
+    native = _native(tmp_path)
+    evidence = _evidence(native)
+    with pytest.raises(RolloutEvidenceError, match="release manifest digest"):
+        select_rollout_engines(
+            evidence,
+            mode=RolloutMode.SHADOW,
+            host_class=HOST,
+            native_executable=native,
+            environment={"OUTCTL_RELEASE_MANIFEST_DIGEST": "sha256:" + "c" * 64},
+        )
+
+
 def test_capability_negotiation_rejects_unsupported_requested_feature(tmp_path: Path) -> None:
     document = _capabilities(explicit_shell=False)
     native = _native(tmp_path, document)
