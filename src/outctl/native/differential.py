@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from outctl.capture.runner import capture_command
+from outctl.native.rollout import run_pinned_native
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,7 @@ def compare_capture_engines(
     spool_root: Path,
     *,
     native_binary: Path,
+    native_sha256: str,
     max_bytes: int,
     timeout: float | None = None,
     cwd: Path | None = None,
@@ -63,7 +64,6 @@ def compare_capture_engines(
     )
     python_elapsed = (time.monotonic() - started) * 1000
     command = [
-        str(native_binary),
         "run",
         "--spool-root",
         str(rust_root),
@@ -76,16 +76,17 @@ def compare_capture_engines(
         command.extend(("--cwd", str(cwd)))
     command.extend(("--", *argv))
     started = time.monotonic()
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
+    completed = run_pinned_native(
+        native_binary,
+        native_sha256,
+        tuple(command),
         timeout=harness_timeout,
     )
     rust_elapsed = (time.monotonic() - started) * 1000
     if not completed.stdout:
-        raise RuntimeError(f"native differential run returned no JSON: {completed.stderr}")
+        raise RuntimeError(
+            f"native differential run returned no JSON: {completed.stderr.decode(errors='replace')}"
+        )
     native = json.loads(completed.stdout)
     python = EngineObservation(
         engine="python-reference",
@@ -119,9 +120,7 @@ def compare_capture_engines(
         "stdout_sha256",
         "stderr_sha256",
     )
-    exact = tuple(
-        field for field in exact_fields if getattr(python, field) != getattr(rust, field)
-    )
+    exact = tuple(field for field in exact_fields if getattr(python, field) != getattr(rust, field))
     semantic = tuple(
         field
         for field in ("command", "capture_status")

@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:hybrid-release:v1",
+  "title": "Pinned Outctl Python and native release bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release", "python", "native"],
+  "properties": {
+    "schema_version": {"const": "outctl.hybrid-release/v1"},
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "repository_commit", "capability_profile_sha256"],
+      "properties": {
+        "id": {"$ref": "#/$defs/label"},
+        "version": {"$ref": "#/$defs/label"},
+        "repository_commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+        "capability_profile_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "filename", "path", "sha256", "size", "mode"],
+      "properties": {
+        "name": {"const": "outctl"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "filename": {"$ref": "#/$defs/wheel"},
+        "path": {"type": "string", "pattern": "^artifacts/python/[A-Za-z0-9][A-Za-z0-9._-]*\\.whl$"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size": {"$ref": "#/$defs/size"},
+        "mode": {"const": "0644"}
+      }
+    },
+    "native": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {"$ref": "#/$defs/native"}
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "size": {"type": "integer", "minimum": 0, "maximum": 536870912},
+    "host": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._+-]*[A-Za-z0-9])?$"
+    },
+    "wheel": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*\\.whl$"
+    },
+    "pin0644": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size", "mode"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 512},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size": {"$ref": "#/$defs/size"},
+        "mode": {"const": "0644"}
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "filename", "path", "sha256", "size", "mode"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "filename": {"$ref": "#/$defs/wheel"},
+        "path": {"type": "string", "pattern": "^artifacts/python-dependencies/[a-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._-]*\\.whl$"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size": {"$ref": "#/$defs/size"},
+        "mode": {"const": "0644"}
+      }
+    },
+    "native": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "host_class", "path", "sha256", "size", "mode", "engine", "capabilities", "python_dependencies"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^outctl-native:[a-z0-9._-]+$"},
+        "host_class": {"$ref": "#/$defs/host"},
+        "path": {"type": "string", "pattern": "^artifacts/outctl-native\\.[a-z0-9._-]+$"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "size": {"$ref": "#/$defs/size"},
+        "mode": {"const": "0755"},
+        "engine": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "platform"],
+          "properties": {
+            "id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "version": {"type": "string", "minLength": 1, "maxLength": 128},
+            "platform": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        },
+        "capabilities": {"$ref": "#/$defs/pin0644"},
+        "python_dependencies": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": {"$ref": "#/$defs/dependency"}
+        }
+      }
+    }
+  }
+}

@@ -104,3 +104,22 @@ empty directory that a same-UID process can replace. A collector may remove a
 legacy W4 tombstone only while it holds exclusive spool ownership; otherwise it
 retains the directory safely. New ephemeral capture paths must leave no named
 empty capture directory to collect.
+
+W8 distributes the Python reference and native executables as one immutable,
+source-commit- and digest-pinned hybrid release. Native artifacts and their
+capability documents are keyed by an explicit host class; Python runtime
+dependency wheels are also host-class-bound because ABI-specific wheels cannot
+be shared implicitly.
+Release version, Python distribution version, and native engine version are
+separate pins during the migration window and are never assumed equal.
+
+Staged selection consumes metadata-only adoption evidence bound to the exact
+release-manifest digest. Bypass is unconditional and does not inspect a native
+artifact. Shadow executes a command once through the selected engine while the
+adapter preserves the ordinary unprojected result; it is not a differential
+rerun. A deterministic canary may select Rust only after clean-install,
+host-conformance, rollback, and shadow gates pass. Rust becomes the default
+only after the canary gate passes and an external owner supplies an explicit
+authorization reference. Every native launch reopens with `O_NOFOLLOW`, hashes
+the opened inode, and executes that inode through a retained descriptor rather
+than reopening a pathname after verification.

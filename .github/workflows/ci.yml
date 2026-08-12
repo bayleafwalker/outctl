@@ -45,6 +45,51 @@ jobs:
           "$install_root/.venv/bin/outctl" --version
           "$install_root/.venv/bin/python" -c 'import outctl.control, outctl.native'
 
+  hybrid-package:
+    needs: [python, native]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.1
+      - uses: astral-sh/setup-uv@v8.3.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --all-extras --dev
+      - run: uv build
+      - run: cargo build --locked --release --package outctl-cli --bin outctl-native
+      - run: uv run pytest tests/test_w8_bundle.py tests/test_w8_rollout.py
+      - name: Rehearse offline hybrid clean install and rollback
+        run: |
+          download_root="$(mktemp -d)"
+          bundle_parent="$(mktemp -d)"
+          uv run --with pip python -m pip download \
+            --only-binary=:all: \
+            --dest "$download_root" \
+            "$(find dist -maxdepth 1 -type f -name 'outctl-*.whl' -print -quit)"
+          main_wheel="$(find dist -maxdepth 1 -type f -name 'outctl-*.whl' -print -quit)"
+          main_wheel_name="$(basename "$main_wheel")"
+          dependency_args=()
+          for wheel in "$download_root"/*.whl; do
+            if [[ "$(basename "$wheel")" != "$main_wheel_name" ]]; then
+              dependency_args+=(--python-dependency "linux-x86_64-glibc-cp312=$wheel")
+            fi
+          done
+          python scripts/build_hybrid_bundle.py \
+            --release "ci-${GITHUB_SHA}" \
+            --version "ci-${GITHUB_SHA}" \
+            --repository-commit "${GITHUB_SHA}" \
+            --wheel "$main_wheel" \
+            --native "linux-x86_64-glibc-cp312=target/release/outctl-native" \
+            "${dependency_args[@]}" \
+            --destination "$bundle_parent/bundle"
+          python scripts/rehearse_hybrid_bundle.py \
+            "$bundle_parent/bundle" \
+            --host-class linux-x86_64-glibc-cp312 \
+            --python "$(uv python find 3.12)"
+
   native:
     runs-on: ubuntu-latest
     steps:

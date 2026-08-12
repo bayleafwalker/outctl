@@ -46,6 +46,7 @@ def check(path: Path) -> None:
             "outctl/extensions/worker.py",
             "outctl/native/__init__.py",
             "outctl/native/differential.py",
+            "outctl/native/rollout.py",
             "outctl/native/selector.py",
         }
         missing = required - names
