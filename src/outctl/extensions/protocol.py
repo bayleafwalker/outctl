@@ -288,6 +288,10 @@ def result_document(invocation: ExtensionInvocation, result: ExtensionResult) ->
     )
     if result.status is ExtensionStatus.ACCEPTED and result.kind is not expected_kind:
         raise ExtensionProtocolError("extension contribution kind is invalid for its phase")
+    if result.status is not ExtensionStatus.ACCEPTED and (
+        result.kind is not None or result.payload
+    ):
+        raise ExtensionProtocolError("non-accepted extension result carries contribution data")
     checked_payload = dict(result.payload)
     if result.status is ExtensionStatus.ACCEPTED:
         checked_payload = _validate_w6_payload(expected_kind, result.payload)

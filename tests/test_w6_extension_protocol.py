@@ -143,6 +143,37 @@ def test_only_facts_and_projection_candidates_cross_w6_boundary() -> None:
             )
 
 
+@pytest.mark.parametrize(
+    "forbidden",
+    (
+        "can-authorize-execution",
+        "can_authorize_execution",
+        "canauthorizeexecution",
+        "canAuthorizeExecution",
+        "CanAuthorizeExecution",
+        "trustDomain",
+        "captureRequired",
+        "rawOutput",
+        "secretValue",
+        "commandScope",
+        "stdinRef",
+        "PersistenceMode",
+        "disclosure.mode",
+        "redaction required",
+        "LifecycleState",
+        "MAX_RESULT_BYTES",
+    ),
+)
+def test_forbidden_semantic_key_variants_are_rejected_recursively(forbidden: str) -> None:
+    invocation = _commissioning()
+    with pytest.raises(ValueError, match="outside the extension boundary"):
+        ExtensionResult.accepted(
+            invocation.request,
+            ExtensionKind.FACTS,
+            {"facts": {"nested": {forbidden: True}}},
+        )
+
+
 def test_kind_payload_shapes_are_exact_and_bounded() -> None:
     commissioning = _commissioning()
     for payload in (
@@ -188,3 +219,31 @@ def test_mutated_result_objects_are_revalidated_at_the_protocol_boundary() -> No
     facts["execution-authorized"] = True
     with pytest.raises(ExtensionProtocolError, match="payload is invalid"):
         result_document(invocation, result)
+
+
+def test_projection_and_raw_protocol_reject_nested_forbidden_variants() -> None:
+    projection = _projection()
+    result = ExtensionResult.accepted(
+        projection.request,
+        ExtensionKind.PROJECTION_CANDIDATE,
+        {"title": "Bounded", "lines": ["one"], "lossy": False},
+    )
+    lines = result.payload["lines"]
+    assert isinstance(lines, list)
+    lines.append({"trustDomain": "trusted-local"})  # type: ignore[arg-type]
+    with pytest.raises(ExtensionProtocolError, match="payload is invalid"):
+        result_document(projection, result)
+
+    invocation = _commissioning()
+    valid = ExtensionResult.accepted(
+        invocation.request,
+        ExtensionKind.FACTS,
+        {"facts": {"observed": True}},
+    )
+    document = json.loads(result_document(invocation, valid))
+    document["payload"]["facts"]["nested"] = {"captureRequired": True}
+    with pytest.raises(ExtensionProtocolError, match="payload is invalid"):
+        parse_result(
+            json.dumps(document, sort_keys=True, separators=(",", ":")).encode(),
+            invocation,
+        )

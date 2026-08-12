@@ -113,9 +113,19 @@ def test_projection_result_cannot_be_misrepresented_as_compile_time_contribution
 
 
 def test_mutated_record_payload_is_revalidated_when_canonicalized() -> None:
-    record = _record("extension-a", "one")
-    facts = record.payload["facts"]
+    invocation = _invocation("extension-a")
+    result = ExtensionResult.accepted(
+        invocation.request,
+        ExtensionKind.FACTS,
+        {"facts": {"value": "one"}},
+    )
+    record = contribution_record(invocation, result)
+    facts = result.payload["facts"]
     assert isinstance(facts, dict)
-    facts["execution-authorized"] = True
-    with pytest.raises(ValueError, match="outside the extension boundary"):
-        canonical_contribution_material([record])
+    facts["value"] = "changed-after-record"
+
+    # The record retained an immutable exact snapshot, not the mutable result.
+    material = canonical_contribution_material([record])
+    assert material[0]["payload"] == {"facts": {"value": "one"}}
+    with pytest.raises(ExtensionProtocolError, match="result digest"):
+        replace(record, payload={"facts": {"value": "valid-but-stale"}})

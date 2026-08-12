@@ -55,6 +55,11 @@ projection:    {"title": <short string>, "lines": <bounded strings>, "lossy": <b
 
 Authority, trust, capture, persistence, disclosure, redaction, secret,
 command, stdin, lifecycle, and budget-like fields are rejected recursively.
+Keys are compared by compact semantic spelling, so separator, compact,
+camelCase, and PascalCase variants fail identically. Contribution records take
+an immutable deep snapshot and rederive the exact isolated-result digest before
+canonicalization; a valid-looking payload change cannot retain stale source
+provenance.
 Accepted commissioning fact records bind their extension pin, invocation,
 result digest, and payload into policy `source_digest`. They are not merged
 into commissioning claims, command scope, sink actions, or capture policy.
@@ -64,6 +69,12 @@ exercise the same generic entry-point discovery and isolation path; no
 extension-specific Rust code exists.
 
 ## Verification and limits
+
+Final correction gates pass 282 Python tests, including real bubblewrap and
+native-binary coverage, plus 64 Rust unit tests (5 CLI, 1 contracts, 58 engine)
+and the presentation bench. Rust fmt/check, Clippy with warnings denied, Ruff,
+strict Mypy over 37 source files, wheel/package checks, artifact validation,
+and diff validation also pass.
 
 Coverage includes generic unknown direct argv, no-Python native execution,
 null and inherited stdin, exact reviewed shell matching, opaque stdin bounds,

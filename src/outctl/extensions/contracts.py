@@ -27,34 +27,63 @@ MAX_JSON_DEPTH: Final = 32
 MAX_JSON_ITEMS: Final = 2_048
 MAX_JSON_STRING_LENGTH: Final = 32 * 1024
 _EXTENSION_ID_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
-_FORBIDDEN_KEYS: Final = frozenset(
+_FORBIDDEN_KEY_NAMES: Final = frozenset(
     {
         "authorize_execution",
+        "authorized",
         "authorization",
         "budget",
         "can_authorize_execution",
         "can_retry",
+        "capture",
         "capture_commitment",
+        "capture_id",
+        "capture_ref",
         "capture_required",
+        "capture_status",
         "command",
+        "command_argv",
+        "command_scope",
         "commissioned",
+        "commissioning",
         "credential",
+        "deadline",
+        "deadline_ms",
         "disclosure",
+        "disclosure_mode",
         "durability",
         "environment",
+        "execution_mode",
         "execution_authorized",
         "execution_authority",
         "lifecycle",
+        "lifecycle_state",
         "limits",
+        "max_result_bytes",
         "persistence",
+        "persistence_mode",
+        "policy",
+        "policy_candidate",
         "raw_output",
         "redaction",
         "redaction_required",
+        "retry",
+        "sanitizer",
         "secret",
+        "secret_ref",
+        "secret_value",
+        "secrets",
+        "shell_command",
         "spool_path",
         "stdin",
+        "stdin_mode",
+        "stdin_ref",
+        "trust",
         "trust_domain",
     }
+)
+_FORBIDDEN_KEYS: Final = frozenset(
+    re.sub(r"[^a-z0-9]", "", name.casefold()) for name in _FORBIDDEN_KEY_NAMES
 )
 
 
@@ -116,7 +145,10 @@ def _validate_json(
                 raise ValueError(f"extension JSON key is not a string at {path}")
             if len(key) > 128:
                 raise ValueError(f"extension JSON key is too long at {path}")
-            normalized_key = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+            # Compact semantic normalization rejects separator, compact,
+            # camelCase, and PascalCase spellings equally. This comparison is
+            # recursive because every child mapping passes through this walk.
+            normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold())
             if normalized_key in _FORBIDDEN_KEYS:
                 raise ValueError(f"extension result field is outside the extension boundary: {key}")
             result[key] = _validate_json(child, f"{path}.{key}", depth=depth + 1, remaining=budget)
