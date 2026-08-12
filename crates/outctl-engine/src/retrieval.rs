@@ -1,5 +1,5 @@
 use crate::manifest::{read_published_manifest_bundle, sha256_prefixed, V2_SIDECAR_NAME};
-use crate::retention::{read_retention, retention_binds_bundle};
+use crate::retention::read_committed_retention;
 use crate::storage::{file_len, read_range, sha256_file, PrivateDir, CHUNK_BYTES};
 use regex::bytes::Regex;
 use serde::Serialize;
@@ -92,6 +92,7 @@ pub struct VerificationResult {
 
 struct ResolvedCapture {
     status: RetrievalStatus,
+    root: Option<PrivateDir>,
     directory: Option<PrivateDir>,
     detail: Option<String>,
 }
@@ -523,6 +524,7 @@ fn resolve_capture(spool_root: &Path, capture_id: &str) -> ResolvedCapture {
     if !valid_capture_id(capture_id) {
         return ResolvedCapture {
             status: RetrievalStatus::Denied,
+            root: None,
             directory: None,
             detail: Some("invalid capture id".to_owned()),
         };
@@ -532,6 +534,7 @@ fn resolve_capture(spool_root: &Path, capture_id: &str) -> ResolvedCapture {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return ResolvedCapture {
                 status: RetrievalStatus::Unavailable,
+                root: None,
                 directory: None,
                 detail: Some("spool unavailable".to_owned()),
             }
@@ -539,6 +542,7 @@ fn resolve_capture(spool_root: &Path, capture_id: &str) -> ResolvedCapture {
         Err(_) => {
             return ResolvedCapture {
                 status: RetrievalStatus::Denied,
+                root: None,
                 directory: None,
                 detail: Some("spool unavailable or unsafe".to_owned()),
             }
@@ -554,6 +558,7 @@ fn resolve_capture(spool_root: &Path, capture_id: &str) -> ResolvedCapture {
             Err(_) => {
                 return ResolvedCapture {
                     status: RetrievalStatus::Denied,
+                    root: None,
                     directory: None,
                     detail: Some("unsafe spool group".to_owned()),
                 }
@@ -568,6 +573,7 @@ fn resolve_capture(spool_root: &Path, capture_id: &str) -> ResolvedCapture {
             Ok(Some(directory)) => {
                 return ResolvedCapture {
                     status,
+                    root: Some(root),
                     directory: Some(directory),
                     detail: None,
                 }
@@ -576,6 +582,7 @@ fn resolve_capture(spool_root: &Path, capture_id: &str) -> ResolvedCapture {
             Err(_) => {
                 return ResolvedCapture {
                     status: RetrievalStatus::Denied,
+                    root: None,
                     directory: None,
                     detail: Some("unsafe capture path".to_owned()),
                 }
@@ -584,6 +591,7 @@ fn resolve_capture(spool_root: &Path, capture_id: &str) -> ResolvedCapture {
     }
     ResolvedCapture {
         status: RetrievalStatus::Unavailable,
+        root: None,
         directory: None,
         detail: Some("capture unavailable".to_owned()),
     }
@@ -635,26 +643,21 @@ fn load_manifest(resolved: &ResolvedCapture) -> (RetrievalStatus, Option<Value>,
             }
         };
     }
-    match directory.try_open_file("retention.json") {
-        Ok(Some(_)) => match read_retention(directory) {
-            Ok(retention) if retention_binds_bundle(&retention, &bundle) => (
-                RetrievalStatus::Expired,
-                Some(manifest),
-                Some("raw evidence expired by explicit retention policy".to_owned()),
-            ),
-            Ok(_) => (
-                RetrievalStatus::Tampered,
-                None,
-                Some("retention record does not bind this manifest".to_owned()),
-            ),
-            Err(error) => (RetrievalStatus::Tampered, None, Some(error)),
-        },
-        Ok(None) => (RetrievalStatus::Available, Some(manifest), None),
-        Err(_) => (
+    let Some(root) = resolved.root.as_ref() else {
+        return (
             RetrievalStatus::Tampered,
             None,
-            Some("retention record is unsafe".to_owned()),
+            Some("spool root descriptor is unavailable".to_owned()),
+        );
+    };
+    match read_committed_retention(root, directory, &bundle) {
+        Ok(Some(_)) => (
+            RetrievalStatus::Expired,
+            Some(manifest),
+            Some("raw evidence expired by explicit retention policy".to_owned()),
         ),
+        Ok(None) => (RetrievalStatus::Available, Some(manifest), None),
+        Err(error) => (RetrievalStatus::Tampered, None, Some(error)),
     }
 }
 

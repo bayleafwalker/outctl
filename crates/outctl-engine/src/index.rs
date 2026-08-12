@@ -2,7 +2,7 @@ use crate::manifest::{
     parse_unique_json, read_published_manifest_bundle, sha256_prefixed, validate_capture_id,
     validate_prefixed_digest, ManifestBundle, ManifestError,
 };
-use crate::retention::{read_retention_with_digest, retention_binds_bundle};
+use crate::retention::{read_committed_retention, read_retention_with_digest};
 use crate::storage::PrivateDir;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -328,36 +328,21 @@ pub(crate) fn rebuild_index_in(
                 continue;
             }
         };
-        match directory.try_open_file("retention.json") {
-            Ok(Some(_)) => match read_retention_with_digest(&directory) {
-                Ok((retention, digest)) if retention_binds_bundle(&retention, &bundle) => {
-                    record.capture_status = "expired".to_owned();
-                    record.retained_bytes = 0;
-                    record.retention_record_digest = Some(digest);
-                }
-                Ok(_) => {
-                    issues.push(RebuildIssue {
-                        capture_id: capture_id.to_owned(),
-                        kind: RebuildIssueKind::Unsafe,
-                        detail: "retention record does not bind this manifest".to_owned(),
-                    });
-                    continue;
-                }
-                Err(error) => {
-                    issues.push(RebuildIssue {
-                        capture_id: capture_id.to_owned(),
-                        kind: RebuildIssueKind::Unsafe,
-                        detail: format!("retention record is unsafe: {error}"),
-                    });
-                    continue;
-                }
-            },
+        match read_committed_retention(root, &directory, &bundle) {
+            Ok(Some(_)) => {
+                let (_, digest) = read_retention_with_digest(&directory).map_err(|error| {
+                    IndexError::Corrupt(format!("committed retention record is unsafe: {error}"))
+                })?;
+                record.capture_status = "expired".to_owned();
+                record.retained_bytes = 0;
+                record.retention_record_digest = Some(digest);
+            }
             Ok(None) => {}
             Err(error) => {
                 issues.push(RebuildIssue {
                     capture_id: capture_id.to_owned(),
                     kind: RebuildIssueKind::Unsafe,
-                    detail: format!("retention record path is unsafe: {error}"),
+                    detail: error,
                 });
                 continue;
             }

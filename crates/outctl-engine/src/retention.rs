@@ -17,9 +17,12 @@ use std::path::Path;
 
 const RETENTION_NAME: &str = "retention.json";
 const RETENTION_SCHEMA: &str = "vuoro.outctl.capture-retention-tombstone/v2";
+const RETENTION_RECEIPTS_DIRECTORY: &str = "retention-v2";
+const RETENTION_RECEIPT_SCHEMA: &str = "vuoro.outctl.capture-retention-publication/v2";
 const MAX_CAPTURE_IDS: usize = 1024;
 const MAX_CAPTURE_ENTRIES: usize = 64;
 const MAX_RETENTION_BYTES: u64 = 64 * 1024;
+const MAX_RETENTION_RECEIPT_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetentionPolicy {
@@ -82,6 +85,16 @@ pub(crate) fn retention_binds_bundle(record: &RetentionTombstone, bundle: &Manif
     record.capture_id == bundle.base.capture_id
         && record.manifest_digest == manifest_digest
         && record.prior_capture_status == capture_status
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RetentionReceipt {
+    schema_version: String,
+    capture_id: String,
+    manifest_digest: String,
+    tombstone_digest: String,
+    availability: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -278,7 +291,7 @@ pub fn collect_captures(
         let mut bytes = serde_json::to_vec(&tombstone).map_err(|error| error.to_string())?;
         bytes.push(b'\n');
         let retention_digest = sha256_prefixed(&bytes);
-        let already_expired = match capture.try_open_file(RETENTION_NAME) {
+        let tombstone_present = match capture.try_open_file(RETENTION_NAME) {
             Ok(Some(_)) => {
                 let observed = read_retention(&capture).map_err(|error| error.to_string())?;
                 if observed != tombstone {
@@ -303,6 +316,58 @@ pub fn collect_captures(
                 continue;
             }
         };
+        let expected_receipt = receipt_for(&bundle, &retention_digest)?;
+        let expected_receipt_bytes = receipt_bytes(&expected_receipt)?;
+        let existing_receipts = match root.try_open_dir(RETENTION_RECEIPTS_DIRECTORY) {
+            Ok(receipts) => receipts,
+            Err(error) => {
+                records.push(CollectionRecord {
+                    capture_id: capture_id.clone(),
+                    action: CollectionAction::UnsafeRetained,
+                    mutated: false,
+                    detail: Some(format!("retention receipt directory is unsafe: {error}")),
+                });
+                continue;
+            }
+        };
+        let receipt_present = match existing_receipts.as_ref() {
+            Some(receipts) => match receipts.try_open_file(capture_id) {
+                Ok(Some(_)) => match read_retention_receipt(receipts, capture_id) {
+                    Ok(receipt) if receipt == expected_receipt => true,
+                    Ok(_) => {
+                        records.push(CollectionRecord {
+                            capture_id: capture_id.clone(),
+                            action: CollectionAction::UnsafeRetained,
+                            mutated: false,
+                            detail: Some(
+                                "existing retention receipt binds different evidence".to_owned(),
+                            ),
+                        });
+                        continue;
+                    }
+                    Err(error) => {
+                        records.push(CollectionRecord {
+                            capture_id: capture_id.clone(),
+                            action: CollectionAction::UnsafeRetained,
+                            mutated: false,
+                            detail: Some(format!("retention receipt is unsafe: {error}")),
+                        });
+                        continue;
+                    }
+                },
+                Ok(None) => false,
+                Err(error) => {
+                    records.push(CollectionRecord {
+                        capture_id: capture_id.clone(),
+                        action: CollectionAction::UnsafeRetained,
+                        mutated: false,
+                        detail: Some(format!("retention receipt path is unsafe: {error}")),
+                    });
+                    continue;
+                }
+            },
+            None => false,
+        };
         let mut raw_present = false;
         let mut raw_unsafe = false;
         for name in ["stdout.raw", "stderr.raw", "events.ndjson"] {
@@ -325,9 +390,17 @@ pub fn collect_captures(
             continue;
         }
         if !dry_run {
-            if !already_expired {
+            if !tombstone_present {
                 capture
                     .write_atomic_new(RETENTION_NAME, &bytes)
+                    .map_err(|error| error.to_string())?;
+            }
+            if !receipt_present {
+                let receipts = root
+                    .ensure_dir(RETENTION_RECEIPTS_DIRECTORY)
+                    .map_err(|error| error.to_string())?;
+                receipts
+                    .write_atomic_new(capture_id, &expected_receipt_bytes)
                     .map_err(|error| error.to_string())?;
             }
             for name in ["stdout.raw", "stderr.raw", "events.ndjson"] {
@@ -350,12 +423,12 @@ pub fn collect_captures(
         }
         records.push(CollectionRecord {
             capture_id: capture_id.clone(),
-            action: if already_expired {
+            action: if tombstone_present && receipt_present {
                 CollectionAction::AlreadyExpired
             } else {
                 CollectionAction::ExpireRaw
             },
-            mutated: !dry_run && (!already_expired || raw_present),
+            mutated: !dry_run && (!tombstone_present || !receipt_present || raw_present),
             detail: None,
         });
     }
@@ -378,6 +451,100 @@ pub(crate) fn read_retention_with_digest(
     validate_tombstone(&record)?;
     let digest = sha256_prefixed(&bytes);
     Ok((record, digest))
+}
+
+/// Reconcile the capture-local tombstone with its immutable spool-level
+/// publication. Neither record is authoritative alone: strict readers require
+/// the external receipt to bind the exact tombstone bytes and the immutable
+/// capture manifest digest.
+pub(crate) fn read_committed_retention(
+    root: &PrivateDir,
+    capture: &PrivateDir,
+    bundle: &ManifestBundle,
+) -> Result<Option<RetentionTombstone>, String> {
+    let tombstone_present = capture
+        .try_open_file(RETENTION_NAME)
+        .map_err(|error| format!("retention record path is unsafe: {error}"))?
+        .is_some();
+    let receipts = root
+        .try_open_dir(RETENTION_RECEIPTS_DIRECTORY)
+        .map_err(|error| format!("retention receipt directory is unsafe: {error}"))?;
+    let receipt_present = match &receipts {
+        Some(receipts) => receipts
+            .try_open_file(&bundle.base.capture_id)
+            .map_err(|error| format!("retention receipt path is unsafe: {error}"))?
+            .is_some(),
+        None => false,
+    };
+    match (tombstone_present, receipt_present) {
+        (false, false) => return Ok(None),
+        (true, false) => return Err("retention tombstone is not externally committed".to_owned()),
+        (false, true) => return Err("retention receipt has no capture tombstone".to_owned()),
+        (true, true) => {}
+    }
+    let (tombstone, tombstone_digest) = read_retention_with_digest(capture)?;
+    if !retention_binds_bundle(&tombstone, bundle) {
+        return Err("retention tombstone does not bind this capture manifest".to_owned());
+    }
+    let receipt = read_retention_receipt(
+        receipts
+            .as_ref()
+            .expect("receipt presence requires directory"),
+        &bundle.base.capture_id,
+    )?;
+    validate_retention_receipt(&receipt, bundle, &tombstone_digest)?;
+    Ok(Some(tombstone))
+}
+
+fn receipt_for(
+    bundle: &ManifestBundle,
+    tombstone_digest: &str,
+) -> Result<RetentionReceipt, String> {
+    validate_prefixed_digest(tombstone_digest, "retention tombstone digest")
+        .map_err(|error| error.to_string())?;
+    Ok(RetentionReceipt {
+        schema_version: RETENTION_RECEIPT_SCHEMA.to_owned(),
+        capture_id: bundle.base.capture_id.clone(),
+        manifest_digest: bundle
+            .sidecar_digest
+            .as_deref()
+            .unwrap_or(&bundle.base.exact_digest)
+            .to_owned(),
+        tombstone_digest: tombstone_digest.to_owned(),
+        availability: "expired".to_owned(),
+    })
+}
+
+fn receipt_bytes(receipt: &RetentionReceipt) -> Result<Vec<u8>, String> {
+    let mut bytes = serde_json::to_vec(receipt).map_err(|error| error.to_string())?;
+    bytes.push(b'\n');
+    if bytes.len() as u64 > MAX_RETENTION_RECEIPT_BYTES {
+        return Err("retention receipt exceeds its bounded writer limit".to_owned());
+    }
+    Ok(bytes)
+}
+
+fn read_retention_receipt(
+    receipts: &PrivateDir,
+    capture_id: &str,
+) -> Result<RetentionReceipt, String> {
+    let bytes = receipts
+        .read_bounded(capture_id, MAX_RETENTION_RECEIPT_BYTES)
+        .map_err(|error| error.to_string())?;
+    let value = parse_unique_json(&bytes).map_err(|error| error.to_string())?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+fn validate_retention_receipt(
+    receipt: &RetentionReceipt,
+    bundle: &ManifestBundle,
+    tombstone_digest: &str,
+) -> Result<(), String> {
+    let expected = receipt_for(bundle, tombstone_digest)?;
+    if receipt != &expected {
+        return Err("retention receipt does not bind exact tombstone bytes".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_request(
@@ -688,21 +855,36 @@ mod tests {
 
     #[test]
     fn syntactically_valid_retention_semantic_tampering_is_rejected_everywhere() {
-        for (label, needle, replacement) in [
+        for (label, needle, replacement, changed_bytes) in [
             (
                 "prior-status",
-                b"\"prior_capture_status\":\"complete\"".as_slice(),
-                b"\"prior_capture_status\":\"Complete\"".as_slice(),
+                b"\"prior_capture_status\":\"complete\"".to_vec(),
+                b"\"prior_capture_status\":\"degraded\"".to_vec(),
+                8,
             ),
             (
                 "reason-key",
-                b"\"reason_key\":\"explicit-test-expiry\"".as_slice(),
-                b"\"reason_key\":\"explicit test-expiry\"".as_slice(),
+                b"\"reason_key\":\"explicit-test-expiry\"".to_vec(),
+                b"\"reason_key\":\"explicit-test-expirz\"".to_vec(),
+                1,
             ),
             (
                 "policy-ref",
-                b"\"ref\":\"policy://retention/test\"".as_slice(),
-                b"\"ref\":\"policy:/ retention/test\"".as_slice(),
+                b"\"ref\":\"policy://retention/test\"".to_vec(),
+                b"\"ref\":\"policy://retention/tess\"".to_vec(),
+                1,
+            ),
+            (
+                "policy-digest",
+                format!("\"digest\":\"sha256:{}\"", "a".repeat(64)).into_bytes(),
+                format!("\"digest\":\"sha256:b{}\"", "a".repeat(63)).into_bytes(),
+                1,
+            ),
+            (
+                "expiry",
+                b"\"expired_at_unix_ms\":1786497600000".to_vec(),
+                b"\"expired_at_unix_ms\":1786497600001".to_vec(),
+                1,
             ),
         ] {
             let root = root(label);
@@ -725,14 +907,14 @@ mod tests {
                 .windows(needle.len())
                 .position(|window| window == needle)
                 .unwrap();
-            bytes[offset..offset + needle.len()].copy_from_slice(replacement);
+            bytes[offset..offset + needle.len()].copy_from_slice(&replacement);
             assert_eq!(
                 bytes[offset..offset + needle.len()]
                     .iter()
-                    .zip(needle)
+                    .zip(&needle)
                     .filter(|(left, right)| left != right)
                     .count(),
-                1
+                changed_bytes
             );
             serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
             fs::write(&path, bytes).unwrap();
@@ -747,6 +929,107 @@ mod tests {
             assert_eq!(rebuilt.issues.len(), 1, "{label}");
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn retention_commitment_crash_windows_and_mismatches_fail_closed() {
+        // Tombstone durable, receipt not yet published, raw unlink not begun.
+        let tombstone_root = root("tombstone-window");
+        let capture_id = capture(&tombstone_root);
+        let capture_path = tombstone_root.join("captures").join(&capture_id);
+        let stdout = fs::read(capture_path.join("stdout.raw")).unwrap();
+        collect_captures(
+            &tombstone_root,
+            std::slice::from_ref(&capture_id),
+            &policy(),
+            false,
+            true,
+        )
+        .unwrap();
+        fs::remove_file(tombstone_root.join("retention-v2").join(&capture_id)).unwrap();
+        fs::write(capture_path.join("stdout.raw"), &stdout).unwrap();
+        assert_eq!(
+            inspect_capture(&tombstone_root, &capture_id).status,
+            RetrievalStatus::Tampered
+        );
+        assert!(rebuild_index(&tombstone_root, 1024)
+            .unwrap()
+            .records
+            .is_empty());
+        let resumed = collect_captures(
+            &tombstone_root,
+            std::slice::from_ref(&capture_id),
+            &policy(),
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(resumed.records[0].action, CollectionAction::ExpireRaw);
+        assert!(resumed.records[0].mutated);
+        assert!(!capture_path.join("stdout.raw").exists());
+        assert_eq!(
+            inspect_capture(&tombstone_root, &capture_id).status,
+            RetrievalStatus::Expired
+        );
+        fs::remove_dir_all(tombstone_root).unwrap();
+
+        // Receipt without its exact tombstone is an orphan, never authority.
+        let orphan_root = root("orphan-receipt");
+        let capture_id = capture(&orphan_root);
+        collect_captures(
+            &orphan_root,
+            std::slice::from_ref(&capture_id),
+            &policy(),
+            false,
+            true,
+        )
+        .unwrap();
+        fs::remove_file(
+            orphan_root
+                .join("captures")
+                .join(&capture_id)
+                .join("retention.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            inspect_capture(&orphan_root, &capture_id).status,
+            RetrievalStatus::Tampered
+        );
+        assert!(rebuild_index(&orphan_root, 1024)
+            .unwrap()
+            .records
+            .is_empty());
+        fs::remove_dir_all(orphan_root).unwrap();
+
+        // A syntactically valid receipt with a one-nibble commitment change is
+        // rejected even though the capture-local tombstone is unchanged.
+        let root = root("receipt-mismatch");
+        let capture_id = capture(&root);
+        collect_captures(
+            &root,
+            std::slice::from_ref(&capture_id),
+            &policy(),
+            false,
+            true,
+        )
+        .unwrap();
+        let receipt_path = root.join("retention-v2").join(&capture_id);
+        let mut receipt = fs::read(&receipt_path).unwrap();
+        let marker = b"\"tombstone_digest\":\"sha256:";
+        let offset = receipt
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap()
+            + marker.len();
+        receipt[offset] = if receipt[offset] == b'a' { b'b' } else { b'a' };
+        serde_json::from_slice::<serde_json::Value>(&receipt).unwrap();
+        fs::write(receipt_path, receipt).unwrap();
+        assert_eq!(
+            inspect_capture(&root, &capture_id).status,
+            RetrievalStatus::Tampered
+        );
+        assert!(rebuild_index(&root, 1024).unwrap().records.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

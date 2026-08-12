@@ -86,6 +86,9 @@ digest. An expiry tombstone pins the original capture reference and exact v2
 sidecar digest (or the base digest for a one-back capture), the manifest
 digest, authoritative prior capture status, bounded retention policy identity
 and reason, and the resulting unavailable state.
+The capture-local tombstone is not authoritative alone: a separate immutable
+spool-level receipt binds its exact digest and the immutable capture manifest
+digest. Strict retrieval and index rebuild require both records to reconcile.
 It never authorizes an automatic rerun. Existing v1 manifests are not rewritten:
 Python remains the only v1 writer, new v2 captures preserve exact v1 stream
 bytes and a v1-readable layout, and the native reader supports one-version-back

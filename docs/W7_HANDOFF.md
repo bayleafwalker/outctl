@@ -65,6 +65,17 @@ status, retention policy digest, expiry time and reason, and the fact that raw
 retrieval is unavailable. Expiry never rewrites the immutable manifest and
 never triggers an automatic rerun.
 
+The tombstone is committed by a separate immutable receipt in the pinned spool
+root. While the exclusive retention lock is held, the transaction durably
+writes the capture-local tombstone, then durably writes a `RENAME_NOREPLACE`
+receipt binding the exact tombstone digest and capture manifest digest, then
+unlinks raw streams, syncs the capture directory, and updates the rebuildable
+index. Strict retrieval and rebuild accept expiry only when both records
+reconcile. A crash before the receipt leaves raw evidence retained and expiry
+uncommitted; an idempotent retry may publish the expected receipt and finish
+collection. An orphaned or mismatched receipt fails closed and is never
+self-healed over conflicting evidence.
+
 New ephemeral execution must create no named empty capture directory, so it
 leaves zero W4-style tombstones. Legacy tombstones need special treatment:
 there is no POSIX operation that conditionally removes a directory entry only
@@ -131,11 +142,14 @@ misbound retention record.
 
 Local gates on 2026-08-12:
 
-- Rust workspace/all-target tests: 84 engine, 7 CLI, and 1 contracts test,
+- Rust workspace/all-target tests: 85 engine, 7 CLI, and 1 contracts test,
   plus the presentation bench;
 - injected `ENOSPC`, `EDQUOT`, `EIO`, manifest, sidecar, directory-sync,
   rename, parent-sync, publication-binding, and index-update failures pass
   without deadlock or a false completed-durability result;
+- tombstone-before-receipt, receipt-before-unlink, orphan-receipt, mismatched
+  receipt, and schema-valid policy/ref/reason/expiry tampering fail closed or
+  resume only through the exact expected immutable commitment;
 - cargo-enabled Python/conformance suite: 286 passed, including native/Python
   cross-version reads and exact byte/hash verification;
 - v2 schema examples: 22 passed;
