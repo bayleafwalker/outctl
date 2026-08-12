@@ -4,28 +4,222 @@
   "title": "Outctl v2 additive capture manifest delta",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "base_schema_version", "capture_id", "manifest_digest", "engine", "request_digest", "policy", "commitment", "durability", "presentation", "compatibility"],
+  "required": [
+    "schema_version",
+    "base_schema_version",
+    "capture_id",
+    "base_manifest_digest",
+    "engine",
+    "request_digest",
+    "policy",
+    "capture_status",
+    "complete",
+    "streams",
+    "event_index",
+    "commitment",
+    "durability",
+    "durability_evidence",
+    "presentation",
+    "recovery",
+    "retention_record_schema",
+    "index",
+    "compatibility"
+  ],
   "properties": {
     "schema_version": {"const": "vuoro.outctl.capture-manifest-delta/v2"},
-    "base_schema_version": {"const": "vuoro.outctl.capture/v1alpha1"},
+    "base_schema_version": {
+      "enum": ["vuoro.outctl.capture/v1alpha1", "vuoro.outctl.capture-native/w3"]
+    },
     "capture_id": {"type": "string", "minLength": 1},
-    "manifest_digest": {"$ref": "#/$defs/digest"},
-    "engine": {"type": "object", "additionalProperties": false, "required": ["id", "version"], "properties": {"id": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}},
+    "base_manifest_digest": {"$ref": "#/$defs/digest"},
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
     "request_digest": {"$ref": "#/$defs/digest"},
-    "policy": {"type": "object", "additionalProperties": false, "required": ["snapshot_id", "ref", "digest"], "properties": {"snapshot_id": {"type": "string", "minLength": 1}, "ref": {"type": "string", "minLength": 1}, "digest": {"$ref": "#/$defs/digest"}}},
-    "commitment": {"enum": ["memory-only", "process-local", "host-persistent", "replicated"]},
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_id", "ref", "digest"],
+      "properties": {
+        "snapshot_id": {"type": "string", "minLength": 1},
+        "ref": {"type": "string", "minLength": 1},
+        "digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "capture_status": {
+      "enum": ["complete", "truncated", "degraded", "failed", "recovered-incomplete"]
+    },
+    "complete": {"type": "boolean"},
+    "streams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stdout", "stderr"],
+      "properties": {
+        "stdout": {"$ref": "#/$defs/stream"},
+        "stderr": {"$ref": "#/$defs/stream"}
+      }
+    },
+    "event_index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "events", "sha256", "complete"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 0},
+        "events": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "complete": {"type": "boolean"}
+      }
+    },
+    "commitment": {"enum": ["host-persistent", "replicated"]},
     "durability": {"enum": ["none", "host", "replica", "authoritative"]},
-    "presentation": {"enum": ["empty-success", "raw-safe", "bounded-projection", "metadata-only", "denied"]},
+    "durability_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifacts_synced",
+        "partial_directory_synced",
+        "atomic_rename",
+        "capture_parent_synced",
+        "replica_verified"
+      ],
+      "properties": {
+        "artifacts_synced": {"type": "boolean"},
+        "partial_directory_synced": {"type": "boolean"},
+        "atomic_rename": {"type": "boolean"},
+        "capture_parent_synced": {"type": "boolean"},
+        "replica_verified": {"type": "boolean"}
+      }
+    },
+    "presentation": {
+      "enum": [
+        "empty-success",
+        "empty-command-failure",
+        "raw-safe",
+        "bounded-projection",
+        "metadata-only",
+        "denied"
+      ]
+    },
+    "recovery": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["reason_key", "recovered_at_unix_ms", "command_status_known"],
+      "properties": {
+        "reason_key": {"type": "string", "minLength": 1, "maxLength": 128},
+        "recovered_at_unix_ms": {"type": "integer", "minimum": 0},
+        "command_status_known": {"const": false}
+      }
+    },
+    "retention_record_schema": {
+      "const": "vuoro.outctl.capture-retention-tombstone/v2"
+    },
+    "index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "authoritative", "rebuildable"],
+      "properties": {
+        "format": {"const": "v2"},
+        "authoritative": {"const": false},
+        "rebuildable": {"const": true}
+      }
+    },
     "compatibility": {
-      "type": "object", "additionalProperties": false,
-      "required": ["v1_reader", "v1_writer", "v1_stream_bytes_preserved", "v1_manifest_byte_exact", "unknown_fields_ignored"],
-      "properties": {"v1_reader": {"const": "readable"}, "v1_writer": {"const": "python-reference-only"}, "v1_stream_bytes_preserved": {"const": true}, "v1_manifest_byte_exact": {"const": false}, "unknown_fields_ignored": {"const": true}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v1_reader",
+        "v1_writer",
+        "v1_stream_bytes_preserved",
+        "v1_manifest_byte_exact",
+        "unknown_fields_ignored"
+      ],
+      "properties": {
+        "v1_reader": {"const": "readable"},
+        "v1_writer": {"const": "python-reference-only"},
+        "v1_stream_bytes_preserved": {"const": true},
+        "v1_manifest_byte_exact": {"const": false},
+        "unknown_fields_ignored": {"const": true}
+      }
     }
   },
   "allOf": [
-    {"if": {"required": ["commitment"], "properties": {"commitment": {"enum": ["memory-only", "process-local"]}}}, "then": {"properties": {"durability": {"const": "none"}}}},
-    {"if": {"required": ["commitment"], "properties": {"commitment": {"const": "host-persistent"}}}, "then": {"properties": {"durability": {"const": "host"}}}},
-    {"if": {"required": ["commitment"], "properties": {"commitment": {"const": "replicated"}}}, "then": {"properties": {"durability": {"enum": ["replica", "authoritative"]}}}}
+    {
+      "if": {"properties": {"capture_status": {"const": "complete"}}},
+      "then": {
+        "properties": {
+          "complete": {"const": true},
+          "recovery": {"const": null},
+          "streams": {
+            "properties": {
+              "stdout": {"properties": {"complete": {"const": true}}},
+              "stderr": {"properties": {"complete": {"const": true}}}
+            }
+          },
+          "event_index": {"properties": {"complete": {"const": true}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"capture_status": {"enum": ["truncated", "degraded", "failed"]}}},
+      "then": {"properties": {"complete": {"const": false}, "recovery": {"const": null}}}
+    },
+    {
+      "if": {"properties": {"capture_status": {"const": "recovered-incomplete"}}},
+      "then": {"properties": {"complete": {"const": false}, "recovery": {"type": "object"}}}
+    },
+    {
+      "if": {"properties": {"commitment": {"const": "host-persistent"}}},
+      "then": {
+        "properties": {
+          "durability": {"const": "host"},
+          "durability_evidence": {
+            "properties": {
+              "artifacts_synced": {"const": true},
+              "partial_directory_synced": {"const": true},
+              "atomic_rename": {"const": true},
+              "capture_parent_synced": {"const": true},
+              "replica_verified": {"const": false}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"commitment": {"const": "replicated"}}},
+      "then": {
+        "properties": {
+          "durability": {"enum": ["replica", "authoritative"]},
+          "durability_evidence": {
+            "properties": {
+              "artifacts_synced": {"const": true},
+              "partial_directory_synced": {"const": true},
+              "atomic_rename": {"const": true},
+              "capture_parent_synced": {"const": true},
+              "replica_verified": {"const": true}
+            }
+          }
+        }
+      }
+    }
   ],
-  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "sha256", "complete", "last_captured_offset"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "complete": {"type": "boolean"},
+        "last_captured_offset": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
 }

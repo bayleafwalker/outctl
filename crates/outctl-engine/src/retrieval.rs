@@ -1,3 +1,5 @@
+use crate::manifest::{read_manifest_bundle, sha256_prefixed, V2_SIDECAR_NAME};
+use crate::retention::read_retention;
 use crate::storage::{file_len, read_range, sha256_file, PrivateDir, CHUNK_BYTES};
 use regex::bytes::Regex;
 use serde::Serialize;
@@ -9,7 +11,6 @@ use std::path::Path;
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 const MAX_CONTEXT_BYTES: usize = 4 * 1024;
 const MAX_MATCHES: usize = 100;
-const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -17,6 +18,7 @@ pub enum RetrievalStatus {
     Available,
     Incomplete,
     Unavailable,
+    Expired,
     Tampered,
     Denied,
 }
@@ -364,13 +366,22 @@ pub fn search_stream_for_workspace(
 }
 
 pub fn verify_capture(spool_root: &Path, capture_id: &str) -> VerificationResult {
-    verify_capture_for_workspace(spool_root, capture_id, None)
+    verify_capture_with_expected(spool_root, capture_id, None, None)
 }
 
 pub fn verify_capture_for_workspace(
     spool_root: &Path,
     capture_id: &str,
     expected_workspace_id: Option<&str>,
+) -> VerificationResult {
+    verify_capture_with_expected(spool_root, capture_id, expected_workspace_id, None)
+}
+
+pub fn verify_capture_with_expected(
+    spool_root: &Path,
+    capture_id: &str,
+    expected_workspace_id: Option<&str>,
+    expected_manifest_digest: Option<&str>,
 ) -> VerificationResult {
     let resolved = resolve_capture(spool_root, capture_id);
     let (status, manifest, detail) = authorized_manifest(&resolved, expected_workspace_id);
@@ -390,6 +401,58 @@ pub fn verify_capture_for_workspace(
             detail: Some("capture unavailable".to_owned()),
         };
     };
+    let bundle = match read_manifest_bundle(directory, Some(capture_id)) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return VerificationResult {
+                status: RetrievalStatus::Tampered,
+                capture_id: capture_id.to_owned(),
+                checks: Vec::new(),
+                detail: Some(error.to_string()),
+            }
+        }
+    };
+    let pinned_manifest_digest = bundle
+        .sidecar_digest
+        .as_deref()
+        .unwrap_or(&bundle.base.exact_digest)
+        .to_owned();
+    let mut checks = vec![DigestCheck {
+        artifact: "manifest".to_owned(),
+        expected: expected_manifest_digest.map(str::to_owned),
+        observed: Some(pinned_manifest_digest.clone()),
+        matches: expected_manifest_digest.is_none_or(|expected| expected == pinned_manifest_digest),
+    }];
+    if let Some(delta) = &bundle.delta {
+        checks.push(DigestCheck {
+            artifact: "base-manifest".to_owned(),
+            expected: Some(delta.base_manifest_digest.clone()),
+            observed: Some(bundle.base.exact_digest.clone()),
+            matches: delta.base_manifest_digest == bundle.base.exact_digest,
+        });
+        let observed = directory
+            .read_bounded(V2_SIDECAR_NAME, crate::manifest::MAX_V2_SIDECAR_BYTES)
+            .ok()
+            .map(|bytes| sha256_prefixed(&bytes));
+        checks.push(DigestCheck {
+            artifact: "v2-sidecar".to_owned(),
+            expected: bundle.sidecar_digest.clone(),
+            matches: observed.is_some() && observed == bundle.sidecar_digest,
+            observed,
+        });
+    }
+    if status == RetrievalStatus::Expired {
+        return VerificationResult {
+            status: if checks.iter().all(|check| check.matches) {
+                RetrievalStatus::Expired
+            } else {
+                RetrievalStatus::Tampered
+            },
+            capture_id: capture_id.to_owned(),
+            checks,
+            detail,
+        };
+    }
     let artifacts = [
         (
             "stdout",
@@ -407,22 +470,24 @@ pub fn verify_capture_for_workspace(
             manifest.pointer("/event_index/sha256"),
         ),
     ];
-    let checks = artifacts
-        .into_iter()
-        .map(|(artifact, filename, expected)| {
-            let expected = expected.and_then(Value::as_str).map(str::to_owned);
-            let observed = directory
-                .open_file(filename)
-                .ok()
-                .and_then(|file| sha256_file(&file).ok());
-            DigestCheck {
-                artifact: artifact.to_owned(),
-                matches: expected.is_some() && expected == observed,
-                expected,
-                observed,
-            }
-        })
-        .collect::<Vec<_>>();
+    checks.extend(
+        artifacts
+            .into_iter()
+            .map(|(artifact, filename, expected)| {
+                let expected = expected.and_then(Value::as_str).map(str::to_owned);
+                let observed = directory
+                    .open_file(filename)
+                    .ok()
+                    .and_then(|file| sha256_file(&file).ok());
+                DigestCheck {
+                    artifact: artifact.to_owned(),
+                    matches: expected.is_some() && expected == observed,
+                    expected,
+                    observed,
+                }
+            })
+            .collect::<Vec<_>>(),
+    );
     VerificationResult {
         status: if checks.iter().all(|check| check.matches) {
             RetrievalStatus::Available
@@ -535,55 +600,69 @@ fn load_manifest(resolved: &ResolvedCapture) -> (RetrievalStatus, Option<Value>,
             Some("capture unavailable".to_owned()),
         );
     };
-    let manifest_file = match directory.open_file("manifest.json") {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    let bundle = match read_manifest_bundle(directory, None) {
+        Ok(bundle) => bundle,
+        Err(crate::manifest::ManifestError::Io(error))
+            if error.kind() == io::ErrorKind::NotFound =>
+        {
             return (
                 RetrievalStatus::Incomplete,
                 None,
                 Some("finalized capture has no manifest".to_owned()),
             )
         }
-        Err(_) => {
-            return (
-                RetrievalStatus::Tampered,
-                None,
-                Some("finalized capture has an unsafe manifest".to_owned()),
-            )
-        }
+        Err(error) => return (RetrievalStatus::Tampered, None, Some(error.to_string())),
     };
-    match file_len(&manifest_file) {
-        Ok(length) if length <= MAX_MANIFEST_BYTES => {}
-        Ok(_) => {
-            return (
-                RetrievalStatus::Tampered,
-                None,
-                Some("manifest exceeds the bounded reader limit".to_owned()),
-            )
-        }
-        Err(_) => {
+    let mut manifest: Value = match serde_json::from_slice(&bundle.base.exact_bytes) {
+        Ok(Value::Object(values)) => Value::Object(values),
+        _ => {
             return (
                 RetrievalStatus::Tampered,
                 None,
                 Some("manifest is unreadable".to_owned()),
             )
         }
+    };
+    if let Some(delta) = &bundle.delta {
+        manifest["v2_storage"] = match serde_json::to_value(delta) {
+            Ok(value) => value,
+            Err(_) => {
+                return (
+                    RetrievalStatus::Tampered,
+                    None,
+                    Some("v2 sidecar is unreadable".to_owned()),
+                )
+            }
+        };
     }
-    match serde_json::from_reader::<_, Value>(manifest_file).map_err(io::Error::other) {
-        Ok(Value::Object(values)) => (
-            RetrievalStatus::Available,
-            Some(Value::Object(values)),
-            None,
-        ),
-        Ok(_) => (
-            RetrievalStatus::Tampered,
-            None,
-            Some("manifest is not an object".to_owned()),
-        ),
+    match directory.try_open_file("retention.json") {
+        Ok(Some(_)) => match read_retention(directory) {
+            Ok(retention)
+                if retention.capture_id() == bundle.base.capture_id
+                    && retention.manifest_digest()
+                        == bundle
+                            .sidecar_digest
+                            .as_deref()
+                            .unwrap_or(&bundle.base.exact_digest) =>
+            {
+                (
+                    RetrievalStatus::Expired,
+                    Some(manifest),
+                    Some("raw evidence expired by explicit retention policy".to_owned()),
+                )
+            }
+            Ok(_) => (
+                RetrievalStatus::Tampered,
+                None,
+                Some("retention record does not bind this manifest".to_owned()),
+            ),
+            Err(error) => (RetrievalStatus::Tampered, None, Some(error)),
+        },
+        Ok(None) => (RetrievalStatus::Available, Some(manifest), None),
         Err(_) => (
             RetrievalStatus::Tampered,
             None,
-            Some("manifest is unreadable".to_owned()),
+            Some("retention record is unsafe".to_owned()),
         ),
     }
 }
@@ -618,7 +697,7 @@ fn stream_file(
     expected_workspace_id: Option<&str>,
 ) -> (RetrievalStatus, Option<File>, Option<String>) {
     let (status, manifest, detail) = authorized_manifest(resolved, expected_workspace_id);
-    if manifest.is_none() {
+    if manifest.is_none() || status != RetrievalStatus::Available {
         return (status, None, detail);
     }
     let Some(directory) = &resolved.directory else {
@@ -687,10 +766,11 @@ mod tests {
         inspect_capture, inspect_capture_for_workspace, load_manifest, resolve_capture,
         search_stream, search_stream_for_workspace, slice_stream, slice_stream_for_workspace,
         stream_file, tail_stream, tail_stream_for_workspace, verify_capture,
-        verify_capture_for_workspace, RetrievalStatus,
+        verify_capture_for_workspace, verify_capture_with_expected, RetrievalStatus,
     };
     use crate::capture::{capture_command, CaptureOptions, CommandStdin};
     use crate::storage::{file_len, read_range};
+    use sha2::{Digest, Sha256};
     use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -778,6 +858,35 @@ mod tests {
             inspect_capture(&root, "../outside").status,
             RetrievalStatus::Denied
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn expected_manifest_digest_detects_coordinated_manifest_and_raw_rewrite() {
+        let (root, capture_id) = capture(None);
+        let capture_path = root.join("captures").join(&capture_id);
+        let original_manifest = fs::read(capture_path.join("manifest.json")).unwrap();
+        let expected = format!("sha256:{:x}", Sha256::digest(&original_manifest));
+        let replacement = b"coordinated attacker\n";
+        fs::write(capture_path.join("stdout.raw"), replacement).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+        manifest["streams"]["stdout"]["bytes"] = serde_json::json!(replacement.len());
+        manifest["streams"]["stdout"]["sha256"] =
+            serde_json::json!(format!("{:x}", Sha256::digest(replacement)));
+        let mut bytes = serde_json::to_vec(&manifest).unwrap();
+        bytes.push(b'\n');
+        fs::write(capture_path.join("manifest.json"), bytes).unwrap();
+
+        assert_eq!(
+            verify_capture(&root, &capture_id).status,
+            RetrievalStatus::Available
+        );
+        let verified = verify_capture_with_expected(&root, &capture_id, None, Some(&expected));
+        assert_eq!(verified.status, RetrievalStatus::Tampered);
+        assert!(verified
+            .checks
+            .iter()
+            .any(|check| check.artifact == "manifest" && !check.matches));
         fs::remove_dir_all(root).unwrap();
     }
 

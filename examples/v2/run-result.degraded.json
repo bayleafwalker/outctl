@@ -1,0 +1,11 @@
+{
+  "schema_version": "vuoro.outctl.run-result/v2",
+  "request_id": "req-degraded-1",
+  "engine": {"id": "rust-w7-storage", "version": "0.1.0"},
+  "policy": {"snapshot_id": "snapshot-5187758301587a012d002b363894ff8a", "ref": "policy://interactive-w5", "digest": "sha256:5187758301587a012d002b363894ff8ad27f999d99e55be9a822b49f0039d3c1"},
+  "outcome": "completed",
+  "command": {"started": true, "exit_code": 0, "signal": null, "timed_out": false, "cancelled": false},
+  "capture": {"status": "degraded", "ref": "outctl://capture/01k1w7degraded/manifest/sha256/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "manifest_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "complete": false},
+  "presentation": {"kind": "bounded-projection", "body": "capture degraded; retained evidence is incomplete\n", "lossy": true, "redacted": false, "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+  "wrapper_error": null
+}

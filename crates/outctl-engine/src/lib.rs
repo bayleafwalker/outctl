@@ -1,8 +1,13 @@
 //! Native Linux command capture and v1-compatible evidence reads.
 
 pub mod capture;
+#[allow(dead_code)]
+mod index;
+#[allow(dead_code)]
+mod manifest;
 pub mod policy;
 pub mod presentation;
+pub mod retention;
 pub mod retrieval;
 mod storage;
 
@@ -12,7 +17,7 @@ use outctl_contracts::{
     ENGINE_CAPABILITIES_SCHEMA_VERSION,
 };
 
-pub const ENGINE_ID: &str = "rust-w6-command-scope";
+pub const ENGINE_ID: &str = "rust-w7-storage";
 
 /// The native package version is also the reported engine version.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -27,13 +32,12 @@ pub fn capabilities() -> EngineCapabilities {
             platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         },
         contract_versions: ContractVersions {
-            // W5 evaluates these contracts through the native library. The
-            // structured capture result is not yet a v2 RunResult writer, so
-            // that family stays unadvertised.
+            // W7 writes the v2 result and additive manifest sidecar while
+            // retaining the one-version-back v1-readable base layout.
             run_request: vec!["v2".to_owned()],
             policy_snapshot: vec!["v2".to_owned()],
-            run_result: Vec::new(),
-            capture_manifest: vec!["v1alpha1".to_owned()],
+            run_result: vec!["v2".to_owned()],
+            capture_manifest: vec!["v1alpha1".to_owned(), "v2".to_owned()],
         },
         features: EngineFeatures {
             // W1 freezes direct argv and one-version-back as schema-level
@@ -75,8 +79,8 @@ mod tests {
         assert!(value.features.one_version_back_read);
         assert_eq!(value.contract_versions.run_request, ["v2"]);
         assert_eq!(value.contract_versions.policy_snapshot, ["v2"]);
-        assert!(value.contract_versions.run_result.is_empty());
-        assert_eq!(value.contract_versions.capture_manifest, ["v1alpha1"]);
+        assert_eq!(value.contract_versions.run_result, ["v2"]);
+        assert_eq!(value.contract_versions.capture_manifest, ["v1alpha1", "v2"]);
         assert_eq!(value.limits.max_capture_bytes, MAX_CAPTURE_BYTES);
         assert_eq!(
             value.limits.max_projection_bytes,

@@ -1,0 +1,11 @@
+{
+  "schema_version": "vuoro.outctl.run-result/v2",
+  "request_id": "req-truncated-1",
+  "engine": {"id": "rust-w7-storage", "version": "0.1.0"},
+  "policy": {"snapshot_id": "snapshot-5187758301587a012d002b363894ff8a", "ref": "policy://interactive-w5", "digest": "sha256:5187758301587a012d002b363894ff8ad27f999d99e55be9a822b49f0039d3c1"},
+  "outcome": "completed",
+  "command": {"started": true, "exit_code": 0, "signal": null, "timed_out": false, "cancelled": false},
+  "capture": {"status": "truncated", "ref": "outctl://capture/01k1w7truncated/manifest/sha256/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "manifest_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "complete": false},
+  "presentation": {"kind": "bounded-projection", "body": "head\n[... output omitted ...]\ntail\n", "lossy": true, "redacted": false, "digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+  "wrapper_error": null
+}

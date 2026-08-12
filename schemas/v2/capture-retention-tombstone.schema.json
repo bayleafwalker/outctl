@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:capture-retention-tombstone:v2",
+  "title": "Outctl v2 capture retention tombstone",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "capture_id",
+    "capture_ref",
+    "manifest_digest",
+    "prior_capture_status",
+    "retention_policy",
+    "expired_at_unix_ms",
+    "reason_key",
+    "availability",
+    "compatibility"
+  ],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.capture-retention-tombstone/v2"},
+    "capture_id": {"type": "string", "minLength": 1},
+    "capture_ref": {"type": "string", "pattern": "^outctl://capture/"},
+    "manifest_digest": {"$ref": "#/$defs/digest"},
+    "prior_capture_status": {
+      "enum": ["complete", "truncated", "degraded", "failed", "recovered-incomplete"]
+    },
+    "retention_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "digest"],
+      "properties": {
+        "ref": {"type": "string", "minLength": 1},
+        "digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "expired_at_unix_ms": {"type": "integer", "minimum": 0},
+    "reason_key": {"type": "string", "minLength": 1, "maxLength": 128},
+    "availability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "manifest", "retrieval"],
+      "properties": {
+        "raw": {"const": "expired"},
+        "manifest": {"const": "retained"},
+        "retrieval": {"const": "unavailable"}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automatic_rerun", "immutable_manifest_rewritten"],
+      "properties": {
+        "automatic_rerun": {"const": false},
+        "immutable_manifest_rewritten": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  }
+}

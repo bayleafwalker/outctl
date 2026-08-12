@@ -51,9 +51,17 @@ def test_v2_schemas_are_valid_and_examples_validate(path: Path) -> None:
     examples = {
         "run-request.schema.json": ["run-request.trusted.json", "run-request.restricted.json"],
         "policy-snapshot.schema.json": ["policy-snapshot.json"],
-        "run-result.schema.json": ["run-result.bypassed.json", "run-result.unsupported.json"],
+        "run-result.schema.json": [
+            "run-result.bypassed.json",
+            "run-result.completed.json",
+            "run-result.degraded.json",
+            "run-result.recovered.json",
+            "run-result.truncated.json",
+            "run-result.unsupported.json",
+        ],
         "engine-capabilities.schema.json": ["engine-capabilities.json"],
         "capture-manifest-delta.schema.json": ["capture-manifest-delta.json"],
+        "capture-retention-tombstone.schema.json": ["capture-retention-tombstone.json"],
     }
     for example in examples[path.name]:
         jsonschema.Draft202012Validator(schema).validate(_example(example))
@@ -200,7 +208,7 @@ def test_results_reject_cross_outcome_status_states() -> None:
 def test_snapshot_binding_is_exact_across_request_cache_and_result() -> None:
     snapshot = _example("policy-snapshot.json")
     request = _example("run-request.trusted.json")
-    result = _example("run-result.bypassed.json")
+    result = _example("run-result.completed.json")
     delta = _example("capture-manifest-delta.json")
     expected = {
         "snapshot_id": snapshot["snapshot_id"],
@@ -239,6 +247,80 @@ def test_capture_delta_freezes_v1_writer_stance() -> None:
     _assert_invalid("capture-manifest-delta.schema.json", byte_exact_claim)
 
 
+def test_w7_capture_delta_requires_honest_status_and_durability_evidence() -> None:
+    delta = _example("capture-manifest-delta.json")
+
+    incomplete_complete = deepcopy(delta)
+    incomplete_complete["complete"] = False
+    _assert_invalid("capture-manifest-delta.schema.json", incomplete_complete)
+
+    unsynced_host = deepcopy(delta)
+    unsynced_host["durability_evidence"]["capture_parent_synced"] = False  # type: ignore[index]
+    _assert_invalid("capture-manifest-delta.schema.json", unsynced_host)
+
+    ephemeral_sidecar = deepcopy(delta)
+    ephemeral_sidecar["commitment"] = "process-local"
+    ephemeral_sidecar["durability"] = "none"
+    _assert_invalid("capture-manifest-delta.schema.json", ephemeral_sidecar)
+
+    recovered_without_record = deepcopy(delta)
+    recovered_without_record["capture_status"] = "recovered-incomplete"
+    recovered_without_record["complete"] = False
+    _assert_invalid("capture-manifest-delta.schema.json", recovered_without_record)
+
+    native_base = deepcopy(delta)
+    native_base["base_schema_version"] = "vuoro.outctl.capture-native/w3"
+    jsonschema.Draft202012Validator(_schema("capture-manifest-delta.schema.json")).validate(
+        native_base
+    )
+    v1_base = deepcopy(delta)
+    v1_base["base_schema_version"] = "vuoro.outctl.capture/v1alpha1"
+    jsonschema.Draft202012Validator(_schema("capture-manifest-delta.schema.json")).validate(v1_base)
+
+
+def test_w7_positive_results_keep_degraded_and_recovered_state_explicit() -> None:
+    degraded = _example("run-result.degraded.json")
+    recovered = _example("run-result.recovered.json")
+    validator = jsonschema.Draft202012Validator(_schema("run-result.schema.json"))
+
+    validator.validate(degraded)
+    validator.validate(recovered)
+    assert degraded["outcome"] == "completed"
+    assert degraded["capture"]["status"] == "degraded"  # type: ignore[index]
+    assert degraded["wrapper_error"] is None
+    assert recovered["capture"]["status"] == "recovered-incomplete"  # type: ignore[index]
+    assert recovered["command"]["exit_code"] is None  # type: ignore[index]
+    assert recovered["command"]["signal"] is None  # type: ignore[index]
+
+
+def test_w7_retention_tombstone_pins_immutable_capture_without_rerun() -> None:
+    delta = _example("capture-manifest-delta.json")
+    tombstone = _example("capture-retention-tombstone.json")
+
+    assert (
+        delta["retention_record_schema"]
+        == "vuoro.outctl.capture-retention-tombstone/v2"
+    )
+    assert tombstone["capture_id"] == delta["capture_id"]
+    assert tombstone["manifest_digest"] != delta["base_manifest_digest"]
+    assert tombstone["capture_ref"].endswith(  # type: ignore[union-attr]
+        "/" + str(tombstone["manifest_digest"]).removeprefix("sha256:")
+    )
+    assert tombstone["availability"] == {
+        "raw": "expired",
+        "manifest": "retained",
+        "retrieval": "unavailable",
+    }
+    assert tombstone["compatibility"] == {
+        "automatic_rerun": False,
+        "immutable_manifest_rewritten": False,
+    }
+
+    rerun_claim = deepcopy(tombstone)
+    rerun_claim["compatibility"]["automatic_rerun"] = True  # type: ignore[index]
+    _assert_invalid("capture-retention-tombstone.schema.json", rerun_claim)
+
+
 def test_bypass_and_unsupported_are_explicit() -> None:
     bypass = _example("run-result.bypassed.json")
     unsupported = _example("run-result.unsupported.json")
@@ -270,7 +352,10 @@ def test_raw_free_comparison_matrix_is_machine_checked() -> None:
 
 def test_capture_delta_preserves_v1_compatibility_claim() -> None:
     delta = _example("capture-manifest-delta.json")
-    assert delta["base_schema_version"] == "vuoro.outctl.capture/v1alpha1"
+    assert delta["base_schema_version"] in {
+        "vuoro.outctl.capture/v1alpha1",
+        "vuoro.outctl.capture-native/w3",
+    }
     assert delta["compatibility"]["v1_reader"] == "readable"  # type: ignore[index]
     assert delta["compatibility"]["v1_stream_bytes_preserved"] is True  # type: ignore[index]
 
@@ -298,13 +383,12 @@ def test_built_wheel_contains_exact_v2_contract_and_conformance_membership() -> 
     assert {
         "outctl/schemas/v2/run-request.schema.json",
         "outctl/schemas/v2/capture-manifest-delta.schema.json",
+        "outctl/schemas/v2/capture-retention-tombstone.schema.json",
     }.issubset(names)
 
 
 def test_v2_examples_do_not_contain_raw_or_local_path_fields() -> None:
     forbidden = {
-        "stdout",
-        "stderr",
         "raw_output",
         "projection_body",
         "local_path",
@@ -317,7 +401,10 @@ def test_v2_examples_do_not_contain_raw_or_local_path_fields() -> None:
     def walk(value: object) -> None:
         if isinstance(value, dict):
             assert not forbidden.intersection(value)
-            for child in value.values():
+            for key, child in value.items():
+                if key in {"stdout", "stderr"}:
+                    assert isinstance(child, dict)
+                    assert set(child) == {"bytes", "sha256", "complete", "last_captured_offset"}
                 walk(child)
         elif isinstance(value, list):
             for child in value:

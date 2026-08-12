@@ -11,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const CHUNK_BYTES: usize = 64 * 1024;
 static CAPTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[allow(dead_code)]
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn capture_id() -> String {
     let epoch_nanos = SystemTime::now()
@@ -92,6 +94,10 @@ impl PrivateDir {
         self.create_file_with_flags(name, libc::O_WRONLY)
     }
 
+    pub(crate) fn create_read_write_file(&self, name: &str) -> io::Result<File> {
+        self.create_file_with_flags(name, libc::O_RDWR)
+    }
+
     fn create_file_with_flags(&self, name: &str, access: i32) -> io::Result<File> {
         validate_name(name)?;
         let file = openat_file(
@@ -105,6 +111,7 @@ impl PrivateDir {
         Ok(file)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn remove_file(&self, name: &str) -> io::Result<()> {
         let name = c_name(name)?;
         let result = unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) };
@@ -112,6 +119,30 @@ impl PrivateDir {
             Err(io::Error::last_os_error())
         } else {
             Ok(())
+        }
+    }
+
+    pub(crate) fn remove_dir(&self, name: &str) -> io::Result<()> {
+        let name = c_name(name)?;
+        let result =
+            unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+        if result == -1 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn open_or_create_file(&self, name: &str) -> io::Result<File> {
+        match self.create_read_write_file(name) {
+            Ok(file) => Ok(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                validate_name(name)?;
+                let file = openat_file(self.file.as_raw_fd(), name, libc::O_RDWR, 0)?;
+                require_regular(&file)?;
+                Ok(file)
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -136,15 +167,98 @@ impl PrivateDir {
         file.sync_all()
     }
 
+    /// Write a new entry durably without ever replacing an existing entry.
+    ///
+    /// The temporary file and final rename are both anchored to this pinned
+    /// directory. `RENAME_NOREPLACE` is important for immutable evidence
+    /// sidecars: a retry must observe the existing record, not rewrite it.
+    #[allow(dead_code)]
+    pub(crate) fn write_atomic_new(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        self.write_atomic(name, bytes, false)
+    }
+
+    /// Atomically replace a rebuildable cache entry through this pinned
+    /// directory, then fsync the directory containing the new name.
+    #[allow(dead_code)]
+    pub(crate) fn write_atomic_replace(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        self.write_atomic(name, bytes, true)
+    }
+
+    #[allow(dead_code)]
+    fn write_atomic(&self, name: &str, bytes: &[u8], replace: bool) -> io::Result<()> {
+        validate_name(name)?;
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = format!(".outctl-atomic-{:08x}-{sequence:016x}", std::process::id());
+        let write_result = (|| {
+            let mut file = self.create_file(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            drop(file);
+            if replace {
+                rename_entry(self, &temporary, self, name)?;
+            } else {
+                rename_entry_noreplace(self, &temporary, self, name)?;
+            }
+            self.sync()
+        })();
+        if write_result.is_err() {
+            let _ = self.remove_file(&temporary);
+        }
+        write_result
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn read_bounded(&self, name: &str, max_bytes: u64) -> io::Result<Vec<u8>> {
+        let mut file = self.open_file(name)?;
+        let length = file_len(&file)?;
+        if length > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "artifact exceeds bounded reader limit",
+            ));
+        }
+        let length = usize::try_from(length)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "artifact is too large"))?;
+        let mut bytes = Vec::with_capacity(length);
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
     pub(crate) fn sync(&self) -> io::Result<()> {
         self.file.sync_all()
     }
 
-    pub(crate) fn names(&self) -> io::Result<Vec<OsString>> {
+    pub(crate) fn try_lock_exclusive(file: &File) -> io::Result<bool> {
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            Ok(true)
+        } else {
+            let error = io::Error::last_os_error();
+            if error
+                .raw_os_error()
+                .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
+            {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn names_bounded(&self, max_entries: usize) -> io::Result<Vec<OsString>> {
         let proc_path = PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()));
-        fs::read_dir(proc_path)?
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect()
+        let mut names = Vec::new();
+        for entry in fs::read_dir(proc_path)? {
+            if names.len() == max_entries {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "directory exceeds bounded entry limit",
+                ));
+            }
+            names.push(entry?.file_name());
+        }
+        Ok(names)
     }
 
     pub(crate) fn create_unnamed_file(&self) -> io::Result<File> {
@@ -182,6 +296,31 @@ pub(crate) fn rename_entry(
             source_name.as_ptr(),
             destination.file.as_raw_fd(),
             destination_name.as_ptr(),
+        )
+    };
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn rename_entry_noreplace(
+    source: &PrivateDir,
+    source_name: &str,
+    destination: &PrivateDir,
+    destination_name: &str,
+) -> io::Result<()> {
+    let source_name = c_name(source_name)?;
+    let destination_name = c_name(destination_name)?;
+    let result = unsafe {
+        libc::renameat2(
+            source.file.as_raw_fd(),
+            source_name.as_ptr(),
+            destination.file.as_raw_fd(),
+            destination_name.as_ptr(),
+            libc::RENAME_NOREPLACE,
         )
     };
     if result == -1 {
@@ -431,6 +570,45 @@ mod tests {
             b"original"
         );
         assert!(!attacker.join("captures/capture").exists());
+        fs::remove_file(&root).unwrap();
+        fs::remove_dir_all(&moved).unwrap();
+        fs::remove_dir_all(&attacker).unwrap();
+    }
+
+    #[test]
+    fn atomic_new_never_rewrites_existing_evidence() {
+        let root = temporary_root();
+        let directory = PrivateDir::ensure(&root).unwrap();
+        directory
+            .write_atomic_new("manifest.v2.json", b"first")
+            .unwrap();
+        assert!(directory
+            .write_atomic_new("manifest.v2.json", b"second")
+            .is_err());
+        assert_eq!(fs::read(root.join("manifest.v2.json")).unwrap(), b"first");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_replace_remains_anchored_after_root_path_replacement() {
+        let root = temporary_root();
+        let moved = root.with_extension("moved");
+        let attacker = root.with_extension("attacker");
+        fs::create_dir(&attacker).unwrap();
+        let directory = PrivateDir::ensure(&root).unwrap();
+        directory
+            .write_atomic_replace("index.json", b"first")
+            .unwrap();
+
+        fs::rename(&root, &moved).unwrap();
+        symlink(&attacker, &root).unwrap();
+        directory
+            .write_atomic_replace("index.json", b"second")
+            .unwrap();
+
+        assert_eq!(fs::read(moved.join("index.json")).unwrap(), b"second");
+        assert!(!attacker.join("index.json").exists());
         fs::remove_file(&root).unwrap();
         fs::remove_dir_all(&moved).unwrap();
         fs::remove_dir_all(&attacker).unwrap();

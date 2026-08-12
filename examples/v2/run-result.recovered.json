@@ -1,0 +1,11 @@
+{
+  "schema_version": "vuoro.outctl.run-result/v2",
+  "request_id": "req-recovered-1",
+  "engine": {"id": "rust-w7-storage", "version": "0.1.0"},
+  "policy": {"snapshot_id": "snapshot-5187758301587a012d002b363894ff8a", "ref": "policy://interactive-w5", "digest": "sha256:5187758301587a012d002b363894ff8ad27f999d99e55be9a822b49f0039d3c1"},
+  "outcome": "completed",
+  "command": {"started": true, "exit_code": null, "signal": null, "timed_out": false, "cancelled": false},
+  "capture": {"status": "recovered-incomplete", "ref": "outctl://capture/01k1w7recovered/manifest/sha256/1111111111111111111111111111111111111111111111111111111111111111", "manifest_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "complete": false},
+  "presentation": {"kind": "metadata-only", "body": null, "lossy": true, "redacted": false, "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+  "wrapper_error": null
+}

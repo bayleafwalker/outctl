@@ -8,14 +8,14 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-from outctl.control import CapabilityNegotiationError, EngineCapabilities, negotiate_capabilities
+from outctl.control import EngineCapabilities, negotiate_capabilities
 
 ROOT = Path(__file__).parents[1]
 
 pytestmark = pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo is required")
 
 
-def test_native_capabilities_are_schema_valid_and_v2_run_is_not_negotiable() -> None:
+def test_native_capabilities_are_schema_valid_and_v2_storage_is_negotiable() -> None:
     completed = subprocess.run(
         [
             "cargo",
@@ -43,8 +43,8 @@ def test_native_capabilities_are_schema_valid_and_v2_run_is_not_negotiable() -> 
     assert document["contract_versions"] == {
         "run_request": ["v2"],
         "policy_snapshot": ["v2"],
-        "run_result": [],
-        "capture_manifest": ["v1alpha1"],
+        "run_result": ["v2"],
+        "capture_manifest": ["v1alpha1", "v2"],
     }
     assert document["features"] == {
         "direct_argv": True,
@@ -58,5 +58,6 @@ def test_native_capabilities_are_schema_valid_and_v2_run_is_not_negotiable() -> 
     }
 
     capabilities = EngineCapabilities.from_dict(document)
-    with pytest.raises(CapabilityNegotiationError, match="unsupported contracts"):
-        negotiate_capabilities(capabilities)
+    negotiated = negotiate_capabilities(capabilities)
+    assert negotiated.required.run_result_version == "v2"
+    assert "v2" in negotiated.engine.capture_manifest_versions
