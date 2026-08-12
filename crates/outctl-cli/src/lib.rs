@@ -5,8 +5,9 @@ use outctl_engine::capture::{
     capture_command_with_presentation, recover_partials, CaptureError, CaptureOptions, CommandStdin,
 };
 use outctl_engine::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
+use outctl_engine::retention::{collect_captures, RetentionPolicy};
 use outctl_engine::retrieval::{
-    inspect_capture_for_workspace, verify_capture_for_workspace, RetrievalStatus,
+    inspect_capture_for_workspace, verify_capture_with_expected, RetrievalStatus,
 };
 use serde_json::json;
 use std::ffi::OsString;
@@ -28,10 +29,25 @@ pub enum Request {
         spool_root: PathBuf,
         capture_id: String,
         workspace_id: Option<String>,
+        manifest_digest: Option<String>,
     },
     Recover {
         spool_root: PathBuf,
     },
+    Gc(GcRequest),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct GcRequest {
+    pub spool_root: PathBuf,
+    pub capture_ids: Vec<String>,
+    pub policy_ref: String,
+    pub policy_digest: String,
+    pub expired_at_unix_ms: u64,
+    pub reason_key: String,
+    pub workspace_id: Option<String>,
+    pub dry_run: bool,
+    pub exclusive_spool: bool,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -102,6 +118,7 @@ where
         "inspect" => parse_capture_read(arguments, "inspect"),
         "verify" => parse_capture_read(arguments, "verify"),
         "recover" => parse_recover(arguments),
+        "gc" => parse_gc(arguments),
         other => Err(CliError::usage(format!(
             "unsupported native command {other:?}"
         ))),
@@ -278,6 +295,7 @@ where
     let mut spool_root = PathBuf::from(".outctl");
     let mut capture_id = None;
     let mut workspace_id = None;
+    let mut manifest_digest = None;
     let mut arguments = arguments.peekable();
     while let Some(argument) = arguments.next() {
         if argument == "--spool-root" {
@@ -287,6 +305,12 @@ where
                 required_value(&mut arguments, "--workspace-id")?
                     .into_string()
                     .map_err(|_| CliError::usage("--workspace-id must be UTF-8"))?,
+            );
+        } else if argument == "--manifest-digest" && operation == "verify" {
+            manifest_digest = Some(
+                required_value(&mut arguments, "--manifest-digest")?
+                    .into_string()
+                    .map_err(|_| CliError::usage("manifest digest must be UTF-8"))?,
             );
         } else if capture_id.is_none() {
             capture_id = Some(
@@ -313,8 +337,87 @@ where
             spool_root,
             capture_id,
             workspace_id,
+            manifest_digest,
         }
     })
+}
+
+fn parse_gc<I>(arguments: I) -> Result<Request, CliError>
+where
+    I: Iterator<Item = OsString>,
+{
+    let mut spool_root = PathBuf::from(".outctl");
+    let mut capture_ids = Vec::new();
+    let mut policy_ref = None;
+    let mut policy_digest = None;
+    let mut expired_at_unix_ms = None;
+    let mut reason_key = None;
+    let mut workspace_id = None;
+    let mut dry_run = false;
+    let mut exclusive_spool = false;
+    let mut arguments = arguments.peekable();
+    while let Some(argument) = arguments.next() {
+        match argument.to_string_lossy().as_ref() {
+            "--spool-root" => {
+                spool_root = PathBuf::from(required_value(&mut arguments, "--spool-root")?)
+            }
+            "--capture-id" => capture_ids.push(
+                required_value(&mut arguments, "--capture-id")?
+                    .into_string()
+                    .map_err(|_| CliError::usage("capture ID must be UTF-8"))?,
+            ),
+            "--policy-ref" => {
+                policy_ref = Some(
+                    required_value(&mut arguments, "--policy-ref")?
+                        .into_string()
+                        .map_err(|_| CliError::usage("policy ref must be UTF-8"))?,
+                )
+            }
+            "--policy-digest" => {
+                policy_digest = Some(
+                    required_value(&mut arguments, "--policy-digest")?
+                        .into_string()
+                        .map_err(|_| CliError::usage("policy digest must be UTF-8"))?,
+                )
+            }
+            "--expired-at-unix-ms" => {
+                expired_at_unix_ms = Some(parse_u64(
+                    required_value(&mut arguments, "--expired-at-unix-ms")?,
+                    "--expired-at-unix-ms",
+                )?)
+            }
+            "--reason-key" => {
+                reason_key = Some(
+                    required_value(&mut arguments, "--reason-key")?
+                        .into_string()
+                        .map_err(|_| CliError::usage("reason key must be UTF-8"))?,
+                )
+            }
+            "--workspace-id" => {
+                workspace_id = Some(
+                    required_value(&mut arguments, "--workspace-id")?
+                        .into_string()
+                        .map_err(|_| CliError::usage("workspace ID must be UTF-8"))?,
+                )
+            }
+            "--dry-run" => dry_run = true,
+            "--exclusive-spool" => exclusive_spool = true,
+            _ => return Err(CliError::usage("unsupported gc argument")),
+        }
+    }
+    Ok(Request::Gc(GcRequest {
+        spool_root,
+        capture_ids,
+        policy_ref: policy_ref.ok_or_else(|| CliError::usage("gc requires --policy-ref"))?,
+        policy_digest: policy_digest
+            .ok_or_else(|| CliError::usage("gc requires --policy-digest"))?,
+        expired_at_unix_ms: expired_at_unix_ms
+            .ok_or_else(|| CliError::usage("gc requires --expired-at-unix-ms"))?,
+        reason_key: reason_key.ok_or_else(|| CliError::usage("gc requires --reason-key"))?,
+        workspace_id,
+        dry_run,
+        exclusive_spool,
+    }))
 }
 
 fn parse_recover<I>(arguments: I) -> Result<Request, CliError>
@@ -381,9 +484,14 @@ pub fn execute(request: Request) -> Result<(String, u8), CliError> {
             spool_root,
             capture_id,
             workspace_id,
+            manifest_digest,
         } => {
-            let result =
-                verify_capture_for_workspace(&spool_root, &capture_id, workspace_id.as_deref());
+            let result = verify_capture_with_expected(
+                &spool_root,
+                &capture_id,
+                workspace_id.as_deref(),
+                manifest_digest.as_deref(),
+            );
             let code = retrieval_exit(result.status);
             Ok((
                 serde_json::to_string(&result)
@@ -398,6 +506,23 @@ pub fn execute(request: Request) -> Result<(String, u8), CliError> {
                 serde_json::to_string(&json!({"records": records})).unwrap(),
                 0,
             ))
+        }
+        Request::Gc(request) => {
+            let result = collect_captures(
+                &request.spool_root,
+                &request.capture_ids,
+                &RetentionPolicy {
+                    reference: request.policy_ref,
+                    digest: request.policy_digest,
+                    expired_at_unix_ms: request.expired_at_unix_ms,
+                    reason_key: request.reason_key,
+                    workspace_id: request.workspace_id,
+                },
+                request.dry_run,
+                request.exclusive_spool,
+            )
+            .map_err(|error| CliError::wrapper(format!("retention failed: {error}")))?;
+            Ok((serde_json::to_string(&result).unwrap(), 0))
         }
     }
 }
@@ -511,11 +636,11 @@ pub fn version_output() -> &'static str {
     outctl_engine::ENGINE_VERSION
 }
 
-pub const HELP_OUTPUT: &str = "outctl-native capabilities [--json]\noutctl-native version\noutctl-native run [--spool-root PATH] [--max-bytes N] [--timeout-ms N] [--cwd PATH] [--workspace-id ID] [--required-capture] [--stdin none|inherit] [--presentation-mode auto|minimum-savings|safe|compact|projected|metadata] [--persist memory-only|process-local|host-persistent|replicated] [--max-projection-bytes N] [--max-projection-lines N] [--max-projection-tokens N] [--full-if-bytes N] -- ARGV...\noutctl-native inspect [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native verify [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native recover [--spool-root PATH]\n";
+pub const HELP_OUTPUT: &str = "outctl-native capabilities [--json]\noutctl-native version\noutctl-native run [--spool-root PATH] [--max-bytes N] [--timeout-ms N] [--cwd PATH] [--workspace-id ID] [--required-capture] [--stdin none|inherit] [--presentation-mode auto|minimum-savings|safe|compact|projected|metadata] [--persist memory-only|process-local|host-persistent|replicated] [--max-projection-bytes N] [--max-projection-lines N] [--max-projection-tokens N] [--full-if-bytes N] -- ARGV...\noutctl-native inspect [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native verify [--spool-root PATH] [--workspace-id ID] [--manifest-digest SHA256] CAPTURE_ID\noutctl-native recover [--spool-root PATH]\noutctl-native gc [--spool-root PATH] --capture-id ID... --policy-ref REF --policy-digest SHA256 --expired-at-unix-ms N --reason-key KEY [--workspace-id ID] [--dry-run] [--exclusive-spool]\n";
 
 #[cfg(test)]
 mod tests {
-    use super::{capture_error, parse_args, Request};
+    use super::{capture_error, parse_args, GcRequest, Request};
     use outctl_engine::capture::{CaptureError, CommandResult, CommandStdin};
     use std::ffi::OsString;
     use std::path::PathBuf;
@@ -595,5 +720,58 @@ mod tests {
             value["wrapper_error"]["code"],
             "OUTCTL_POSTSPAWN_CAPTURE_FAILED"
         );
+    }
+
+    #[test]
+    fn verify_accepts_an_external_manifest_commitment() {
+        assert_eq!(
+            parse_args(args(&[
+                "verify",
+                "--manifest-digest",
+                "sha256:abc",
+                "capture-1",
+            ])),
+            Ok(Request::Verify {
+                spool_root: PathBuf::from(".outctl"),
+                capture_id: "capture-1".to_owned(),
+                workspace_id: None,
+                manifest_digest: Some("sha256:abc".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn gc_requires_explicit_policy_and_parses_dry_run() {
+        assert_eq!(
+            parse_args(args(&[
+                "gc",
+                "--capture-id",
+                "capture-1",
+                "--policy-ref",
+                "policy://retention/default",
+                "--policy-digest",
+                "sha256:abc",
+                "--expired-at-unix-ms",
+                "42",
+                "--reason-key",
+                "retention.expired",
+                "--dry-run",
+            ])),
+            Ok(Request::Gc(GcRequest {
+                spool_root: PathBuf::from(".outctl"),
+                capture_ids: vec!["capture-1".to_owned()],
+                policy_ref: "policy://retention/default".to_owned(),
+                policy_digest: "sha256:abc".to_owned(),
+                expired_at_unix_ms: 42,
+                reason_key: "retention.expired".to_owned(),
+                workspace_id: None,
+                dry_run: true,
+                exclusive_spool: false,
+            }))
+        );
+
+        let error = parse_args(args(&["gc", "--capture-id", "capture-1"])).unwrap_err();
+        assert_eq!(error.exit_code(), 2);
+        assert!(error.message().contains("--policy-ref"));
     }
 }

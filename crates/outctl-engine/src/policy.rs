@@ -6,8 +6,8 @@
 //! can authorize command execution.
 
 use crate::capture::{
-    capture_command_with_presentation, CaptureError, CaptureOptions, CaptureResult,
-    CommandEnvironment, CommandStdin, ProtectedStdinValue, MAX_STDIN_BYTES,
+    capture_command_with_v2_presentation, CaptureError, CaptureOptions, CaptureResult,
+    CommandEnvironment, CommandStdin, ProtectedStdinValue, V2CaptureMetadata, MAX_STDIN_BYTES,
 };
 use crate::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
 use serde::{Deserialize, Serialize};
@@ -336,6 +336,7 @@ pub struct PolicyCaptureOptions<'a> {
 pub struct PolicyCaptureResult {
     pub capture: CaptureResult,
     pub policy_metadata: Value,
+    pub run_result: Value,
 }
 
 impl std::fmt::Debug for EvaluatedPolicy {
@@ -673,6 +674,21 @@ pub fn capture_request_with_policy(
     // the same immutable byte slice again avoids exposing command fields from
     // EvaluatedPolicy where they could be mixed with another request.
     let request = parse_request(options.request_json)?;
+    let request_value: Value = serde_json::from_slice(options.request_json)
+        .map_err(|error| PolicyError::InvalidDocument(format!("request JSON: {error}")))?;
+    let request_digest = digest_value(&request_value)?;
+    let request_id = request.request_id.clone();
+    let result_policy = json!({
+        "snapshot_id": decision.provenance.snapshot_id,
+        "ref": decision.provenance.policy_ref,
+        "digest": decision.provenance.policy_digest,
+    });
+    let storage_metadata = V2CaptureMetadata {
+        request_digest,
+        snapshot_id: decision.provenance.snapshot_id.clone(),
+        policy_ref: decision.provenance.policy_ref.clone(),
+        policy_digest: decision.provenance.policy_digest.clone(),
+    };
     let environment = match request.command.environment.mode.as_str() {
         "inherited" => CommandEnvironment::Inherited,
         "empty" => CommandEnvironment::Empty,
@@ -721,11 +737,62 @@ pub fn capture_request_with_policy(
         environment,
     };
     let policy_metadata = decision.metadata();
-    let capture =
-        capture_command_with_presentation(&capture_options, &decision.presentation, cancellation)?;
+    let capture = capture_command_with_v2_presentation(
+        &capture_options,
+        &decision.presentation,
+        &storage_metadata,
+        cancellation,
+    )?;
+    let normalized_capture_status = match capture.capture_status.as_str() {
+        "COMPLETE" => "complete",
+        "TRUNCATED" => "truncated",
+        "CAPTURE_FAILED" if capture_options.required_capture => "failed",
+        "CAPTURE_FAILED" => "degraded",
+        "RECOVERED_INCOMPLETE" | "INCOMPLETE" => "recovered-incomplete",
+        _ => "degraded",
+    };
+    let presentation_result = capture.presentation.as_ref();
+    let failed = normalized_capture_status == "failed";
+    let run_result = json!({
+        "schema_version": "vuoro.outctl.run-result/v2",
+        "request_id": request_id,
+        "engine": {"id": crate::ENGINE_ID, "version": crate::ENGINE_VERSION},
+        "policy": result_policy,
+        "outcome": if failed { "capture-failed" } else { "completed" },
+        "command": {
+            "started": capture.command.started,
+            "exit_code": capture.command.exit_code,
+            "signal": capture.command.signal,
+            "timed_out": capture.command.timed_out,
+            "cancelled": capture.command.cancelled,
+        },
+        "capture": {
+            "status": normalized_capture_status,
+            "ref": capture.capture_ref,
+            "manifest_digest": capture.manifest_digest,
+            "complete": normalized_capture_status == "complete",
+        },
+        "presentation": {
+            "kind": presentation_result.map(|value| value.kind.as_str()).unwrap_or("none"),
+            "body": presentation_result.and_then(|value| value.body.as_deref()),
+            "lossy": presentation_result.is_some_and(|value| value.lossy),
+            "redacted": presentation_result.is_some_and(|value| value.redacted),
+            "digest": presentation_result.and_then(|value| value.digest.as_deref()),
+        },
+        "wrapper_error": if failed {
+            Some(json!({
+                "code": "OUTCTL_POSTSPAWN_CAPTURE_FAILED",
+                "phase": "post-spawn",
+                "message_key": "capture-storage-failed",
+            }))
+        } else {
+            None
+        },
+    });
     Ok(PolicyCaptureResult {
         capture,
         policy_metadata,
+        run_result,
     })
 }
 
@@ -1684,6 +1751,24 @@ mod tests {
             None,
         )
         .unwrap();
+        assert_eq!(
+            result.run_result["schema_version"],
+            "vuoro.outctl.run-result/v2"
+        );
+        assert_eq!(result.run_result["outcome"], "completed");
+        assert_eq!(result.run_result["capture"]["status"], "complete");
+        assert_eq!(
+            result.run_result["capture"]["manifest_digest"].as_str(),
+            result.capture.v2_manifest_digest.as_deref()
+        );
+        let sidecar = std::fs::read(result.capture.path.join("manifest.v2.json")).unwrap();
+        let sidecar_digest = format!("sha256:{:x}", Sha256::digest(&sidecar));
+        assert_eq!(
+            result.capture.v2_manifest_digest.as_deref(),
+            Some(sidecar_digest.as_str())
+        );
+        assert!(result.capture.path.join("manifest.json").is_file());
+        assert!(result.capture.path.join("manifest.v2.json").is_file());
         let presentation = result.capture.presentation.unwrap();
         let body = presentation.body.unwrap();
         assert!(body.contains("[REDACTED]"));

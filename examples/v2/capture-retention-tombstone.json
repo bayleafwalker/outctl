@@ -1,0 +1,15 @@
+{
+  "schema_version": "vuoro.outctl.capture-retention-tombstone/v2",
+  "capture_id": "01k1w7capture",
+  "capture_ref": "outctl://capture/01k1w7capture/manifest/sha256/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "manifest_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "prior_capture_status": "complete",
+  "retention_policy": {
+    "ref": "retention://interactive-short-v1",
+    "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "expired_at_unix_ms": 1786527000000,
+  "reason_key": "retention-age-expired",
+  "availability": {"raw": "expired", "manifest": "retained", "retrieval": "unavailable"},
+  "compatibility": {"automatic_rerun": false, "immutable_manifest_rewritten": false}
+}

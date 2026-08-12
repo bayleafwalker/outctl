@@ -1,13 +1,55 @@
 {
   "schema_version": "vuoro.outctl.capture-manifest-delta/v2",
-  "base_schema_version": "vuoro.outctl.capture/v1alpha1",
-  "capture_id": "01K1W1CAPTURE",
-  "manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-  "engine": {"id": "python-reference", "version": "0.1.0.dev0"},
+  "base_schema_version": "vuoro.outctl.capture-native/w3",
+  "capture_id": "01k1w7capture",
+  "base_manifest_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "engine": {"id": "rust-w7-storage", "version": "0.1.0"},
   "request_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-  "policy": {"snapshot_id": "snapshot-5187758301587a012d002b363894ff8a", "ref": "policy://interactive-w5", "digest": "sha256:5187758301587a012d002b363894ff8ad27f999d99e55be9a822b49f0039d3c1"},
+  "policy": {
+    "snapshot_id": "snapshot-5187758301587a012d002b363894ff8a",
+    "ref": "policy://interactive-w5",
+    "digest": "sha256:5187758301587a012d002b363894ff8ad27f999d99e55be9a822b49f0039d3c1"
+  },
+  "capture_status": "complete",
+  "complete": true,
+  "streams": {
+    "stdout": {
+      "bytes": 5,
+      "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "complete": true,
+      "last_captured_offset": 5
+    },
+    "stderr": {
+      "bytes": 0,
+      "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "complete": true,
+      "last_captured_offset": 0
+    }
+  },
+  "event_index": {
+    "bytes": 97,
+    "events": 1,
+    "sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "complete": true
+  },
   "commitment": "host-persistent",
   "durability": "host",
-  "presentation": "bounded-projection",
-  "compatibility": {"v1_reader": "readable", "v1_writer": "python-reference-only", "v1_stream_bytes_preserved": true, "v1_manifest_byte_exact": false, "unknown_fields_ignored": true}
+  "durability_evidence": {
+    "artifacts_synced": true,
+    "partial_directory_synced": true,
+    "atomic_rename": true,
+    "capture_parent_synced": true,
+    "replica_verified": false
+  },
+  "presentation": "raw-safe",
+  "recovery": null,
+  "retention_record_schema": "vuoro.outctl.capture-retention-tombstone/v2",
+  "index": {"format": "v2", "authoritative": false, "rebuildable": true},
+  "compatibility": {
+    "v1_reader": "readable",
+    "v1_writer": "python-reference-only",
+    "v1_stream_bytes_preserved": true,
+    "v1_manifest_byte_exact": false,
+    "unknown_fields_ignored": true
+  }
 }
