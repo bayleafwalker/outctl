@@ -1,0 +1,21 @@
+schema_version: vuoro.outctl.policy-source/v1
+policy_ref: policy://interactive-w6-command-scope
+cache:
+  max_age_ms: 3600000
+sinks:
+  - name: model
+    trust_domain: trusted-local
+    disclosure: safe-unredacted
+    redaction_required: false
+    classification_ceiling: secret
+capture:
+  commitment: host-persistent
+  durability: host
+  required: true
+command_scope:
+  # Direct argv remains the universal generic mode. Explicit shell is an
+  # additional constraint, not command authorization.
+  execution_modes: [direct-argv, explicit-shell]
+  explicit_shell_argv:
+    - [/bin/sh, -c]
+  stdin_modes: [none, inherited, file-ref]

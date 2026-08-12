@@ -46,3 +46,17 @@ advertises those two evaluated families and leaves `run_result` empty until its
 writer and manifest compatibility boundary are implemented. The canonical W5
 snapshot under `examples/v2` is compiled by Python and revalidated by Rust as a
 cross-language digest and sink-action vector.
+
+W6 adds a digest-bound `command_scope` to that snapshot. Direct argv remains
+generic. Explicit shell use must match one complete reviewed interpreter argv,
+and stdin must match one compiled mode. Requests carry separate PTY,
+live-output, and parent-shell-state requirements; the W6 native engine
+advertises all three as unsupported and rejects them before spool creation. The
+native library supports opaque process-memory stdin references, while the
+ordinary CLI exposes only `none` and explicit `inherit` and starts no Python.
+
+Extension protocol documents are outside `RunRequest` and `RunResult`. A
+commissioning invocation is bound to a context digest; a projection invocation
+is bound to the exact policy snapshot ID/reference/digest triple. Accepted
+commissioning fact records are sorted and included in `source_digest` material.
+No-extension compilation preserves the no-extension vector.

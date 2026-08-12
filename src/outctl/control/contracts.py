@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Final, cast
@@ -33,6 +33,9 @@ class EngineFeature(StrEnum):
     STDIN = "stdin"
     RETRIEVAL = "retrieval"
     ONE_VERSION_BACK_READ = "one_version_back_read"
+    PTY = "pty"
+    LIVE_OUTPUT = "live_output"
+    PARENT_SHELL_STATE = "parent_shell_state"
 
 
 class CaptureCommitment(StrEnum):
@@ -47,6 +50,68 @@ class CaptureDurability(StrEnum):
     HOST = "host"
     REPLICA = "replica"
     AUTHORITATIVE = "authoritative"
+
+
+@dataclass(frozen=True)
+class CommandScope:
+    """A compiled command-mode constraint, never an execution grant.
+
+    Direct argv remains generic: the scope deliberately carries no command
+    name allowlist. Explicit shell support is narrower and pins the complete
+    interpreter argv prefix to which the bounded shell command is appended.
+    """
+
+    execution_modes: tuple[str, ...] = ("direct-argv",)
+    explicit_shell_argv: tuple[tuple[str, ...], ...] = ()
+    stdin_modes: tuple[str, ...] = ("none",)
+
+    def __post_init__(self) -> None:
+        if (
+            not self.execution_modes
+            or len(self.execution_modes) > 2
+            or len(set(self.execution_modes)) != len(self.execution_modes)
+            or "direct-argv" not in self.execution_modes
+            or any(mode not in {"direct-argv", "explicit-shell"} for mode in self.execution_modes)
+        ):
+            raise ControlContractError("command scope execution modes are invalid")
+        if (
+            not self.stdin_modes
+            or len(self.stdin_modes) > 3
+            or len(set(self.stdin_modes)) != len(self.stdin_modes)
+            or "none" not in self.stdin_modes
+            or any(mode not in {"none", "inherited", "file-ref"} for mode in self.stdin_modes)
+        ):
+            raise ControlContractError("command scope stdin modes are invalid")
+        if len(self.explicit_shell_argv) > 16:
+            raise ControlContractError("command scope has too many reviewed shell interpreters")
+        for argv in self.explicit_shell_argv:
+            if (
+                not 2 <= len(argv) <= 8
+                or not argv[0].startswith("/")
+                or "//" in argv[0]
+                or any(component in {"", ".", ".."} for component in argv[0].split("/")[1:])
+                or argv[-1] not in {"-c", "-lc"}
+                or any(
+                    not item
+                    or len(item) > 4096
+                    or any(ord(character) < 32 or ord(character) == 127 for character in item)
+                    for item in argv
+                )
+            ):
+                raise ControlContractError("reviewed shell interpreter argv is invalid")
+        if len(set(self.explicit_shell_argv)) != len(self.explicit_shell_argv):
+            raise ControlContractError("reviewed shell interpreter argv must be unique")
+        if ("explicit-shell" in self.execution_modes) != bool(self.explicit_shell_argv):
+            raise ControlContractError(
+                "explicit-shell mode and reviewed interpreter argv must be declared together"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "execution_modes": list(self.execution_modes),
+            "explicit_shell_argv": [list(argv) for argv in self.explicit_shell_argv],
+            "stdin_modes": list(self.stdin_modes),
+        }
 
 
 def _digest(value: str, label: str) -> str:
@@ -180,6 +245,9 @@ class EngineCapabilities:
     max_argv_items: int
     max_capture_bytes: int
     max_projection_bytes: int
+    pty: bool = False
+    live_output: bool = False
+    parent_shell_state: bool = False
 
     def __post_init__(self) -> None:
         if not self.direct_argv:
@@ -201,6 +269,9 @@ class EngineCapabilities:
             EngineFeature.STDIN: self.stdin,
             EngineFeature.RETRIEVAL: self.retrieval,
             EngineFeature.ONE_VERSION_BACK_READ: self.one_version_back_read,
+            EngineFeature.PTY: self.pty,
+            EngineFeature.LIVE_OUTPUT: self.live_output,
+            EngineFeature.PARENT_SHELL_STATE: self.parent_shell_state,
         }[feature]
 
     def to_dict(self) -> dict[str, object]:
@@ -219,6 +290,9 @@ class EngineCapabilities:
                 "stdin": self.stdin,
                 "retrieval": self.retrieval,
                 "one_version_back_read": self.one_version_back_read,
+                "pty": self.pty,
+                "live_output": self.live_output,
+                "parent_shell_state": self.parent_shell_state,
             },
             "limits": {
                 "max_argv_items": self.max_argv_items,
@@ -266,6 +340,12 @@ class EngineCapabilities:
                 _positive_int(limit_data["max_argv_items"], "max_argv_items"),
                 _positive_int(limit_data["max_capture_bytes"], "max_capture_bytes"),
                 _positive_int(limit_data["max_projection_bytes"], "max_projection_bytes"),
+                _bool_field(feature_data.get("pty", False), "features.pty"),
+                _bool_field(feature_data.get("live_output", False), "features.live_output"),
+                _bool_field(
+                    feature_data.get("parent_shell_state", False),
+                    "features.parent_shell_state",
+                ),
             )
         except ControlContractError:
             raise
@@ -347,6 +427,7 @@ class PolicySnapshot:
     capture_required: bool
     issued_at: str
     expires_at: str
+    command_scope: CommandScope = field(default_factory=CommandScope)
 
     def __post_init__(self) -> None:
         _non_empty(self.source_ref, "policy source ref")
@@ -433,6 +514,7 @@ class PolicySnapshot:
                 "durability": self.capture_durability.value,
                 "required": self.capture_required,
             },
+            "command_scope": self.command_scope.to_dict(),
             "execution_authority": {
                 "owner": "external-runner",
                 "can_authorize_execution": False,

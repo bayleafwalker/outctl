@@ -4,7 +4,7 @@
   "title": "Outctl v2 compiled policy snapshot",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "snapshot_id", "policy_ref", "policy_digest", "source", "cache", "session", "sinks", "capture", "execution_authority", "issued_at", "expires_at"],
+  "required": ["schema_version", "snapshot_id", "policy_ref", "policy_digest", "source", "cache", "session", "sinks", "capture", "command_scope", "execution_authority", "issued_at", "expires_at"],
   "properties": {
     "schema_version": {"const": "vuoro.outctl.policy-snapshot/v2"},
     "snapshot_id": {"type": "string", "minLength": 1},
@@ -51,6 +51,18 @@
         {"if": {"required": ["commitment"], "properties": {"commitment": {"const": "host-persistent"}}}, "then": {"properties": {"durability": {"const": "host"}}}},
         {"if": {"required": ["commitment"], "properties": {"commitment": {"const": "replicated"}}}, "then": {"properties": {"durability": {"enum": ["replica", "authoritative"]}}}},
         {"if": {"required": ["required"], "properties": {"required": {"const": true}}}, "then": {"properties": {"commitment": {"enum": ["host-persistent", "replicated"]}, "durability": {"enum": ["host", "replica", "authoritative"]}}}}
+      ]
+    },
+    "command_scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["execution_modes", "explicit_shell_argv", "stdin_modes"],
+      "properties": {
+        "execution_modes": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "contains": {"const": "direct-argv"}, "items": {"enum": ["direct-argv", "explicit-shell"]}},
+        "explicit_shell_argv": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "array", "minItems": 2, "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 4096, "pattern": "^[^\\u0000-\\u001f\\u007f]+$"}}},
+        "stdin_modes": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true, "contains": {"const": "none"}, "items": {"enum": ["none", "inherited", "file-ref"]}}
+      },
+      "allOf": [
+        {"if": {"properties": {"execution_modes": {"contains": {"const": "explicit-shell"}}}}, "then": {"properties": {"explicit_shell_argv": {"minItems": 1}}}, "else": {"properties": {"explicit_shell_argv": {"maxItems": 0}}}}
       ]
     },
     "execution_authority": {"type": "object", "additionalProperties": false, "required": ["owner", "can_authorize_execution", "can_retry"], "properties": {"owner": {"const": "external-runner"}, "can_authorize_execution": {"const": false}, "can_retry": {"const": false}}},

@@ -90,6 +90,14 @@ bounded retrieval commands, and raw-free pilot-report validation. See
 [`docs/WORKSTATION_PILOT_RUNBOOK.md`](docs/WORKSTATION_PILOT_RUNBOOK.md) for
 the Codex/Claude appservice pilot and review procedure.
 
+The native W6 command path remains generic and starts no Python. Stdin is null
+unless `--stdin inherit` is selected; reviewed explicit-shell and opaque
+process-memory stdin references are available only through the policy-bound
+native library. Python extensions use installed `outctl.extensions.v1` entry
+points through one explicit Linux isolation path and may return only bounded
+commissioning facts or projection candidates. See
+[`docs/W6_HANDOFF.md`](docs/W6_HANDOFF.md) for the exact boundary and gates.
+
 ## License status
 
 No open-source license has been granted yet. The repository is public for

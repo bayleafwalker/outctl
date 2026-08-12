@@ -1,0 +1,15 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "outctl-example-kubernetes-extension"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = ["outctl"]
+
+[project.entry-points."outctl.extensions.v1"]
+kubernetes = "outctl_example_kubernetes:extension"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/outctl_example_kubernetes"]

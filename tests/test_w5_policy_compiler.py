@@ -107,6 +107,54 @@ def test_trusted_local_compiles_safe_unredacted_with_pinned_identity(tmp_path: P
         "can_retry": False,
     }
     assert snapshot.binding.digest == _canonical_digest(canonical_policy_material(snapshot))
+    assert snapshot.command_scope.execution_modes == ("direct-argv",)
+    assert snapshot.command_scope.stdin_modes == ("none",)
+
+
+def test_w6_command_scope_is_exactly_compiled_and_digest_bound(tmp_path: Path) -> None:
+    direct = _source()
+    _write(tmp_path, direct)
+    baseline = compile_policy_source(tmp_path, "policy.yaml", _context())
+
+    scoped = _source()
+    scoped["command_scope"] = {
+        "execution_modes": ["direct-argv", "explicit-shell"],
+        "explicit_shell_argv": [["/bin/sh", "-c"]],
+        "stdin_modes": ["none", "file-ref"],
+    }
+    _write(tmp_path, scoped)
+    compiled = compile_policy_source(tmp_path, "policy.yaml", _context())
+    assert compiled.snapshot.command_scope.explicit_shell_argv == (("/bin/sh", "-c"),)
+    assert compiled.snapshot.command_scope.stdin_modes == ("none", "file-ref")
+    assert compiled.snapshot.binding.digest != baseline.snapshot.binding.digest
+
+    for invalid_scope in (
+        {
+            "execution_modes": ["direct-argv", "explicit-shell"],
+            "explicit_shell_argv": [],
+            "stdin_modes": ["none"],
+        },
+        {
+            "execution_modes": ["direct-argv", "explicit-shell"],
+            "explicit_shell_argv": [["sh", "-c"]],
+            "stdin_modes": ["none"],
+        },
+        {
+            "execution_modes": ["direct-argv"],
+            "explicit_shell_argv": [["/bin/sh", "-c"]],
+            "stdin_modes": ["none"],
+        },
+        {
+            "execution_modes": ["direct-argv"],
+            "explicit_shell_argv": [],
+            "stdin_modes": ["file-ref"],
+        },
+    ):
+        invalid = _source()
+        invalid["command_scope"] = invalid_scope
+        _write(tmp_path, invalid)
+        with pytest.raises(PolicyCompileError, match="command_scope"):
+            compile_policy_source(tmp_path, "policy.yaml", _context())
 
 
 def test_restricted_policy_is_sanitized_and_author_order_is_canonical(tmp_path: Path) -> None:
