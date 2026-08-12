@@ -1,8 +1,8 @@
 {
   "schema_version": "vuoro.outctl.run-request/v2",
   "request_id": "req-restricted-1",
-  "command": {"argv": ["kubectl", "get", "pods", "-o", "json"], "execution_mode": "direct-argv", "shell_command": null, "cwd": "/workspace", "environment": {"mode": "allowlist", "allowlist": ["PATH"]}, "stdin": {"mode": "none", "ref": null}, "timeout_ms": 5000},
-  "policy": {"snapshot_id": "snapshot-1659c92d7d8258ff83096347c5d6259d", "ref": "policy://interactive-w5", "digest": "sha256:1659c92d7d8258ff83096347c5d6259dcc1888af5504c88323ea4fe8f3d76b61"},
+  "command": {"argv": ["kubectl", "get", "pods", "-o", "json"], "execution_mode": "direct-argv", "shell_command": null, "cwd": "/workspace", "environment": {"mode": "allowlist", "allowlist": ["PATH"]}, "stdin": {"mode": "none", "ref": null}, "requirements": {"pty": false, "live_output": false, "parent_shell_state": false}, "timeout_ms": 5000},
+  "policy": {"snapshot_id": "snapshot-5187758301587a012d002b363894ff8a", "ref": "policy://interactive-w5", "digest": "sha256:5187758301587a012d002b363894ff8ad27f999d99e55be9a822b49f0039d3c1"},
   "sink": {"trust_domain": "restricted", "target": "handoff", "disclosure": "sanitized"},
   "secret_channel": {"mode": "protected-opaque", "refs": ["secret://request/db-token"]},
   "bindings": {"workspace_id": "workspace-1", "session_id": "session-1", "correlation_id": "corr-2", "action_id": 2137, "attempt_id": "attempt-1"}

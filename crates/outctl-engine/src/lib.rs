@@ -12,7 +12,7 @@ use outctl_contracts::{
     ENGINE_CAPABILITIES_SCHEMA_VERSION,
 };
 
-pub const ENGINE_ID: &str = "rust-w5-policy";
+pub const ENGINE_ID: &str = "rust-w6-command-scope";
 
 /// The native package version is also the reported engine version.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -40,10 +40,13 @@ pub fn capabilities() -> EngineCapabilities {
             // baseline invariants.  Empty contract lists above keep this
             // metadata-only binary out of execution/read negotiation.
             direct_argv: true,
-            explicit_shell: false,
-            stdin: false,
+            explicit_shell: true,
+            stdin: true,
             retrieval: true,
             one_version_back_read: true,
+            pty: false,
+            live_output: false,
+            parent_shell_state: false,
         },
         limits: EngineLimits {
             max_argv_items: 256,
@@ -63,8 +66,11 @@ mod tests {
         let value = capabilities();
         assert_eq!(value.engine.id, ENGINE_ID);
         assert!(value.features.direct_argv);
-        assert!(!value.features.explicit_shell);
-        assert!(!value.features.stdin);
+        assert!(value.features.explicit_shell);
+        assert!(value.features.stdin);
+        assert!(!value.features.pty);
+        assert!(!value.features.live_output);
+        assert!(!value.features.parent_shell_state);
         assert!(value.features.retrieval);
         assert!(value.features.one_version_back_read);
         assert_eq!(value.contract_versions.run_request, ["v2"]);
@@ -83,7 +89,7 @@ mod tests {
         let json = capabilities().to_json();
         assert!(json.contains("\"schema_version\":\"vuoro.outctl.engine-capabilities/v2\""));
         assert!(json.contains("\"direct_argv\":true"));
-        assert!(json.contains("\"explicit_shell\":false"));
+        assert!(json.contains("\"explicit_shell\":true"));
         assert!(json.contains("\"retrieval\":true"));
     }
 }

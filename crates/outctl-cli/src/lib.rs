@@ -2,7 +2,7 @@
 //! child stdout and stderr are retained only in the private spool.
 
 use outctl_engine::capture::{
-    capture_command_with_presentation, recover_partials, CaptureError, CaptureOptions,
+    capture_command_with_presentation, recover_partials, CaptureError, CaptureOptions, CommandStdin,
 };
 use outctl_engine::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
 use outctl_engine::retrieval::{
@@ -37,6 +37,7 @@ pub enum Request {
 #[derive(Debug, Eq, PartialEq)]
 pub struct RunRequest {
     pub argv: Vec<OsString>,
+    pub stdin: CommandStdin,
     pub spool_root: PathBuf,
     pub max_bytes: u64,
     pub timeout: Option<Duration>,
@@ -135,6 +136,7 @@ where
     let mut cwd = None;
     let mut workspace_id = None;
     let mut required_capture = false;
+    let mut stdin = CommandStdin::Null;
     let mut presentation = PresentationOptions::default();
     let mut argv = Vec::new();
     let mut arguments = arguments.peekable();
@@ -169,6 +171,20 @@ where
                 )
             }
             "--required-capture" => required_capture = true,
+            "--stdin" => {
+                stdin = match required_value(&mut arguments, "--stdin")?
+                    .to_string_lossy()
+                    .as_ref()
+                {
+                    "none" => CommandStdin::Null,
+                    "inherit" | "inherited" => CommandStdin::Inherited,
+                    value => {
+                        return Err(CliError::wrapper(format!(
+                    "unsupported stdin mode {value:?}; file-ref requires the policy-bound library"
+                )))
+                    }
+                }
+            }
             "--presentation-mode" => {
                 let value = required_value(&mut arguments, "--presentation-mode")?;
                 presentation.mode = parse_presentation_mode(value)?;
@@ -218,6 +234,7 @@ where
     }
     Ok(Request::Run(RunRequest {
         argv,
+        stdin,
         spool_root,
         max_bytes,
         timeout,
@@ -388,6 +405,8 @@ pub fn execute(request: Request) -> Result<(String, u8), CliError> {
 fn execute_run(request: RunRequest) -> Result<(String, u8), CliError> {
     let result = capture_command_with_presentation(
         &CaptureOptions {
+            shell_command: None,
+            stdin: request.stdin,
             argv: request.argv,
             spool_root: request.spool_root,
             max_bytes: request.max_bytes,
@@ -492,12 +511,12 @@ pub fn version_output() -> &'static str {
     outctl_engine::ENGINE_VERSION
 }
 
-pub const HELP_OUTPUT: &str = "outctl-native capabilities [--json]\noutctl-native version\noutctl-native run [--spool-root PATH] [--max-bytes N] [--timeout-ms N] [--cwd PATH] [--workspace-id ID] [--required-capture] [--presentation-mode auto|minimum-savings|safe|compact|projected|metadata] [--persist memory-only|process-local|host-persistent|replicated] [--max-projection-bytes N] [--max-projection-lines N] [--max-projection-tokens N] [--full-if-bytes N] -- ARGV...\noutctl-native inspect [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native verify [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native recover [--spool-root PATH]\n";
+pub const HELP_OUTPUT: &str = "outctl-native capabilities [--json]\noutctl-native version\noutctl-native run [--spool-root PATH] [--max-bytes N] [--timeout-ms N] [--cwd PATH] [--workspace-id ID] [--required-capture] [--stdin none|inherit] [--presentation-mode auto|minimum-savings|safe|compact|projected|metadata] [--persist memory-only|process-local|host-persistent|replicated] [--max-projection-bytes N] [--max-projection-lines N] [--max-projection-tokens N] [--full-if-bytes N] -- ARGV...\noutctl-native inspect [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native verify [--spool-root PATH] [--workspace-id ID] CAPTURE_ID\noutctl-native recover [--spool-root PATH]\n";
 
 #[cfg(test)]
 mod tests {
     use super::{capture_error, parse_args, Request};
-    use outctl_engine::capture::{CaptureError, CommandResult};
+    use outctl_engine::capture::{CaptureError, CommandResult, CommandStdin};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -531,6 +550,19 @@ mod tests {
             "true",
         ]))
         .is_ok());
+    }
+
+    #[test]
+    fn stdin_requires_an_explicit_supported_mode() {
+        let Request::Run(request) =
+            parse_args(args(&["run", "--stdin", "inherit", "--", "wc", "-c"])).unwrap()
+        else {
+            panic!("run request expected");
+        };
+        assert_eq!(request.stdin, CommandStdin::Inherited);
+        let error = parse_args(args(&["run", "--stdin", "file-ref", "--", "wc"])).unwrap_err();
+        assert_eq!(error.exit_code(), 125);
+        assert!(error.message().contains("policy-bound"));
     }
 
     #[test]

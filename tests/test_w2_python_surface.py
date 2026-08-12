@@ -51,6 +51,9 @@ def _capabilities(**features: bool) -> EngineCapabilities:
         max_argv_items=256,
         max_capture_bytes=1024,
         max_projection_bytes=1024,
+        pty=features.get("pty", False),
+        live_output=features.get("live_output", False),
+        parent_shell_state=features.get("parent_shell_state", False),
     )
 
 
@@ -112,6 +115,8 @@ def test_capability_negotiation_fails_closed_for_unsupported_shell() -> None:
         CapabilityRequirement(frozenset({EngineFeature.DIRECT_ARGV, EngineFeature.RETRIEVAL})),
     )
     assert negotiated.engine.engine.id == "native-test"
+    with pytest.raises(CapabilityNegotiationError, match="pty"):
+        negotiate_capabilities(_capabilities(), [EngineFeature.PTY])
 
 
 def test_capability_parsing_rejects_malformed_json_types() -> None:
@@ -150,7 +155,14 @@ def test_policy_snapshot_serializes_to_the_frozen_schema() -> None:
 def test_extension_result_is_bounded_and_cannot_claim_authority() -> None:
     request = ExtensionRequest(
         "ext.test",
-        ExtensionContext("workspace-1", "session-1", "snapshot-1", 100),
+        ExtensionContext(
+            "workspace-1",
+            "session-1",
+            "snapshot-1",
+            100,
+            policy_ref="policy://test",
+            policy_digest=DIGEST,
+        ),
         max_result_bytes=128,
     )
     result = ExtensionResult.accepted(request, ExtensionKind.FACTS, {"ready": True})
@@ -173,7 +185,14 @@ def test_extension_result_is_bounded_and_cannot_claim_authority() -> None:
 def test_failed_extension_result_has_no_contribution_payload() -> None:
     request = ExtensionRequest(
         "ext.test",
-        ExtensionContext("workspace-1", "session-1", "snapshot-1", 100),
+        ExtensionContext(
+            "workspace-1",
+            "session-1",
+            "snapshot-1",
+            100,
+            policy_ref="policy://test",
+            policy_digest=DIGEST,
+        ),
     )
     result = ExtensionResult.failed(request, ExtensionStatus.TIMED_OUT, diagnostics=("deadline",))
     assert result.to_dict()["payload"] == {}

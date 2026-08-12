@@ -30,6 +30,9 @@ pub struct EngineFeatures {
     pub stdin: bool,
     pub retrieval: bool,
     pub one_version_back_read: bool,
+    pub pty: bool,
+    pub live_output: bool,
+    pub parent_shell_state: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -56,7 +59,7 @@ impl EngineCapabilities {
     /// values are escaped as JSON strings or emitted as typed primitives.
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"schema_version\":{},\"engine\":{{\"id\":{},\"version\":{},\"platform\":{}}},\"contract_versions\":{{\"run_request\":{},\"policy_snapshot\":{},\"run_result\":{},\"capture_manifest\":{}}},\"features\":{{\"direct_argv\":{},\"explicit_shell\":{},\"stdin\":{},\"retrieval\":{},\"one_version_back_read\":{}}},\"limits\":{{\"max_argv_items\":{},\"max_capture_bytes\":{},\"max_projection_bytes\":{}}}}}",
+            "{{\"schema_version\":{},\"engine\":{{\"id\":{},\"version\":{},\"platform\":{}}},\"contract_versions\":{{\"run_request\":{},\"policy_snapshot\":{},\"run_result\":{},\"capture_manifest\":{}}},\"features\":{{\"direct_argv\":{},\"explicit_shell\":{},\"stdin\":{},\"retrieval\":{},\"one_version_back_read\":{},\"pty\":{},\"live_output\":{},\"parent_shell_state\":{}}},\"limits\":{{\"max_argv_items\":{},\"max_capture_bytes\":{},\"max_projection_bytes\":{}}}}}",
             json_string(&self.schema_version),
             json_string(&self.engine.id),
             json_string(&self.engine.version),
@@ -70,6 +73,9 @@ impl EngineCapabilities {
             self.features.stdin,
             self.features.retrieval,
             self.features.one_version_back_read,
+            self.features.pty,
+            self.features.live_output,
+            self.features.parent_shell_state,
             self.limits.max_argv_items,
             self.limits.max_capture_bytes,
             self.limits.max_projection_bytes,
@@ -136,6 +142,9 @@ mod tests {
                 stdin: false,
                 retrieval: false,
                 one_version_back_read: true,
+                pty: false,
+                live_output: false,
+                parent_shell_state: false,
             },
             limits: EngineLimits {
                 max_argv_items: 1,

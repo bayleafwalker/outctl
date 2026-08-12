@@ -7,7 +7,7 @@
 
 use crate::capture::{
     capture_command_with_presentation, CaptureError, CaptureOptions, CaptureResult,
-    CommandEnvironment,
+    CommandEnvironment, CommandStdin, ProtectedStdinValue, MAX_STDIN_BYTES,
 };
 use crate::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Duration;
 
 const SNAPSHOT_SCHEMA: &str = "vuoro.outctl.policy-snapshot/v2";
@@ -27,6 +28,8 @@ const MAX_POLICY_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_REGISTERED_SECRET_BYTES: usize = 256 * 1024;
 const MAX_REGISTERED_SECRET_VALUE_BYTES: usize = 64 * 1024;
+const MAX_STDIN_REFS: usize = 16;
+const MAX_REGISTERED_STDIN_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum PolicyError {
@@ -194,6 +197,86 @@ impl Drop for ProtectedSecretRegistry {
     }
 }
 
+/// Bounded runner-owned stdin values addressed by opaque request references.
+///
+/// Values never enter JSON policy/request documents or debug output. The
+/// embedding runner resolves any path or stream before registration, so the
+/// engine never turns an opaque reference into an arbitrary file read.
+pub struct ProtectedStdinRegistry {
+    values: BTreeMap<String, Arc<ProtectedStdinValue>>,
+    total_bytes: usize,
+}
+
+impl ProtectedStdinRegistry {
+    pub fn new() -> Self {
+        Self {
+            values: BTreeMap::new(),
+            total_bytes: 0,
+        }
+    }
+
+    pub fn register(&mut self, reference: String, value: Vec<u8>) -> Result<(), PolicyError> {
+        if !valid_stdin_ref(&reference) {
+            return Err(PolicyError::InvalidDocument(
+                "stdin reference must use the bounded outctl://stdin/ grammar".to_owned(),
+            ));
+        }
+        if value.len() > MAX_STDIN_BYTES {
+            return Err(PolicyError::InvalidDocument(
+                "registered stdin exceeds the per-value byte limit".to_owned(),
+            ));
+        }
+        if self.values.contains_key(&reference) {
+            return Err(PolicyError::InvalidDocument(
+                "stdin reference is already registered".to_owned(),
+            ));
+        }
+        if self.values.len() >= MAX_STDIN_REFS
+            || self
+                .total_bytes
+                .checked_add(value.len())
+                .is_none_or(|total| total > MAX_REGISTERED_STDIN_BYTES)
+        {
+            return Err(PolicyError::InvalidDocument(
+                "stdin registry exceeds its bounded capacity".to_owned(),
+            ));
+        }
+        self.total_bytes += value.len();
+        self.values
+            .insert(reference, Arc::new(ProtectedStdinValue::new(value)));
+        Ok(())
+    }
+
+    fn resolve(&self, reference: &str) -> Result<Arc<ProtectedStdinValue>, PolicyError> {
+        self.values
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| PolicyError::Unsupported("registered stdin is unavailable".to_owned()))
+    }
+}
+
+impl Default for ProtectedStdinRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for ProtectedStdinRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProtectedStdinRegistry")
+            .field("reference_count", &self.values.len())
+            .field("total_bytes", &self.total_bytes)
+            .finish()
+    }
+}
+
+impl Drop for ProtectedStdinRegistry {
+    fn drop(&mut self) {
+        self.values.clear();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SinkAction {
@@ -244,6 +327,7 @@ pub struct PolicyCaptureOptions<'a> {
     pub request_json: &'a [u8],
     pub context: &'a EvaluationContext,
     pub secrets: &'a ProtectedSecretRegistry,
+    pub stdin: &'a ProtectedStdinRegistry,
     pub spool_root: PathBuf,
     pub max_capture_bytes: u64,
     pub runner_authorized: bool,
@@ -292,6 +376,7 @@ struct Snapshot {
     session: Session,
     sinks: Vec<Sink>,
     capture: Capture,
+    command_scope: CommandScope,
     execution_authority: ExecutionAuthority,
     issued_at: String,
     expires_at: String,
@@ -348,6 +433,14 @@ struct ExecutionAuthority {
     can_retry: bool,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CommandScope {
+    execution_modes: Vec<String>,
+    explicit_shell_argv: Vec<Vec<String>>,
+    stdin_modes: Vec<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
@@ -380,6 +473,7 @@ struct Command {
     cwd: String,
     environment: Environment,
     stdin: Stdin,
+    requirements: CommandRequirements,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     timeout_ms: Option<u64>,
 }
@@ -397,6 +491,14 @@ struct Stdin {
     mode: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     r#ref: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommandRequirements {
+    pty: bool,
+    live_output: bool,
+    parent_shell_state: bool,
 }
 
 #[derive(Deserialize)]
@@ -451,6 +553,7 @@ pub fn evaluate_policy(
     let request = parse_request(request_json)?;
     validate_snapshot(&mut snapshot, context.now_unix_millis)?;
     validate_request(&request)?;
+    validate_command_against_scope(&snapshot.command_scope, &request.command)?;
 
     if request.policy.snapshot_id != snapshot.snapshot_id
         || request.policy.r#ref != snapshot.policy_ref
@@ -585,7 +688,24 @@ pub fn capture_request_with_policy(
         ),
         _ => unreachable!("environment mode was validated"),
     };
+    let stdin = match request.command.stdin.mode.as_str() {
+        "none" => CommandStdin::Null,
+        "inherited" => CommandStdin::Inherited,
+        "file-ref" => CommandStdin::Bytes(
+            options.stdin.resolve(
+                request
+                    .command
+                    .stdin
+                    .r#ref
+                    .as_deref()
+                    .expect("file-ref was validated with a reference"),
+            )?,
+        ),
+        _ => unreachable!("stdin mode was validated"),
+    };
     let capture_options = CaptureOptions {
+        shell_command: request.command.shell_command.map(OsString::from),
+        stdin,
         argv: request
             .command
             .argv
@@ -661,6 +781,7 @@ fn validate_snapshot(snapshot: &mut Snapshot, now_ms: i64) -> Result<(), PolicyE
     }
     validate_session(&snapshot.session)?;
     validate_capture(&snapshot.capture)?;
+    validate_command_scope(&snapshot.command_scope)?;
     validate_sinks(&mut snapshot.sinks)?;
     validate_contextual_policy(&snapshot.session, &snapshot.sinks, &snapshot.capture)?;
 
@@ -693,6 +814,7 @@ fn policy_material(snapshot: &Snapshot) -> Value {
         "session": snapshot.session,
         "sinks": snapshot.sinks,
         "capture": snapshot.capture,
+        "command_scope": snapshot.command_scope,
         "execution_authority": snapshot.execution_authority,
         "issued_at": snapshot.issued_at,
         "expires_at": snapshot.expires_at,
@@ -715,9 +837,7 @@ fn validate_request(request: &Request) -> Result<(), PolicyError> {
             .command
             .argv
             .iter()
-            .any(|item| item.is_empty() || item.len() > 4096)
-        || request.command.execution_mode != "direct-argv"
-        || request.command.shell_command.is_some()
+            .any(|item| item.is_empty() || item.len() > 4096 || item.contains('\0'))
         || request.command.cwd.is_empty()
         || request.command.timeout_ms == Some(0)
         || request.bindings.workspace_id.is_empty()
@@ -731,8 +851,38 @@ fn validate_request(request: &Request) -> Result<(), PolicyError> {
             .is_some_and(String::is_empty)
     {
         return Err(PolicyError::InvalidDocument(
-            "request violates the bounded direct-argv baseline".to_owned(),
+            "request violates the bounded command baseline".to_owned(),
         ));
+    }
+    match request.command.execution_mode.as_str() {
+        "direct-argv" if request.command.shell_command.is_none() => {}
+        "explicit-shell"
+            if request
+                .command
+                .shell_command
+                .as_ref()
+                .is_some_and(|command| {
+                    !command.is_empty() && command.len() <= 65_536 && !command.contains('\0')
+                }) => {}
+        "direct-argv" | "explicit-shell" => {
+            return Err(PolicyError::InvalidDocument(
+                "execution mode and shell command contradict".to_owned(),
+            ))
+        }
+        _ => {
+            return Err(PolicyError::InvalidDocument(
+                "request execution mode is unknown".to_owned(),
+            ))
+        }
+    }
+    if request.command.requirements.pty {
+        return Err(PolicyError::Unsupported("pty".to_owned()));
+    }
+    if request.command.requirements.live_output {
+        return Err(PolicyError::Unsupported("live-output".to_owned()));
+    }
+    if request.command.requirements.parent_shell_state {
+        return Err(PolicyError::Unsupported("parent-shell-state".to_owned()));
     }
     let cwd = Path::new(&request.command.cwd);
     if !safe_absolute_path(cwd) {
@@ -741,10 +891,17 @@ fn validate_request(request: &Request) -> Result<(), PolicyError> {
         ));
     }
     validate_environment(&request.command.environment)?;
-    if request.command.stdin.mode != "none" || request.command.stdin.r#ref.is_some() {
-        return Err(PolicyError::Unsupported(
-            "native W5 accepts only stdin mode none".to_owned(),
-        ));
+    match (
+        request.command.stdin.mode.as_str(),
+        &request.command.stdin.r#ref,
+    ) {
+        ("none" | "inherited", None) => {}
+        ("file-ref", Some(reference)) if valid_stdin_ref(reference) => {}
+        _ => {
+            return Err(PolicyError::InvalidDocument(
+                "stdin mode and reference contradict".to_owned(),
+            ))
+        }
     }
     validate_digest(&request.policy.digest, "request policy digest")?;
     if request.secret_channel.refs.len() > MAX_SECRET_REFS
@@ -770,6 +927,98 @@ fn validate_request(request: &Request) -> Result<(), PolicyError> {
     {
         return Err(PolicyError::InvalidDocument(
             "secret channel is contradictory or unbounded".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_command_scope(scope: &CommandScope) -> Result<(), PolicyError> {
+    if scope.execution_modes.is_empty()
+        || scope.execution_modes.len() > 2
+        || !scope
+            .execution_modes
+            .iter()
+            .any(|mode| mode == "direct-argv")
+        || scope.execution_modes.iter().collect::<BTreeSet<_>>().len()
+            != scope.execution_modes.len()
+        || scope
+            .execution_modes
+            .iter()
+            .any(|mode| !matches!(mode.as_str(), "direct-argv" | "explicit-shell"))
+        || scope.stdin_modes.is_empty()
+        || scope.stdin_modes.len() > 3
+        || !scope.stdin_modes.iter().any(|mode| mode == "none")
+        || scope.stdin_modes.iter().collect::<BTreeSet<_>>().len() != scope.stdin_modes.len()
+        || scope
+            .stdin_modes
+            .iter()
+            .any(|mode| !matches!(mode.as_str(), "none" | "inherited" | "file-ref"))
+        || scope.explicit_shell_argv.len() > 16
+        || scope
+            .explicit_shell_argv
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != scope.explicit_shell_argv.len()
+    {
+        return Err(PolicyError::InvalidDocument(
+            "command scope is contradictory or unbounded".to_owned(),
+        ));
+    }
+    for argv in &scope.explicit_shell_argv {
+        if !(2..=8).contains(&argv.len())
+            || !safe_absolute_path(Path::new(&argv[0]))
+            || argv[0].contains("//")
+            || !matches!(argv.last().map(String::as_str), Some("-c" | "-lc"))
+            || argv.iter().any(|item| {
+                item.is_empty()
+                    || item.len() > 4096
+                    || item.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+            })
+        {
+            return Err(PolicyError::InvalidDocument(
+                "reviewed shell interpreter argv is invalid".to_owned(),
+            ));
+        }
+    }
+    if scope
+        .execution_modes
+        .iter()
+        .any(|mode| mode == "explicit-shell")
+        != !scope.explicit_shell_argv.is_empty()
+    {
+        return Err(PolicyError::InvalidDocument(
+            "explicit shell mode has no exact reviewed interpreter argv".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_command_against_scope(
+    scope: &CommandScope,
+    command: &Command,
+) -> Result<(), PolicyError> {
+    if !scope
+        .execution_modes
+        .iter()
+        .any(|mode| mode == &command.execution_mode)
+        || !scope
+            .stdin_modes
+            .iter()
+            .any(|mode| mode == &command.stdin.mode)
+    {
+        return Err(PolicyError::Unsupported(
+            "requested command or stdin mode is outside the compiled scope".to_owned(),
+        ));
+    }
+    if command.execution_mode == "explicit-shell"
+        && !scope
+            .explicit_shell_argv
+            .iter()
+            .any(|argv| argv == &command.argv)
+    {
+        return Err(PolicyError::Unsupported(
+            "explicit shell interpreter argv was not reviewed exactly".to_owned(),
         ));
     }
     Ok(())
@@ -947,6 +1196,17 @@ fn valid_secret_ref(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte))
 }
 
+fn valid_stdin_ref(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("outctl://stdin/") else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest.len() <= 512
+        && rest
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte))
+}
+
 fn parse_utc_timestamp_ms(value: &str) -> Result<i64, PolicyError> {
     let bytes = value.as_bytes();
     let canonical_seconds = bytes.len() == 20 && bytes[19] == b'Z';
@@ -1077,6 +1337,7 @@ mod tests {
                 {"name": "runner", "trust_domain": "export", "disclosure": "deny", "redaction_required": true}
             ],
             "capture": {"commitment": "host-persistent", "durability": "host", "required": true},
+            "command_scope": {"execution_modes": ["direct-argv"], "explicit_shell_argv": [], "stdin_modes": ["none"]},
             "execution_authority": {"owner": "external-runner", "can_authorize_execution": false, "can_retry": false},
             "issued_at": "2026-08-12T00:00:00Z",
             "expires_at": "2026-08-12T01:00:00Z"
@@ -1085,7 +1346,7 @@ mod tests {
         let request = json!({
             "schema_version": REQUEST_SCHEMA,
             "request_id": "request-1",
-            "command": {"argv": ["printf", "data"], "execution_mode": "direct-argv", "shell_command": null, "cwd": "/workspace", "environment": {"mode": "empty"}, "stdin": {"mode": "none", "ref": null}, "timeout_ms": 1000},
+            "command": {"argv": ["printf", "data"], "execution_mode": "direct-argv", "shell_command": null, "cwd": "/workspace", "environment": {"mode": "empty"}, "stdin": {"mode": "none", "ref": null}, "requirements": {"pty": false, "live_output": false, "parent_shell_state": false}, "timeout_ms": 1000},
             "policy": {"snapshot_id": snapshot["snapshot_id"], "ref": snapshot["policy_ref"], "digest": snapshot["policy_digest"]},
             "sink": {"trust_domain": "restricted", "target": "handoff", "disclosure": "sanitized"},
             "secret_channel": {"mode": "protected-opaque", "refs": ["secret://test/value"]},
@@ -1136,6 +1397,7 @@ mod tests {
                 request_json: &request_bytes,
                 context: &context,
                 secrets: &secrets,
+                stdin: &ProtectedStdinRegistry::new(),
                 spool_root: spool.clone(),
                 max_capture_bytes: 1024,
                 runner_authorized: true,
@@ -1175,6 +1437,7 @@ mod tests {
                     request_json: duplicate_request.as_bytes(),
                     context: &context,
                     secrets: &secrets,
+                    stdin: &ProtectedStdinRegistry::new(),
                     spool_root: spool.clone(),
                     max_capture_bytes: 1024,
                     runner_authorized: true,
@@ -1413,6 +1676,7 @@ mod tests {
                 request_json: &request_bytes,
                 context: &context,
                 secrets: &secrets,
+                stdin: &ProtectedStdinRegistry::new(),
                 spool_root: spool.clone(),
                 max_capture_bytes: 1024,
                 runner_authorized: true,
@@ -1440,6 +1704,7 @@ mod tests {
                     request_json: &request_bytes,
                     context: &context,
                     secrets: &secrets,
+                    stdin: &ProtectedStdinRegistry::new(),
                     spool_root: denied_spool.clone(),
                     max_capture_bytes: 1024,
                     runner_authorized: false,
@@ -1449,6 +1714,201 @@ mod tests {
             Err(PolicyCaptureError::MissingExecutionAuthority)
         ));
         assert!(!denied_spool.exists());
+    }
+
+    #[test]
+    fn generic_unknown_commands_need_no_command_specific_registration() {
+        let (snapshot, mut request, mut context) = source_policy();
+        request["command"]["argv"] = json!(["/run/current-system/sw/bin/printf", "generic-ok"]);
+        request["command"]["cwd"] = json!("/tmp");
+        request["sink"] = json!({"trust_domain": "trusted-local", "target": "model", "disclosure": "safe-unredacted"});
+        request["secret_channel"] = json!({"mode": "none", "refs": []});
+        context.workspace_root = PathBuf::from("/tmp");
+        let spool = temporary_spool("generic-unknown");
+        let result = capture_request_with_policy(
+            PolicyCaptureOptions {
+                snapshot_json: &serde_json::to_vec(&snapshot).unwrap(),
+                request_json: &serde_json::to_vec(&request).unwrap(),
+                context: &context,
+                secrets: &ProtectedSecretRegistry::new(),
+                stdin: &ProtectedStdinRegistry::new(),
+                spool_root: spool.clone(),
+                max_capture_bytes: 1024,
+                runner_authorized: true,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(result.capture.path.join("stdout.raw")).unwrap(),
+            b"generic-ok"
+        );
+        std::fs::remove_dir_all(spool).unwrap();
+    }
+
+    #[test]
+    fn reviewed_explicit_shell_is_exact_and_has_no_implicit_fallback() {
+        let (mut snapshot, mut request, mut context) = source_policy();
+        snapshot["command_scope"] = json!({
+            "execution_modes": ["direct-argv", "explicit-shell"],
+            "explicit_shell_argv": [["/bin/sh", "-c"]],
+            "stdin_modes": ["none"]
+        });
+        resign_snapshot(&mut snapshot);
+        request["policy"] = json!({
+            "snapshot_id": snapshot["snapshot_id"],
+            "ref": snapshot["policy_ref"],
+            "digest": snapshot["policy_digest"]
+        });
+        request["command"]["argv"] = json!(["/bin/sh", "-c"]);
+        request["command"]["execution_mode"] = json!("explicit-shell");
+        request["command"]["shell_command"] = json!("printf shell-ok");
+        request["command"]["cwd"] = json!("/tmp");
+        request["sink"] = json!({"trust_domain": "trusted-local", "target": "model", "disclosure": "safe-unredacted"});
+        request["secret_channel"] = json!({"mode": "none", "refs": []});
+        context.workspace_root = PathBuf::from("/tmp");
+        let spool = temporary_spool("reviewed-shell");
+        let snapshot_bytes = serde_json::to_vec(&snapshot).unwrap();
+        let mut request_bytes = serde_json::to_vec(&request).unwrap();
+        let result = capture_request_with_policy(
+            PolicyCaptureOptions {
+                snapshot_json: &snapshot_bytes,
+                request_json: &request_bytes,
+                context: &context,
+                secrets: &ProtectedSecretRegistry::new(),
+                stdin: &ProtectedStdinRegistry::new(),
+                spool_root: spool.clone(),
+                max_capture_bytes: 1024,
+                runner_authorized: true,
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(result.capture.path.join("stdout.raw")).unwrap(),
+            b"shell-ok"
+        );
+        std::fs::remove_dir_all(&spool).unwrap();
+
+        request["command"]["argv"] = json!(["/bin/bash", "-c"]);
+        request_bytes = serde_json::to_vec(&request).unwrap();
+        assert!(matches!(
+            capture_request_with_policy(
+                PolicyCaptureOptions {
+                    snapshot_json: &snapshot_bytes,
+                    request_json: &request_bytes,
+                    context: &context,
+                    secrets: &ProtectedSecretRegistry::new(),
+                    stdin: &ProtectedStdinRegistry::new(),
+                    spool_root: spool.clone(),
+                    max_capture_bytes: 1024,
+                    runner_authorized: true,
+                },
+                None,
+            ),
+            Err(PolicyCaptureError::Policy(PolicyError::Unsupported(_)))
+        ));
+        assert!(!spool.exists());
+    }
+
+    #[test]
+    fn bounded_opaque_stdin_is_streamed_without_path_resolution() {
+        let (mut snapshot, mut request, mut context) = source_policy();
+        snapshot["command_scope"]["stdin_modes"] = json!(["none", "file-ref"]);
+        resign_snapshot(&mut snapshot);
+        request["policy"] = json!({
+            "snapshot_id": snapshot["snapshot_id"],
+            "ref": snapshot["policy_ref"],
+            "digest": snapshot["policy_digest"]
+        });
+        request["command"]["argv"] = json!(["/run/current-system/sw/bin/wc", "-c"]);
+        request["command"]["stdin"] =
+            json!({"mode": "file-ref", "ref": "outctl://stdin/request/body"});
+        request["command"]["cwd"] = json!("/tmp");
+        request["sink"] = json!({"trust_domain": "trusted-local", "target": "model", "disclosure": "safe-unredacted"});
+        request["secret_channel"] = json!({"mode": "none", "refs": []});
+        context.workspace_root = PathBuf::from("/tmp");
+        let mut stdin = ProtectedStdinRegistry::new();
+        stdin
+            .register("outctl://stdin/request/body".to_owned(), b"abcde".to_vec())
+            .unwrap();
+        assert!(!format!("{stdin:?}").contains("abcde"));
+        assert!(!format!(
+            "{:?}",
+            CommandStdin::Bytes(stdin.resolve("outctl://stdin/request/body").unwrap())
+        )
+        .contains("abcde"));
+        let spool = temporary_spool("stdin-ref");
+        let result = capture_request_with_policy(
+            PolicyCaptureOptions {
+                snapshot_json: &serde_json::to_vec(&snapshot).unwrap(),
+                request_json: &serde_json::to_vec(&request).unwrap(),
+                context: &context,
+                secrets: &ProtectedSecretRegistry::new(),
+                stdin: &stdin,
+                spool_root: spool.clone(),
+                max_capture_bytes: 1024,
+                runner_authorized: true,
+            },
+            None,
+        )
+        .unwrap();
+        let stdout = std::fs::read_to_string(result.capture.path.join("stdout.raw")).unwrap();
+        assert_eq!(stdout.trim(), "5");
+        std::fs::remove_dir_all(spool).unwrap();
+    }
+
+    #[test]
+    fn stdin_registry_enforces_reference_and_byte_boundaries() {
+        let mut exact = ProtectedStdinRegistry::new();
+        exact
+            .register(
+                "outctl://stdin/exact".to_owned(),
+                vec![b'x'; MAX_STDIN_BYTES],
+            )
+            .unwrap();
+        let mut oversized = ProtectedStdinRegistry::new();
+        assert!(matches!(
+            oversized.register(
+                "outctl://stdin/oversized".to_owned(),
+                vec![b'x'; MAX_STDIN_BYTES + 1]
+            ),
+            Err(PolicyError::InvalidDocument(_))
+        ));
+        assert!(matches!(
+            oversized.register("file:///tmp/input".to_owned(), Vec::new()),
+            Err(PolicyError::InvalidDocument(_))
+        ));
+    }
+
+    #[test]
+    fn interactive_requirements_are_typed_unsupported_before_spool() {
+        for requirement in ["pty", "live_output", "parent_shell_state"] {
+            let (snapshot, mut request, context) = source_policy();
+            request["command"]["requirements"][requirement] = json!(true);
+            let mut secrets = ProtectedSecretRegistry::new();
+            secrets
+                .register("secret://test/value".to_owned(), b"secret".to_vec())
+                .unwrap();
+            let spool = temporary_spool(requirement);
+            assert!(matches!(
+                capture_request_with_policy(
+                    PolicyCaptureOptions {
+                        snapshot_json: &serde_json::to_vec(&snapshot).unwrap(),
+                        request_json: &serde_json::to_vec(&request).unwrap(),
+                        context: &context,
+                        secrets: &secrets,
+                        stdin: &ProtectedStdinRegistry::new(),
+                        spool_root: spool.clone(),
+                        max_capture_bytes: 1024,
+                        runner_authorized: true,
+                    },
+                    None,
+                ),
+                Err(PolicyCaptureError::Policy(PolicyError::Unsupported(_)))
+            ));
+            assert!(!spool.exists());
+        }
     }
 
     #[test]

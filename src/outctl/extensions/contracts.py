@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -18,21 +19,71 @@ type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 
 DEFAULT_MAX_RESULT_BYTES: Final = 64 * 1024
+MAX_RESULT_BYTES: Final = 64 * 1024
+MAX_REQUEST_BYTES: Final = 64 * 1024
+MAX_DEADLINE_MS: Final = 5_000
 MAX_EXTENSION_ID_LENGTH: Final = 160
-_FORBIDDEN_KEYS: Final = frozenset(
+MAX_JSON_DEPTH: Final = 32
+MAX_JSON_ITEMS: Final = 2_048
+MAX_JSON_STRING_LENGTH: Final = 32 * 1024
+_EXTENSION_ID_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+_FORBIDDEN_KEY_NAMES: Final = frozenset(
     {
         "authorize_execution",
+        "authorized",
+        "authorization",
+        "budget",
         "can_authorize_execution",
         "can_retry",
+        "capture",
+        "capture_commitment",
+        "capture_id",
+        "capture_ref",
+        "capture_required",
+        "capture_status",
         "command",
+        "command_argv",
+        "command_scope",
+        "commissioned",
+        "commissioning",
         "credential",
+        "deadline",
+        "deadline_ms",
+        "disclosure",
+        "disclosure_mode",
+        "durability",
         "environment",
+        "execution_mode",
+        "execution_authorized",
+        "execution_authority",
         "lifecycle",
+        "lifecycle_state",
+        "limits",
+        "max_result_bytes",
+        "persistence",
+        "persistence_mode",
+        "policy",
+        "policy_candidate",
         "raw_output",
+        "redaction",
+        "redaction_required",
+        "retry",
+        "sanitizer",
         "secret",
+        "secret_ref",
+        "secret_value",
+        "secrets",
+        "shell_command",
         "spool_path",
         "stdin",
+        "stdin_mode",
+        "stdin_ref",
+        "trust",
+        "trust_domain",
     }
+)
+_FORBIDDEN_KEYS: Final = frozenset(
+    re.sub(r"[^a-z0-9]", "", name.casefold()) for name in _FORBIDDEN_KEY_NAMES
 )
 
 
@@ -47,6 +98,11 @@ class ExtensionKind(StrEnum):
     SANITIZER = "sanitizer"
 
 
+class ExtensionPhase(StrEnum):
+    COMMISSIONING = "commissioning"
+    PROJECTION = "projection"
+
+
 class ExtensionStatus(StrEnum):
     ACCEPTED = "accepted"
     EMPTY = "empty"
@@ -56,23 +112,46 @@ class ExtensionStatus(StrEnum):
     MALFORMED = "malformed"
 
 
-def _validate_json(value: object, path: str = "$") -> JsonValue:
+def _validate_json(
+    value: object,
+    path: str = "$",
+    *,
+    depth: int = 0,
+    remaining: list[int] | None = None,
+) -> JsonValue:
+    if depth > MAX_JSON_DEPTH:
+        raise ValueError("extension JSON exceeds the nesting limit")
+    budget = remaining if remaining is not None else [MAX_JSON_ITEMS]
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise ValueError("extension JSON exceeds the item limit")
     if value is None or isinstance(value, (str, bool, int)):
+        if isinstance(value, str) and len(value) > MAX_JSON_STRING_LENGTH:
+            raise ValueError(f"extension JSON string is too long at {path}")
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError(f"extension JSON contains a non-finite number at {path}")
         return value
     if isinstance(value, list):
-        return [_validate_json(item, f"{path}[{index}]") for index, item in enumerate(value)]
+        return [
+            _validate_json(item, f"{path}[{index}]", depth=depth + 1, remaining=budget)
+            for index, item in enumerate(value)
+        ]
     if isinstance(value, dict):
         result: dict[str, JsonValue] = {}
         for key, child in value.items():
             if not isinstance(key, str):
                 raise ValueError(f"extension JSON key is not a string at {path}")
-            if key.casefold() in _FORBIDDEN_KEYS:
+            if len(key) > 128:
+                raise ValueError(f"extension JSON key is too long at {path}")
+            # Compact semantic normalization rejects separator, compact,
+            # camelCase, and PascalCase spellings equally. This comparison is
+            # recursive because every child mapping passes through this walk.
+            normalized_key = re.sub(r"[^a-z0-9]", "", key.casefold())
+            if normalized_key in _FORBIDDEN_KEYS:
                 raise ValueError(f"extension result field is outside the extension boundary: {key}")
-            result[key] = _validate_json(child, f"{path}.{key}")
+            result[key] = _validate_json(child, f"{path}.{key}", depth=depth + 1, remaining=budget)
         return result
     raise TypeError(f"extension JSON value at {path} is not JSON-compatible")
 
@@ -117,14 +196,45 @@ class ExtensionContext:
 
     workspace_id: str
     session_id: str
-    policy_snapshot_id: str
+    policy_snapshot_id: str | None
     deadline_ms: int
+    phase: ExtensionPhase = ExtensionPhase.PROJECTION
+    commissioning_context_digest: str | None = None
+    policy_ref: str | None = None
+    policy_digest: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.workspace_id or not self.session_id or not self.policy_snapshot_id:
+        if not isinstance(self.phase, ExtensionPhase):
+            raise ValueError("extension phase is unsupported")
+        if not self.workspace_id or not self.session_id:
             raise ValueError("extension context identifiers must be non-empty")
-        if self.deadline_ms < 1:
-            raise ValueError("extension deadline_ms must be positive")
+        if len(self.workspace_id) > 256 or len(self.session_id) > 256:
+            raise ValueError("extension context identifiers exceed their bounds")
+        if (
+            isinstance(self.deadline_ms, bool)
+            or not isinstance(self.deadline_ms, int)
+            or not 1 <= self.deadline_ms <= MAX_DEADLINE_MS
+        ):
+            raise ValueError("extension deadline_ms is outside the supported bounds")
+        digest_re = re.compile(r"^sha256:[a-f0-9]{64}$")
+        if self.phase is ExtensionPhase.COMMISSIONING:
+            if self.policy_snapshot_id is not None or self.policy_ref is not None:
+                raise ValueError("commissioning context cannot claim a policy snapshot")
+            if (
+                self.commissioning_context_digest is None
+                or digest_re.fullmatch(self.commissioning_context_digest) is None
+                or self.policy_digest is not None
+            ):
+                raise ValueError("commissioning context requires its exact context digest")
+        else:
+            if not self.policy_snapshot_id or self.commissioning_context_digest is not None:
+                raise ValueError("projection context requires a policy snapshot id")
+            # W2 callers supplied only the snapshot id.  Preserve that public
+            # constructor while the v1 IPC layer below requires the full triple.
+            if (self.policy_ref is None) != (self.policy_digest is None):
+                raise ValueError("projection policy ref and digest must be supplied together")
+            if self.policy_digest is not None and digest_re.fullmatch(self.policy_digest) is None:
+                raise ValueError("projection policy digest must be sha256:<hex>")
 
 
 @dataclass(frozen=True)
@@ -137,10 +247,14 @@ class ExtensionRequest:
     max_result_bytes: int = DEFAULT_MAX_RESULT_BYTES
 
     def __post_init__(self) -> None:
-        if not self.extension_id or len(self.extension_id) > MAX_EXTENSION_ID_LENGTH:
-            raise ValueError("extension_id must be 1..160 characters")
-        if self.max_result_bytes < 1:
-            raise ValueError("max_result_bytes must be positive")
+        if _EXTENSION_ID_RE.fullmatch(self.extension_id) is None:
+            raise ValueError("extension_id must be a portable 1..160 character identifier")
+        if (
+            isinstance(self.max_result_bytes, bool)
+            or not isinstance(self.max_result_bytes, int)
+            or not 1 <= self.max_result_bytes <= MAX_RESULT_BYTES
+        ):
+            raise ValueError("max_result_bytes is outside the supported bounds")
         checked = _validate_json(dict(self.input))
         if not isinstance(checked, dict):
             raise TypeError("extension input must be a JSON object")
@@ -159,10 +273,14 @@ class ExtensionResult:
     max_bytes: int = DEFAULT_MAX_RESULT_BYTES
 
     def __post_init__(self) -> None:
-        if not self.extension_id:
-            raise ValueError("extension_id must be non-empty")
-        if self.max_bytes < 1:
-            raise ValueError("max_bytes must be positive")
+        if _EXTENSION_ID_RE.fullmatch(self.extension_id) is None:
+            raise ValueError("extension_id must be a portable identifier")
+        if (
+            isinstance(self.max_bytes, bool)
+            or not isinstance(self.max_bytes, int)
+            or not 1 <= self.max_bytes <= MAX_RESULT_BYTES
+        ):
+            raise ValueError("max_bytes is outside the supported bounds")
         checked = _validate_json(dict(self.payload))
         if not isinstance(checked, dict):
             raise TypeError("extension payload must be a JSON object")
@@ -246,8 +364,12 @@ class ExtensionProtocol(Protocol):
 
 __all__ = [
     "DEFAULT_MAX_RESULT_BYTES",
+    "MAX_DEADLINE_MS",
+    "MAX_REQUEST_BYTES",
+    "MAX_RESULT_BYTES",
     "ExtensionContext",
     "ExtensionKind",
+    "ExtensionPhase",
     "ExtensionProtocol",
     "ExtensionRequest",
     "ExtensionResult",

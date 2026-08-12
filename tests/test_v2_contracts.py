@@ -106,6 +106,29 @@ def test_requests_reject_cross_mode_trust_and_secret_states() -> None:
     }
     _assert_invalid("run-request.schema.json", secret_values_in_channel)
 
+    missing_requirements = deepcopy(base)
+    del missing_requirements["command"]["requirements"]  # type: ignore[index]
+    _assert_invalid("run-request.schema.json", missing_requirements)
+
+
+def test_w6_command_scope_requires_exact_reviewed_shell_pairing() -> None:
+    snapshot = _example("policy-snapshot.json")
+    contradictory = deepcopy(snapshot)
+    contradictory["command_scope"] = {  # type: ignore[assignment]
+        "execution_modes": ["direct-argv", "explicit-shell"],
+        "explicit_shell_argv": [],
+        "stdin_modes": ["none"],
+    }
+    _assert_invalid("policy-snapshot.schema.json", contradictory)
+
+    unscoped_interpreter = deepcopy(snapshot)
+    unscoped_interpreter["command_scope"] = {  # type: ignore[assignment]
+        "execution_modes": ["direct-argv"],
+        "explicit_shell_argv": [["/bin/sh", "-c"]],
+        "stdin_modes": ["none"],
+    }
+    _assert_invalid("policy-snapshot.schema.json", unscoped_interpreter)
+
 
 def test_policy_snapshot_rejects_trust_capture_and_cache_contradictions() -> None:
     base = _example("policy-snapshot.json")

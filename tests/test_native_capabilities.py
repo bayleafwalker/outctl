@@ -48,10 +48,13 @@ def test_native_capabilities_are_schema_valid_and_v2_run_is_not_negotiable() -> 
     }
     assert document["features"] == {
         "direct_argv": True,
-        "explicit_shell": False,
-        "stdin": False,
+        "explicit_shell": True,
+        "stdin": True,
         "retrieval": True,
         "one_version_back_read": True,
+        "pty": False,
+        "live_output": False,
+        "parent_shell_state": False,
     }
 
     capabilities = EngineCapabilities.from_dict(document)

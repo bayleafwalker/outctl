@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Debug)]
 pub struct CaptureOptions {
     pub argv: Vec<OsString>,
+    pub shell_command: Option<OsString>,
+    pub stdin: CommandStdin,
     pub spool_root: PathBuf,
     pub max_bytes: u64,
     pub timeout: Option<Duration>,
@@ -38,7 +40,56 @@ pub enum CommandEnvironment {
     Allowlist(Vec<OsString>),
 }
 
+#[derive(Clone, Default, Eq, PartialEq)]
+pub enum CommandStdin {
+    #[default]
+    Null,
+    Inherited,
+    Bytes(Arc<ProtectedStdinValue>),
+}
+
+#[derive(Eq, PartialEq)]
+pub struct ProtectedStdinValue(Vec<u8>);
+
+impl ProtectedStdinValue {
+    pub fn new(value: Vec<u8>) -> Self {
+        Self(value)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Drop for ProtectedStdinValue {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+impl std::fmt::Debug for CommandStdin {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Null => formatter.write_str("Null"),
+            Self::Inherited => formatter.write_str("Inherited"),
+            Self::Bytes(bytes) => formatter
+                .debug_struct("Bytes")
+                .field("length", &bytes.len())
+                .finish(),
+        }
+    }
+}
+
 pub const MAX_CAPTURE_BYTES: u64 = 268_435_456;
+pub const MAX_STDIN_BYTES: usize = 16 * 1024 * 1024;
 
 struct Spool {
     partial_root: PrivateDir,
@@ -193,6 +244,9 @@ fn capture_command_pinned(
 
     let mut command = Command::new(&options.argv[0]);
     command.args(&options.argv[1..]);
+    if let Some(shell_command) = &options.shell_command {
+        command.arg(shell_command);
+    }
     match &options.environment {
         CommandEnvironment::Inherited => {}
         CommandEnvironment::Empty => {
@@ -207,6 +261,11 @@ fn capture_command_pinned(
             command.envs(retained);
         }
     }
+    match &options.stdin {
+        CommandStdin::Null => command.stdin(Stdio::null()),
+        CommandStdin::Inherited => command.stdin(Stdio::inherit()),
+        CommandStdin::Bytes(_) => command.stdin(Stdio::piped()),
+    };
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     command.process_group(0);
     if let Some(cwd) = &options.cwd {
@@ -241,9 +300,18 @@ fn capture_command_pinned(
     let truncated = Arc::new(AtomicBool::new(false));
     let stdout = child.stdout.take().expect("stdout was configured as piped");
     let stderr = child.stderr.take().expect("stderr was configured as piped");
-    if let Err(source) =
-        set_nonblocking(stdout.as_raw_fd()).and_then(|()| set_nonblocking(stderr.as_raw_fd()))
-    {
+    let stdin_pipe = match &options.stdin {
+        CommandStdin::Bytes(_) => Some(child.stdin.take().expect("stdin was configured as piped")),
+        CommandStdin::Null | CommandStdin::Inherited => None,
+    };
+    let nonblocking_result = set_nonblocking(stdout.as_raw_fd())
+        .and_then(|()| set_nonblocking(stderr.as_raw_fd()))
+        .and_then(|()| {
+            stdin_pipe
+                .as_ref()
+                .map_or(Ok(()), |stdin| set_nonblocking(stdin.as_raw_fd()))
+        });
+    if let Err(source) = nonblocking_result {
         kill_process_group(child_pid);
         let _ = child.wait();
         let _ = write_incomplete_manifest(
@@ -286,6 +354,34 @@ fn capture_command_pinned(
         Arc::clone(&stop_draining),
         drained_sender,
     );
+    let stop_writing = Arc::new(AtomicBool::new(false));
+    let stdin_thread = match (&options.stdin, stdin_pipe) {
+        (CommandStdin::Bytes(bytes), Some(stdin)) => {
+            let bytes = Arc::clone(bytes);
+            let stop_writing = Arc::clone(&stop_writing);
+            Some(thread::spawn(move || {
+                let mut stdin = stdin;
+                let mut offset = 0;
+                while offset < bytes.len() {
+                    if stop_writing.load(Ordering::Acquire) {
+                        break;
+                    }
+                    match stdin.write(&bytes.as_bytes()[offset..]) {
+                        Ok(0) => break,
+                        Ok(written) => offset += written,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(())
+            }))
+        }
+        (CommandStdin::Null | CommandStdin::Inherited, None) => None,
+        _ => unreachable!("stdin pipe matches the selected mode"),
+    };
 
     let (status, timed_out, cancelled, signals_sent) =
         match wait_for_child(&mut child, child_pid, options.timeout, cancellation) {
@@ -293,9 +389,13 @@ fn capture_command_pinned(
             Err(source) => {
                 kill_process_group(child_pid);
                 let _ = child.wait();
+                stop_writing.store(true, Ordering::Release);
                 stop_draining.store(true, Ordering::Release);
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
+                if let Some(stdin_thread) = stdin_thread {
+                    let _ = stdin_thread.join();
+                }
                 let _ = write_incomplete_manifest(
                     &spool.partial,
                     &capture_id,
@@ -311,6 +411,25 @@ fn capture_command_pinned(
                 });
             }
         };
+    // A descendant can inherit the pipe after the direct child exits. Stop a
+    // nonblocking writer before joining so that such a descendant cannot hold
+    // the capture call indefinitely; the drain grace below then kills the
+    // original process group if any output descriptors are also retained.
+    stop_writing.store(true, Ordering::Release);
+    if let Some(stdin_thread) = stdin_thread {
+        stdin_thread
+            .join()
+            .map_err(|_| CaptureError::Finalize {
+                capture_id: capture_id.clone(),
+                path: partial_path.clone(),
+                source: io::Error::other("stdin writer thread panicked"),
+            })?
+            .map_err(|source| CaptureError::Finalize {
+                capture_id: capture_id.clone(),
+                path: partial_path.clone(),
+                source,
+            })?;
+    }
     let command_ms = command_started.elapsed().as_millis();
     let drain_started = Instant::now();
     let drained = wait_for_drainers(&drained_receiver, 2, Duration::from_millis(250));
@@ -576,7 +695,7 @@ fn cleanup_ephemeral_capture(pinned_capture: PrivateDir) -> io::Result<()> {
 fn validate_options(options: &CaptureOptions) -> Result<(), CaptureError> {
     if options.argv.is_empty() {
         return Err(CaptureError::InvalidRequest(
-            "argv must be a non-empty direct argument vector".to_owned(),
+            "argv must be a non-empty execution argument vector".to_owned(),
         ));
     }
     if options.argv.len() > 256 {
@@ -596,6 +715,18 @@ fn validate_options(options: &CaptureOptions) -> Result<(), CaptureError> {
     {
         return Err(CaptureError::InvalidRequest(
             "argv contains a NUL byte".to_owned(),
+        ));
+    }
+    if options.shell_command.as_ref().is_some_and(|command| {
+        command.is_empty() || command.len() > 65_536 || command.as_encoded_bytes().contains(&0)
+    }) {
+        return Err(CaptureError::InvalidRequest(
+            "explicit shell command is empty, oversized, or contains NUL".to_owned(),
+        ));
+    }
+    if matches!(&options.stdin, CommandStdin::Bytes(bytes) if bytes.len() > MAX_STDIN_BYTES) {
+        return Err(CaptureError::InvalidRequest(
+            "stdin exceeds the per-value byte limit".to_owned(),
         ));
     }
     if let CommandEnvironment::Allowlist(names) = &options.environment {
@@ -917,7 +1048,8 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
 mod tests {
     use super::{
         capture_command, capture_command_with_presentation, cleanup_ephemeral_capture,
-        CaptureError, CaptureOptions, CommandEnvironment, MAX_CAPTURE_BYTES,
+        CaptureError, CaptureOptions, CommandEnvironment, CommandStdin, ProtectedStdinValue,
+        MAX_CAPTURE_BYTES, MAX_STDIN_BYTES,
     };
     use crate::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
     use crate::storage::PrivateDir;
@@ -943,6 +1075,8 @@ mod tests {
         let root = temporary_root("literal");
         let result = capture_command(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![
                     OsString::from("python3"),
                     OsString::from("-c"),
@@ -972,6 +1106,8 @@ mod tests {
         let root = temporary_root("quota");
         let result = capture_command(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![
                     OsString::from("python3"),
                     OsString::from("-c"),
@@ -1001,6 +1137,8 @@ mod tests {
         let accepted_root = temporary_root("quota-boundary-accepted");
         let result = capture_command(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![OsString::from("true")],
                 spool_root: accepted_root.clone(),
                 max_bytes: MAX_CAPTURE_BYTES,
@@ -1019,6 +1157,8 @@ mod tests {
         let rejected_root = temporary_root("quota-boundary-rejected");
         let error = capture_command(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![OsString::from("true")],
                 spool_root: rejected_root.clone(),
                 max_bytes: MAX_CAPTURE_BYTES + 1,
@@ -1040,6 +1180,8 @@ mod tests {
         let root = temporary_root("presentation-overflow");
         let error = capture_command_with_presentation(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![OsString::from("true")],
                 spool_root: root.clone(),
                 max_bytes: 1024,
@@ -1065,6 +1207,8 @@ mod tests {
         let root = temporary_root("redaction-overflow");
         let error = capture_command_with_presentation(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![OsString::from("false")],
                 spool_root: root.clone(),
                 max_bytes: 1024,
@@ -1090,6 +1234,8 @@ mod tests {
         let root = temporary_root("empty-command-failure");
         let result = capture_command_with_presentation(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![OsString::from("false")],
                 spool_root: root.clone(),
                 max_bytes: 1024,
@@ -1114,6 +1260,8 @@ mod tests {
         let root = temporary_root("ephemeral");
         let result = capture_command_with_presentation(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![OsString::from("true")],
                 spool_root: root.clone(),
                 max_bytes: 1024,
@@ -1143,6 +1291,8 @@ mod tests {
         let lossy_root = temporary_root("ephemeral-lossy");
         let lossy_result = capture_command_with_presentation(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![
                     OsString::from("python3"),
                     OsString::from("-c"),
@@ -1186,6 +1336,8 @@ mod tests {
         let required_root = temporary_root("required-ephemeral");
         let error = capture_command_with_presentation(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![OsString::from("true")],
                 spool_root: required_root.clone(),
                 max_bytes: 1024,
@@ -1208,6 +1360,8 @@ mod tests {
         let rejected_root = temporary_root("replica-unavailable");
         let error = capture_command_with_presentation(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![OsString::from("true")],
                 spool_root: rejected_root.clone(),
                 max_bytes: 1024,
@@ -1255,6 +1409,67 @@ mod tests {
     }
 
     #[test]
+    fn stdin_writer_does_not_wait_on_a_descendant_held_pipe() {
+        let root = temporary_root("stdin-descendant");
+        let parent_code = "import os,time; child=os.fork(); time.sleep(10) if child == 0 else None";
+        let started = std::time::Instant::now();
+        let result = capture_command(
+            &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Bytes(Arc::new(ProtectedStdinValue::new(vec![
+                    b'x';
+                    16 * 1024
+                        * 1024
+                ]))),
+                argv: vec![
+                    OsString::from("python3"),
+                    OsString::from("-c"),
+                    OsString::from(parent_code),
+                ],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: Some(Duration::from_secs(2)),
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+                environment: CommandEnvironment::Inherited,
+            },
+            None,
+        )
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(result.command.exit_code, Some(0));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_stdin_limit_plus_one_is_rejected_before_spool_creation() {
+        let root = temporary_root("stdin-overflow");
+        let error = capture_command(
+            &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Bytes(Arc::new(ProtectedStdinValue::new(vec![
+                    b'x';
+                    MAX_STDIN_BYTES
+                        + 1
+                ]))),
+                argv: vec![OsString::from("true")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: false,
+                environment: CommandEnvironment::Inherited,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CaptureError::InvalidRequest(_)));
+        assert!(!root.exists());
+    }
+
+    #[test]
     fn caller_cancellation_kills_descendants_and_leaves_unknown_partial() {
         let root = temporary_root("cancel");
         fs::create_dir_all(&root).unwrap();
@@ -1274,6 +1489,8 @@ mod tests {
         });
         let error = capture_command(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![
                     OsString::from("python3"),
                     OsString::from("-c"),

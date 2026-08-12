@@ -27,3 +27,7 @@ capture:
   commitment: host-persistent
   durability: host
   required: true
+command_scope:
+  execution_modes: [direct-argv]
+  explicit_shell_argv: []
+  stdin_modes: [none]

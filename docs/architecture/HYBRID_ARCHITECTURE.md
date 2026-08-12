@@ -17,8 +17,12 @@ Python owns policy authoring/compilation, trust commissioning, extensions,
 studies, analysis, compatibility, and the legacy reference engine.
 
 Generic direct argv is the universal baseline. Explicit shell is a separately
-declared capability; an adapter may add facts or projections but never grants
-authorization. Unsupported behavior is typed and never silently changes
+declared, exact reviewed interpreter capability. Stdin is null unless the
+compiled scope and request both select inheritance or an opaque in-memory
+reference. An adapter may add commissioning facts or bounded projection
+candidates but never grants authorization. Extension code is imported only in
+the explicit isolated Python slow path; ordinary native command execution does
+not start Python. Unsupported behavior is typed and never silently changes
 execution semantics.
 
 Presentation is selected after observation. Persistence commitment and

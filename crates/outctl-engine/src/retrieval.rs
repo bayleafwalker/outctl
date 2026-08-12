@@ -689,7 +689,7 @@ mod tests {
         stream_file, tail_stream, tail_stream_for_workspace, verify_capture,
         verify_capture_for_workspace, RetrievalStatus,
     };
-    use crate::capture::{capture_command, CaptureOptions};
+    use crate::capture::{capture_command, CaptureOptions, CommandStdin};
     use crate::storage::{file_len, read_range};
     use std::ffi::OsString;
     use std::fs;
@@ -706,6 +706,8 @@ mod tests {
             std::env::temp_dir().join(format!("outctl-retrieval-{}-{nonce}", std::process::id()));
         let result = capture_command(
             &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
                 argv: vec![
                     OsString::from("python3"),
                     OsString::from("-c"),

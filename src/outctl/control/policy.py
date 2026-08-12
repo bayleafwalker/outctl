@@ -12,7 +12,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -23,11 +23,17 @@ import yaml  # type: ignore[import-untyped]
 from outctl.control.contracts import (
     CaptureCommitment,
     CaptureDurability,
+    CommandScope,
     PolicyBinding,
     PolicyCacheEntry,
     PolicySnapshot,
     SinkPolicy,
 )
+from outctl.extensions.commissioning import (
+    ExtensionContributionRecord,
+    canonical_contribution_material,
+)
+from outctl.extensions.contracts import ExtensionKind, ExtensionStatus
 
 MAX_POLICY_SOURCE_BYTES: Final = 1_048_576
 MAX_VALIDITY_MS: Final = 86_400_000
@@ -233,6 +239,7 @@ class PolicyExplanation:
     capture_commitment: str
     capture_required: bool
     commissioning_provenance: CommissioningProvenance
+    command_scope: CommandScope = CommandScope()
     execution_authority: Literal["external-runner"] = "external-runner"
     can_authorize_execution: Literal[False] = False
 
@@ -247,6 +254,7 @@ class PolicyExplanation:
             ],
             "capture_commitment": self.capture_commitment,
             "capture_required": self.capture_required,
+            "command_scope": self.command_scope.to_dict(),
             "commissioning_provenance": self.commissioning_provenance.to_dict(),
             "execution_authority": self.execution_authority,
             "can_authorize_execution": self.can_authorize_execution,
@@ -466,6 +474,7 @@ def _validated_source(value: dict[str, object]) -> dict[str, object]:
     _exact_keys(
         value,
         required={"schema_version", "policy_ref", "cache", "sinks", "capture"},
+        optional={"command_scope"},
         label="policy source",
     )
     if value["schema_version"] != _SCHEMA_VERSION:
@@ -542,6 +551,8 @@ def _validated_source(value: dict[str, object]) -> dict[str, object]:
             raise PolicyCompileError("sink trust/disclosure combination is invalid") from exc
         sinks.append(normalized)
 
+    command_scope = _validated_command_scope(value.get("command_scope", {}))
+
     return {
         "schema_version": _SCHEMA_VERSION,
         "policy_ref": policy_ref,
@@ -552,7 +563,41 @@ def _validated_source(value: dict[str, object]) -> dict[str, object]:
             "durability": durability,
             "required": capture_required,
         },
+        "command_scope": command_scope.to_dict(),
     }
+
+
+def _validated_command_scope(value: object) -> CommandScope:
+    if value == {}:
+        return CommandScope()
+    scope = _mapping(value, "command_scope")
+    _exact_keys(
+        scope,
+        required={"execution_modes", "explicit_shell_argv", "stdin_modes"},
+        label="command_scope",
+    )
+    execution_modes = scope["execution_modes"]
+    stdin_modes = scope["stdin_modes"]
+    explicit_shell_argv = scope["explicit_shell_argv"]
+    if not isinstance(execution_modes, list) or not all(
+        isinstance(mode, str) for mode in execution_modes
+    ):
+        raise PolicyCompileError("command_scope.execution_modes must be a string list")
+    if not isinstance(stdin_modes, list) or not all(isinstance(mode, str) for mode in stdin_modes):
+        raise PolicyCompileError("command_scope.stdin_modes must be a string list")
+    if not isinstance(explicit_shell_argv, list) or not all(
+        isinstance(argv, list) and all(isinstance(item, str) for item in argv)
+        for argv in explicit_shell_argv
+    ):
+        raise PolicyCompileError("command_scope.explicit_shell_argv must be an argv list")
+    try:
+        return CommandScope(
+            tuple(execution_modes),
+            tuple(tuple(cast(list[str], argv)) for argv in explicit_shell_argv),
+            tuple(stdin_modes),
+        )
+    except ValueError as exc:
+        raise PolicyCompileError("command_scope is contradictory or unbounded") from exc
 
 
 def _validate_contextual_policy(
@@ -658,6 +703,7 @@ def canonical_policy_material(snapshot: PolicySnapshot | Mapping[str, object]) -
             "session": value["session"],
             "sinks": sorted_sinks,
             "capture": value["capture"],
+            "command_scope": value["command_scope"],
             "execution_authority": value["execution_authority"],
             "issued_at": value["issued_at"],
             "expires_at": value["expires_at"],
@@ -671,6 +717,8 @@ def compile_policy_source(
     policy_root: str | Path,
     source_path: str | Path,
     context: CommissioningContext,
+    *,
+    extension_contributions: Iterable[ExtensionContributionRecord] = (),
 ) -> CompiledPolicy:
     """Load and compile one root-confined source policy deterministically."""
     body = _read_policy_source(Path(policy_root), source_path)
@@ -684,7 +732,28 @@ def compile_policy_source(
         claims=tuple(provenance_records),
         digest=_sha256(provenance_claims),
     )
-    source_digest = _sha256({"policy": source, "commissioning_claims": provenance_claims})
+    contribution_records = tuple(extension_contributions)
+    if any(
+        not isinstance(record, ExtensionContributionRecord)
+        or record.status is not ExtensionStatus.ACCEPTED
+        or record.kind is not ExtensionKind.FACTS
+        for record in contribution_records
+    ):
+        raise PolicyCompileError("policy compilation accepts only commissioned extension facts")
+    try:
+        contribution_material = canonical_contribution_material(contribution_records)
+    except ValueError as exc:
+        raise PolicyCompileError("extension contribution material is invalid") from exc
+    source_material: dict[str, object] = {
+        "policy": source,
+        "commissioning_claims": provenance_claims,
+    }
+    # Preserve the no-extension vector while binding every accepted extension
+    # identity, distribution fingerprint, invocation, result, and fact payload
+    # whenever commissioning explicitly supplies contributions.
+    if contribution_material:
+        source_material["extension_contributions"] = contribution_material
+    source_digest = _sha256(source_material)
     issued_at = _canonical_timestamp(context.issued_at)
     issued = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
     expires_at = (
@@ -695,6 +764,7 @@ def compile_policy_source(
     cache_data = cast(dict[str, object], source["cache"])
     sinks_data = cast(list[dict[str, object]], source["sinks"])
     capture_data = cast(dict[str, object], source["capture"])
+    command_scope_data = cast(dict[str, object], source["command_scope"])
     document: dict[str, object] = {
         "schema_version": _SNAPSHOT_SCHEMA_VERSION,
         "source": {"ref": source_ref, "digest": source_digest},
@@ -709,6 +779,7 @@ def compile_policy_source(
         },
         "sinks": sinks_data,
         "capture": capture_data,
+        "command_scope": command_scope_data,
         "execution_authority": {
             "owner": "external-runner",
             "can_authorize_execution": False,
@@ -751,6 +822,14 @@ def compile_policy_source(
             capture_required=cast(bool, capture_data["required"]),
             issued_at=issued_at,
             expires_at=expires_at,
+            command_scope=CommandScope(
+                tuple(cast(list[str], command_scope_data["execution_modes"])),
+                tuple(
+                    tuple(argv)
+                    for argv in cast(list[list[str]], command_scope_data["explicit_shell_argv"])
+                ),
+                tuple(cast(list[str], command_scope_data["stdin_modes"])),
+            ),
         )
     except ValueError as exc:
         raise PolicyCompileError("compiled policy violates the frozen snapshot contract") from exc
@@ -804,6 +883,7 @@ def explain_policy(compiled: CompiledPolicy) -> PolicyExplanation:
         capture_commitment=snapshot.capture_commitment.value,
         capture_required=snapshot.capture_required,
         commissioning_provenance=compiled.provenance,
+        command_scope=snapshot.command_scope,
     )
 
 
