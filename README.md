@@ -98,6 +98,14 @@ points through one explicit Linux isolation path and may return only bounded
 commissioning facts or projection candidates. See
 [`docs/W6_HANDOFF.md`](docs/W6_HANDOFF.md) for the exact boundary and gates.
 
+W8 adds an unpublished hybrid release bundle and fail-closed staged selector.
+The bundle pins the Python wheel, a complete dependency wheelhouse per host
+class, native executables, and canonical native capabilities. Local rollout is
+ordered through clean-install, conformance, rollback, shadow, and canary gates;
+Rust can become the default only with a separate owner authorization after all
+earlier gates pass. See [`docs/W8_HANDOFF.md`](docs/W8_HANDOFF.md). No package
+publication or deployment is performed by the repository tooling.
+
 ## License status
 
 No open-source license has been granted yet. The repository is public for

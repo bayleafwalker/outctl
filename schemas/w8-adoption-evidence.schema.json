@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:w8-adoption-evidence:v1",
+  "title": "Metadata-only W8 staged native adoption evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release_manifest_digest",
+    "repository_commit",
+    "host_artifacts",
+    "prior_waves",
+    "gates",
+    "rollout",
+    "evidence_ids"
+  ],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.w8-adoption-evidence/v1"},
+    "release_manifest_digest": {"$ref": "#/$defs/digest"},
+    "repository_commit": {"$ref": "#/$defs/commit"},
+    "host_artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host_class", "native_sha256", "capabilities_sha256"],
+        "properties": {
+          "host_class": {"$ref": "#/$defs/token"},
+          "native_sha256": {"$ref": "#/$defs/digest"},
+          "capabilities_sha256": {"$ref": "#/$defs/digest"}
+        }
+      }
+    },
+    "prior_waves": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["wave", "commit", "evidence_ids"],
+        "properties": {
+          "wave": {"type": "integer", "minimum": 0, "maximum": 7},
+          "commit": {"$ref": "#/$defs/commit"},
+          "evidence_ids": {"$ref": "#/$defs/ids"}
+        }
+      }
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "clean_install_passed",
+        "host_conformance_passed",
+        "shadow_passed",
+        "rollback_passed",
+        "canary_passed"
+      ],
+      "properties": {
+        "clean_install_passed": {"type": "boolean"},
+        "host_conformance_passed": {"type": "boolean"},
+        "shadow_passed": {"type": "boolean"},
+        "rollback_passed": {"type": "boolean"},
+        "canary_passed": {"type": "boolean"}
+      }
+    },
+    "rollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canary_basis_points",
+        "native_default_enabled",
+        "native_default_authorization"
+      ],
+      "properties": {
+        "canary_basis_points": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "native_default_enabled": {"type": "boolean"},
+        "native_default_authorization": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "evidence_ids": {"$ref": "#/$defs/ids"}
+  },
+  "$defs": {
+    "commit": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "token": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$"
+    },
+    "ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    }
+  }
+}

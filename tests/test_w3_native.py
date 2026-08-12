@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 import stat
@@ -30,6 +31,10 @@ def _native_binary() -> Path:
         check=True,
     )
     return ROOT / "target" / "debug" / "outctl-native"
+
+
+def _native_sha256() -> str:
+    return "sha256:" + hashlib.sha256(_native_binary().read_bytes()).hexdigest()
 
 
 def _native_run(
@@ -66,6 +71,7 @@ def test_exact_hash_and_process_differential_with_timings(tmp_path: Path) -> Non
         ],
         tmp_path,
         native_binary=_native_binary(),
+        native_sha256=_native_sha256(),
         max_bytes=1024,
     )
     assert result.passed, result
@@ -90,6 +96,7 @@ def test_nonzero_signal_and_timeout_process_parity(
         [sys.executable, "-c", code],
         tmp_path,
         native_binary=_native_binary(),
+        native_sha256=_native_sha256(),
         max_bytes=1024,
         timeout=timeout,
     )
@@ -231,8 +238,7 @@ def test_advertised_native_quota_rejects_one_byte_over_before_spool(tmp_path: Pa
 def test_timeout_kills_the_child_process_group_without_orphan(tmp_path: Path) -> None:
     marker = tmp_path / "leaked-child"
     child_code = (
-        "import pathlib,time; time.sleep(.6); "
-        f"pathlib.Path({str(marker)!r}).write_text('leaked')"
+        f"import pathlib,time; time.sleep(.6); pathlib.Path({str(marker)!r}).write_text('leaked')"
     )
     parent_code = (
         "import subprocess,sys,time; "
@@ -259,8 +265,7 @@ def test_timeout_kills_the_child_process_group_without_orphan(tmp_path: Path) ->
 def test_inherited_pipe_descendant_cannot_hang_or_outlive_capture(tmp_path: Path) -> None:
     marker = tmp_path / "background-child"
     child_code = (
-        "import pathlib,time; time.sleep(.7); "
-        f"pathlib.Path({str(marker)!r}).write_text('leaked')"
+        f"import pathlib,time; time.sleep(.7); pathlib.Path({str(marker)!r}).write_text('leaked')"
     )
     parent_code = (
         "import subprocess,sys; "
@@ -308,9 +313,7 @@ def test_unsafe_symlinked_spools_and_capture_paths_are_denied(tmp_path: Path) ->
         [sys.executable, "-c", "print('safe')"],
     )
     capture_path = Path(str(result["path"]))
-    (tmp_path / "safe" / "captures" / "linked").symlink_to(
-        capture_path, target_is_directory=True
-    )
+    (tmp_path / "safe" / "captures" / "linked").symlink_to(capture_path, target_is_directory=True)
     denied = subprocess.run(
         [
             str(_native_binary()),

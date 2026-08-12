@@ -1,0 +1,35 @@
+{
+  "schema_version": "vuoro.outctl.w8-adoption-evidence/v1",
+  "release_manifest_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "repository_commit": "017f3d2a6bdec77db1a843fc10b13aba3779f97a",
+  "host_artifacts": [
+    {
+      "host_class": "linux-x86_64-glibc-cp312",
+      "native_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "capabilities_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ],
+  "prior_waves": [
+    {"wave": 0, "commit": "9099640f0523a3cdcb2c709e6d0e0e7799a460e6", "evidence_ids": ["w0-frozen-baseline"]},
+    {"wave": 1, "commit": "ec378c894adf9567393b5e6c61bcbcb7962cb339", "evidence_ids": ["w1-contract-gate"]},
+    {"wave": 2, "commit": "1d3cdf179a70ac5c4819b742d9749a8ac336ade5", "evidence_ids": ["w2-workspace-gate"]},
+    {"wave": 3, "commit": "dc1f06302cea2490492b5c1a35e29b7581e53ccd", "evidence_ids": ["w3-process-gate"]},
+    {"wave": 4, "commit": "91c50c227160a9b1cd98c52b82181b78c4d63f06", "evidence_ids": ["w4-presentation-gate"]},
+    {"wave": 5, "commit": "84b8d68bbe93fd305b3fb93a82fe0a1056cc5c51", "evidence_ids": ["w5-policy-gate"]},
+    {"wave": 6, "commit": "6d6d9a47bb2b425df9de8e353fe9a0a727c03de8", "evidence_ids": ["w6-extension-gate"]},
+    {"wave": 7, "commit": "017f3d2a6bdec77db1a843fc10b13aba3779f97a", "evidence_ids": ["w7-storage-gate"]}
+  ],
+  "gates": {
+    "clean_install_passed": false,
+    "host_conformance_passed": false,
+    "shadow_passed": false,
+    "rollback_passed": false,
+    "canary_passed": false
+  },
+  "rollout": {
+    "canary_basis_points": 0,
+    "native_default_enabled": false,
+    "native_default_authorization": null
+  },
+  "evidence_ids": ["replace-with-reviewed-metadata-only-artifact-ids"]
+}

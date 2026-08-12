@@ -16,6 +16,20 @@ from outctl.control.contracts import (
     PolicySnapshot,
     negotiate_capabilities,
 )
+from outctl.native.rollout import (
+    HostArtifactPin,
+    HostClass,
+    RolloutEvidence,
+    RolloutEvidenceError,
+    RolloutMode,
+    RolloutSelection,
+    RolloutTrack,
+    WaveGate,
+    cohort_bucket,
+    probe_native_capabilities,
+    run_pinned_native,
+    select_rollout_engines,
+)
 from outctl.native.selector import (
     EngineChoice,
     EngineSelection,
@@ -48,4 +62,16 @@ __all__ = [
     "PolicySnapshot",
     "negotiate_capabilities",
     "select_engine",
+    "HostClass",
+    "HostArtifactPin",
+    "RolloutEvidence",
+    "RolloutEvidenceError",
+    "RolloutMode",
+    "RolloutSelection",
+    "RolloutTrack",
+    "WaveGate",
+    "cohort_bucket",
+    "probe_native_capabilities",
+    "run_pinned_native",
+    "select_rollout_engines",
 ]
