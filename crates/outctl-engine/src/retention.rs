@@ -127,6 +127,30 @@ pub fn collect_captures(
     dry_run: bool,
     exclusive_spool: bool,
 ) -> Result<CollectionResult, String> {
+    collect_captures_with_faults(
+        spool_root,
+        capture_ids,
+        policy,
+        dry_run,
+        exclusive_spool,
+        &RetentionFaults::default(),
+    )
+}
+
+#[derive(Clone, Debug, Default)]
+struct RetentionFaults {
+    receipt_directory_root_sync: bool,
+    receipt_publication_root_sync: bool,
+}
+
+fn collect_captures_with_faults(
+    spool_root: &Path,
+    capture_ids: &[String],
+    policy: &RetentionPolicy,
+    dry_run: bool,
+    exclusive_spool: bool,
+    faults: &RetentionFaults,
+) -> Result<CollectionResult, String> {
     validate_request(capture_ids, policy, dry_run, exclusive_spool)?;
     let root = match PrivateDir::open(spool_root) {
         Ok(root) => root,
@@ -399,9 +423,27 @@ pub fn collect_captures(
                 let receipts = root
                     .ensure_dir(RETENTION_RECEIPTS_DIRECTORY)
                     .map_err(|error| error.to_string())?;
+                if faults.receipt_directory_root_sync {
+                    return Err(
+                        "injected failure before retention receipt directory root sync".to_owned(),
+                    );
+                }
+                // `ensure_dir` syncs metadata inside the child, but on first
+                // use the child's name is not durable until its pinned parent
+                // (the spool root) is synced.
+                root.sync().map_err(|error| error.to_string())?;
                 receipts
                     .write_atomic_new(capture_id, &expected_receipt_bytes)
                     .map_err(|error| error.to_string())?;
+                if faults.receipt_publication_root_sync {
+                    return Err(
+                        "injected failure before retention receipt publication root sync"
+                            .to_owned(),
+                    );
+                }
+                // Conservatively persist the root again after child receipt
+                // publication. Raw unlink is forbidden before both root syncs.
+                root.sync().map_err(|error| error.to_string())?;
             }
             for name in ["stdout.raw", "stderr.raw", "events.ndjson"] {
                 if let Err(error) = capture.remove_file(name) {
@@ -676,7 +718,10 @@ fn normalized_status(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_captures, CollectionAction, RetentionPolicy, MAX_CAPTURE_IDS};
+    use super::{
+        collect_captures, collect_captures_with_faults, CollectionAction, RetentionFaults,
+        RetentionPolicy, MAX_CAPTURE_IDS,
+    };
     use crate::capture::{capture_command, CaptureOptions, CommandEnvironment, CommandStdin};
     use crate::index::{rebuild_index, IndexStore};
     use crate::retrieval::{inspect_capture, slice_stream, RetrievalStatus};
@@ -1030,6 +1075,75 @@ mod tests {
         );
         assert!(rebuild_index(&root, 1024).unwrap().records.is_empty());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_receipt_directory_is_root_synced_before_raw_unlink() {
+        for (label, faults, receipt_exists) in [
+            (
+                "before-directory-root-sync",
+                RetentionFaults {
+                    receipt_directory_root_sync: true,
+                    ..RetentionFaults::default()
+                },
+                false,
+            ),
+            (
+                "before-publication-root-sync",
+                RetentionFaults {
+                    receipt_publication_root_sync: true,
+                    ..RetentionFaults::default()
+                },
+                true,
+            ),
+        ] {
+            let root = root(label);
+            let capture_id = capture(&root);
+            let capture_path = root.join("captures").join(&capture_id);
+            let stdout = fs::read(capture_path.join("stdout.raw")).unwrap();
+            let error = collect_captures_with_faults(
+                &root,
+                std::slice::from_ref(&capture_id),
+                &policy(),
+                false,
+                true,
+                &faults,
+            )
+            .unwrap_err();
+            assert!(error.contains("root sync"), "{label}: {error}");
+            assert_eq!(fs::read(capture_path.join("stdout.raw")).unwrap(), stdout);
+            assert_eq!(
+                root.join("retention-v2").join(&capture_id).exists(),
+                receipt_exists
+            );
+            assert_eq!(
+                inspect_capture(&root, &capture_id).status,
+                if receipt_exists {
+                    // The receipt is visible in this injected process, but no
+                    // raw bytes have been deleted. It is safe to regard the
+                    // decision as committed if it survived; a retry only
+                    // finishes the idempotent unlink phase.
+                    RetrievalStatus::Expired
+                } else {
+                    RetrievalStatus::Tampered
+                }
+            );
+            let resumed = collect_captures(
+                &root,
+                std::slice::from_ref(&capture_id),
+                &policy(),
+                false,
+                true,
+            )
+            .unwrap();
+            assert!(resumed.records[0].mutated);
+            assert!(!capture_path.join("stdout.raw").exists());
+            assert_eq!(
+                inspect_capture(&root, &capture_id).status,
+                RetrievalStatus::Expired
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
