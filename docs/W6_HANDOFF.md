@@ -1,7 +1,7 @@
 # W6 extensions and command-scope handoff
 
-**Status:** candidate complete on 2026-08-12  
-**Backlog:** Outctl #2138  
+**Status:** candidate complete on 2026-08-12
+**Backlog:** Outctl #2138
 **Boundary:** extensions add facts and projections, never authorization
 
 ## Delivered command modes
