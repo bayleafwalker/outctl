@@ -6,8 +6,8 @@
 
 use crate::index::{record_from_bundle, IndexStore};
 use crate::manifest::{
-    parse_unique_json, read_manifest_bundle, sha256_prefixed, validate_capture_id,
-    validate_prefixed_digest,
+    parse_unique_json, read_published_manifest_bundle, sha256_prefixed, validate_capture_id,
+    validate_prefixed_digest, ManifestBundle,
 };
 use crate::storage::PrivateDir;
 use serde::{Deserialize, Serialize};
@@ -69,14 +69,19 @@ pub(crate) struct RetentionTombstone {
     compatibility: RetentionCompatibility,
 }
 
-impl RetentionTombstone {
-    pub(crate) fn capture_id(&self) -> &str {
-        &self.capture_id
-    }
-
-    pub(crate) fn manifest_digest(&self) -> &str {
-        &self.manifest_digest
-    }
+pub(crate) fn retention_binds_bundle(record: &RetentionTombstone, bundle: &ManifestBundle) -> bool {
+    let manifest_digest = bundle
+        .sidecar_digest
+        .as_deref()
+        .unwrap_or(&bundle.base.exact_digest);
+    let capture_status = bundle
+        .delta
+        .as_ref()
+        .map(|delta| delta.capture_status.as_str())
+        .unwrap_or_else(|| normalized_status(&bundle.base.capture_status));
+    record.capture_id == bundle.base.capture_id
+        && record.manifest_digest == manifest_digest
+        && record.prior_capture_status == capture_status
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -208,7 +213,7 @@ pub fn collect_captures(
             });
             continue;
         }
-        let bundle = match read_manifest_bundle(&capture, Some(capture_id)) {
+        let bundle = match read_published_manifest_bundle(&capture, Some(capture_id)) {
             Ok(bundle) => bundle,
             Err(error) => {
                 records.push(CollectionRecord {
@@ -395,20 +400,10 @@ fn validate_request(
     if !dry_run && !exclusive_spool {
         return Err("retention mutation requires explicit exclusive-spool ownership".to_owned());
     }
-    if policy.reference.is_empty() || policy.reference.len() > 2048 {
-        return Err("retention policy reference is empty or oversized".to_owned());
-    }
+    validate_policy_reference(&policy.reference)?;
     validate_prefixed_digest(&policy.digest, "retention policy digest")
         .map_err(|error| error.to_string())?;
-    if policy.reason_key.is_empty()
-        || policy.reason_key.len() > 128
-        || !policy
-            .reason_key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        return Err("retention reason key is invalid".to_owned());
-    }
+    validate_reason_key(&policy.reason_key)?;
     if policy
         .workspace_id
         .as_ref()
@@ -434,6 +429,14 @@ fn validate_tombstone(record: &RetentionTombstone) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     validate_prefixed_digest(&record.retention_policy.digest, "retention policy digest")
         .map_err(|error| error.to_string())?;
+    if !matches!(
+        record.prior_capture_status.as_str(),
+        "complete" | "truncated" | "degraded" | "failed" | "recovered-incomplete"
+    ) {
+        return Err("retention prior capture status is invalid".to_owned());
+    }
+    validate_policy_reference(&record.retention_policy.reference)?;
+    validate_reason_key(&record.reason_key)?;
     let expected_ref = format!(
         "outctl://capture/{}/manifest/sha256/{}",
         record.capture_id,
@@ -441,6 +444,55 @@ fn validate_tombstone(record: &RetentionTombstone) -> Result<(), String> {
     );
     if record.capture_ref != expected_ref {
         return Err("retention capture reference does not bind its manifest".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_policy_reference(reference: &str) -> Result<(), String> {
+    if reference.is_empty()
+        || reference.len() > 2048
+        || !reference.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'-' | b'.'
+                        | b'_'
+                        | b'~'
+                        | b':'
+                        | b'/'
+                        | b'?'
+                        | b'#'
+                        | b'['
+                        | b']'
+                        | b'@'
+                        | b'!'
+                        | b'$'
+                        | b'&'
+                        | b'\''
+                        | b'('
+                        | b')'
+                        | b'*'
+                        | b'+'
+                        | b','
+                        | b';'
+                        | b'='
+                        | b'%'
+                )
+        })
+    {
+        return Err("retention policy reference is invalid".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_reason_key(reason_key: &str) -> Result<(), String> {
+    if reason_key.is_empty()
+        || reason_key.len() > 128
+        || !reason_key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("retention reason key is invalid".to_owned());
     }
     Ok(())
 }
@@ -632,6 +684,69 @@ mod tests {
             b"keep"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn syntactically_valid_retention_semantic_tampering_is_rejected_everywhere() {
+        for (label, needle, replacement) in [
+            (
+                "prior-status",
+                b"\"prior_capture_status\":\"complete\"".as_slice(),
+                b"\"prior_capture_status\":\"Complete\"".as_slice(),
+            ),
+            (
+                "reason-key",
+                b"\"reason_key\":\"explicit-test-expiry\"".as_slice(),
+                b"\"reason_key\":\"explicit test-expiry\"".as_slice(),
+            ),
+            (
+                "policy-ref",
+                b"\"ref\":\"policy://retention/test\"".as_slice(),
+                b"\"ref\":\"policy:/ retention/test\"".as_slice(),
+            ),
+        ] {
+            let root = root(label);
+            let capture_id = capture(&root);
+            collect_captures(
+                &root,
+                std::slice::from_ref(&capture_id),
+                &policy(),
+                false,
+                true,
+            )
+            .unwrap();
+            let path = root
+                .join("captures")
+                .join(&capture_id)
+                .join("retention.json");
+            let mut bytes = fs::read(&path).unwrap();
+            assert_eq!(needle.len(), replacement.len());
+            let offset = bytes
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .unwrap();
+            bytes[offset..offset + needle.len()].copy_from_slice(replacement);
+            assert_eq!(
+                bytes[offset..offset + needle.len()]
+                    .iter()
+                    .zip(needle)
+                    .filter(|(left, right)| left != right)
+                    .count(),
+                1
+            );
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap();
+            fs::write(&path, bytes).unwrap();
+
+            assert_eq!(
+                inspect_capture(&root, &capture_id).status,
+                RetrievalStatus::Tampered,
+                "{label}"
+            );
+            let rebuilt = rebuild_index(&root, 1024).unwrap();
+            assert!(rebuilt.records.is_empty(), "{label}");
+            assert_eq!(rebuilt.issues.len(), 1, "{label}");
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

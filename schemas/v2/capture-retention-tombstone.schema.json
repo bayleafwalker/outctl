@@ -18,8 +18,18 @@
   ],
   "properties": {
     "schema_version": {"const": "vuoro.outctl.capture-retention-tombstone/v2"},
-    "capture_id": {"type": "string", "minLength": 1},
-    "capture_ref": {"type": "string", "pattern": "^outctl://capture/"},
+    "capture_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^(?!\\.{1,2}$)[A-Za-z0-9._-]+$"
+    },
+    "capture_ref": {
+      "type": "string",
+      "minLength": 99,
+      "maxLength": 354,
+      "pattern": "^outctl://capture/[A-Za-z0-9._-]+/manifest/sha256/[a-f0-9]{64}$"
+    },
     "manifest_digest": {"$ref": "#/$defs/digest"},
     "prior_capture_status": {
       "enum": ["complete", "truncated", "degraded", "failed", "recovered-incomplete"]
@@ -29,12 +39,26 @@
       "additionalProperties": false,
       "required": ["ref", "digest"],
       "properties": {
-        "ref": {"type": "string", "minLength": 1},
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]+$"
+        },
         "digest": {"$ref": "#/$defs/digest"}
       }
     },
-    "expired_at_unix_ms": {"type": "integer", "minimum": 0},
-    "reason_key": {"type": "string", "minLength": 1, "maxLength": 128},
+    "expired_at_unix_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "reason_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
     "availability": {
       "type": "object",
       "additionalProperties": false,

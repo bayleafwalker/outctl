@@ -1,5 +1,5 @@
-use crate::manifest::{read_manifest_bundle, sha256_prefixed, V2_SIDECAR_NAME};
-use crate::retention::read_retention;
+use crate::manifest::{read_published_manifest_bundle, sha256_prefixed, V2_SIDECAR_NAME};
+use crate::retention::{read_retention, retention_binds_bundle};
 use crate::storage::{file_len, read_range, sha256_file, PrivateDir, CHUNK_BYTES};
 use regex::bytes::Regex;
 use serde::Serialize;
@@ -401,7 +401,7 @@ pub fn verify_capture_with_expected(
             detail: Some("capture unavailable".to_owned()),
         };
     };
-    let bundle = match read_manifest_bundle(directory, Some(capture_id)) {
+    let bundle = match read_published_manifest_bundle(directory, Some(capture_id)) {
         Ok(bundle) => bundle,
         Err(error) => {
             return VerificationResult {
@@ -600,7 +600,7 @@ fn load_manifest(resolved: &ResolvedCapture) -> (RetrievalStatus, Option<Value>,
             Some("capture unavailable".to_owned()),
         );
     };
-    let bundle = match read_manifest_bundle(directory, None) {
+    let bundle = match read_published_manifest_bundle(directory, None) {
         Ok(bundle) => bundle,
         Err(crate::manifest::ManifestError::Io(error))
             if error.kind() == io::ErrorKind::NotFound =>
@@ -637,20 +637,11 @@ fn load_manifest(resolved: &ResolvedCapture) -> (RetrievalStatus, Option<Value>,
     }
     match directory.try_open_file("retention.json") {
         Ok(Some(_)) => match read_retention(directory) {
-            Ok(retention)
-                if retention.capture_id() == bundle.base.capture_id
-                    && retention.manifest_digest()
-                        == bundle
-                            .sidecar_digest
-                            .as_deref()
-                            .unwrap_or(&bundle.base.exact_digest) =>
-            {
-                (
-                    RetrievalStatus::Expired,
-                    Some(manifest),
-                    Some("raw evidence expired by explicit retention policy".to_owned()),
-                )
-            }
+            Ok(retention) if retention_binds_bundle(&retention, &bundle) => (
+                RetrievalStatus::Expired,
+                Some(manifest),
+                Some("raw evidence expired by explicit retention policy".to_owned()),
+            ),
             Ok(_) => (
                 RetrievalStatus::Tampered,
                 None,

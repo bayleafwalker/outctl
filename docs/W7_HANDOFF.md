@@ -42,9 +42,14 @@ A host-durable claim requires all of these steps to succeed in order:
 2. the partial capture directory is synced;
 3. the partial entry is atomically renamed through pinned parent descriptors;
 4. the destination capture parent is synced.
+5. an immutable publication record binding the exact v2 sidecar digest is
+   atomically written and the finalized capture directory is synced.
 
 Failure before that boundary cannot be reported as complete host-durable
-evidence. The index is updated only after filesystem finalization and remains
+evidence. A capture visible after rename but lacking the publication record is
+retained as uncommitted evidence: inspect and verify fail closed, recovery does
+not promote it, and index rebuild records an issue instead of a complete
+capture. The index is updated only after filesystem finalization and remains
 rebuildable if that later update fails.
 
 ## Recovery, retention, and collection
@@ -78,7 +83,7 @@ The candidate is not complete until evidence covers:
 - crash injection at every durability step and before/after index update,
   followed by two idempotent recovery/rebuild passes;
 - the shared command quota, injected `ENOSPC`/`EDQUOT`/`EIO`,
-  write/sync/rename/index failures, and
+  write/sync/rename/publication/index failures, and
   continued concurrent pipe drainage without deadlock;
 - descriptor-relative symlink and replacement attacks against spool roots,
   partial/final capture directories, every artifact, index data, and retention
@@ -116,8 +121,8 @@ evidence.
 
 The candidate exercises immutable v2 sidecars, strict one-back readers,
 raw-free deterministic index rebuild, exact external manifest commitments,
-retention tombstones, and descriptor-relative recovery/collection. Recovery
-hashes every present regular artifact without inventing command status. A
+strict retention tombstones, and descriptor-relative recovery/collection.
+Recovery hashes every present regular artifact without inventing command status. A
 pre-manifest abandoned capture remains a one-back native recovery manifest
 because the request/policy binding is not available after the interrupted
 process; completed v2 pre-rename captures retain and promote their exact v2
@@ -126,11 +131,11 @@ misbound retention record.
 
 Local gates on 2026-08-12:
 
-- Rust workspace/all-target tests: 81 engine, 7 CLI, and 1 contracts test,
+- Rust workspace/all-target tests: 84 engine, 7 CLI, and 1 contracts test,
   plus the presentation bench;
 - injected `ENOSPC`, `EDQUOT`, `EIO`, manifest, sidecar, directory-sync,
-  rename, parent-sync, and index-update failures pass without deadlock or a
-  false completed-durability result;
+  rename, parent-sync, publication-binding, and index-update failures pass
+  without deadlock or a false completed-durability result;
 - cargo-enabled Python/conformance suite: 286 passed, including native/Python
   cross-version reads and exact byte/hash verification;
 - v2 schema examples: 22 passed;
@@ -139,5 +144,5 @@ Local gates on 2026-08-12:
 
 The host does not expose the pinned Rust 1.85.1 toolchain. Rust verification
 used the available Nix Rust 1.97.0 toolchain; the integration owner must repeat
-the Rust gates with 1.85.1 before landing. Independent Terra review and any
-correction loop remain pending.
+the Rust gates with 1.85.1 before landing. Independent Terra rereview of this
+correction remains pending.

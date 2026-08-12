@@ -9,12 +9,15 @@ use std::io;
 
 pub(crate) const BASE_MANIFEST_NAME: &str = "manifest.json";
 pub(crate) const V2_SIDECAR_NAME: &str = "manifest.v2.json";
+pub(crate) const V2_PUBLICATION_NAME: &str = "published.v2.json";
 pub(crate) const MAX_BASE_MANIFEST_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_V2_SIDECAR_BYTES: u64 = 256 * 1024;
+const MAX_V2_PUBLICATION_BYTES: u64 = 16 * 1024;
 
 const V1_SCHEMA: &str = "vuoro.outctl.capture/v1alpha1";
 const NATIVE_W3_SCHEMA: &str = "vuoro.outctl.capture-native/w3";
 const V2_SCHEMA: &str = "vuoro.outctl.capture-manifest-delta/v2";
+const V2_PUBLICATION_SCHEMA: &str = "vuoro.outctl.capture-publication/v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BaseManifestVersion {
@@ -174,6 +177,16 @@ pub(crate) struct ManifestBundle {
     pub(crate) sidecar_digest: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct V2Publication {
+    schema_version: String,
+    capture_id: String,
+    manifest_digest: String,
+    durability: String,
+    capture_parent_synced: bool,
+}
+
 #[derive(Debug)]
 pub(crate) enum ManifestError {
     Io(io::Error),
@@ -252,6 +265,76 @@ pub(crate) fn read_manifest_bundle(
         delta: Some(delta),
         sidecar_digest: Some(sha256_prefixed(&sidecar_bytes)),
     })
+}
+
+/// Read authoritative finalized evidence. A v2 delta is only a prepared
+/// durability claim until the exact sidecar digest is bound by a publication
+/// record created after the renamed capture's parent directory was synced.
+pub(crate) fn read_published_manifest_bundle(
+    directory: &PrivateDir,
+    expected_capture_id: Option<&str>,
+) -> Result<ManifestBundle, ManifestError> {
+    let bundle = read_manifest_bundle(directory, expected_capture_id)?;
+    if let Some(sidecar_digest) = bundle.sidecar_digest.as_deref() {
+        let bytes = directory
+            .read_bounded(V2_PUBLICATION_NAME, MAX_V2_PUBLICATION_BYTES)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    ManifestError::Tampered(
+                        "v2 capture is prepared but lacks durable publication".to_owned(),
+                    )
+                } else {
+                    ManifestError::Io(error)
+                }
+            })?;
+        let value = parse_unique_json(&bytes)?;
+        let publication: V2Publication = serde_json::from_value(value)
+            .map_err(|error| ManifestError::InvalidField(error.to_string()))?;
+        validate_publication(&publication, &bundle.base.capture_id, sidecar_digest)?;
+    }
+    Ok(bundle)
+}
+
+/// Publish an already-synced and parent-synced v2 capture. The publication
+/// entry and containing capture directory are synced by `write_atomic_new`.
+pub(crate) fn write_v2_publication(
+    directory: &PrivateDir,
+    capture_id: &str,
+    sidecar_digest: &str,
+) -> Result<(), ManifestError> {
+    validate_capture_id(capture_id)?;
+    validate_prefixed_digest(sidecar_digest, "publication manifest_digest")?;
+    let publication = V2Publication {
+        schema_version: V2_PUBLICATION_SCHEMA.to_owned(),
+        capture_id: capture_id.to_owned(),
+        manifest_digest: sidecar_digest.to_owned(),
+        durability: "host".to_owned(),
+        capture_parent_synced: true,
+    };
+    let mut bytes = serde_json::to_vec(&publication)
+        .map_err(|error| ManifestError::InvalidJson(error.to_string()))?;
+    bytes.push(b'\n');
+    directory.write_atomic_new(V2_PUBLICATION_NAME, &bytes)?;
+    Ok(())
+}
+
+fn validate_publication(
+    publication: &V2Publication,
+    capture_id: &str,
+    sidecar_digest: &str,
+) -> Result<(), ManifestError> {
+    if publication.schema_version != V2_PUBLICATION_SCHEMA
+        || publication.capture_id != capture_id
+        || publication.manifest_digest != sidecar_digest
+        || publication.durability != "host"
+        || !publication.capture_parent_synced
+    {
+        return Err(ManifestError::Tampered(
+            "v2 publication does not bind the durable capture".to_owned(),
+        ));
+    }
+    validate_prefixed_digest(&publication.manifest_digest, "publication manifest_digest")?;
+    Ok(())
 }
 
 /// Add the v2 metadata sidecar without rewriting the one-version-back base.
@@ -807,9 +890,10 @@ impl<'de> Visitor<'de> for UniqueValueVisitor {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_manifest_bundle, sha256_prefixed, write_v2_sidecar, CompatibilityBinding,
-        DurabilityEvidence, EngineBinding, EventIndexBinding, IndexBinding, ManifestError,
-        PolicyBinding, StreamBinding, StreamBindings, V2ManifestDelta, MAX_BASE_MANIFEST_BYTES,
+        read_manifest_bundle, read_published_manifest_bundle, sha256_prefixed,
+        write_v2_publication, write_v2_sidecar, CompatibilityBinding, DurabilityEvidence,
+        EngineBinding, EventIndexBinding, IndexBinding, ManifestError, PolicyBinding,
+        StreamBinding, StreamBindings, V2ManifestDelta, MAX_BASE_MANIFEST_BYTES,
     };
     use crate::storage::PrivateDir;
     use std::fs;
@@ -936,6 +1020,38 @@ mod tests {
         );
         assert!(write_v2_sidecar(&directory, &sidecar).is_err());
         assert_eq!(fs::read(root.join("manifest.json")).unwrap(), expected_base);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn v2_publication_is_required_and_exactly_binds_the_sidecar() {
+        let root = temporary_root("publication");
+        let directory = PrivateDir::ensure(&root).unwrap();
+        let base = base_bytes("capture-1", Some("vuoro.outctl.capture-native/w3"));
+        directory.write_new("manifest.json", &base).unwrap();
+        directory.write_new("events.ndjson", b"").unwrap();
+        let sidecar = delta("capture-1", &base, "vuoro.outctl.capture-native/w3");
+        let sidecar_digest = write_v2_sidecar(&directory, &sidecar).unwrap();
+        assert!(matches!(
+            read_published_manifest_bundle(&directory, Some("capture-1")),
+            Err(ManifestError::Tampered(_))
+        ));
+        write_v2_publication(&directory, "capture-1", &sidecar_digest).unwrap();
+        assert!(read_published_manifest_bundle(&directory, Some("capture-1")).is_ok());
+
+        let path = root.join("published.v2.json");
+        let mut bytes = fs::read(&path).unwrap();
+        let digest_offset = bytes
+            .windows(sidecar_digest.len())
+            .position(|window| window == sidecar_digest.as_bytes())
+            .unwrap();
+        let byte = &mut bytes[digest_offset + "sha256:".len()];
+        *byte = if *byte == b'a' { b'b' } else { b'a' };
+        fs::write(path, bytes).unwrap();
+        assert!(matches!(
+            read_published_manifest_bundle(&directory, Some("capture-1")),
+            Err(ManifestError::Tampered(_))
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 

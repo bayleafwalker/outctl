@@ -74,13 +74,18 @@ manifest bytes, to the request,
 policy snapshot, engine, stream and event-index digests, capture status,
 presentation, persistence commitment, and durability evidence. Host durability
 requires synced artifacts, a synced partial directory, atomic rename, and a
-synced destination parent. The local index is explicitly non-authoritative and
-rebuildable. Recovery metadata never invents the command's final status.
+synced destination parent. An immutable publication record is written only
+after that parent sync and binds the exact v2 sidecar digest. Strict v2 reads,
+verification, recovery, collection, and index rebuild reject a visible but
+unpublished capture as uncommitted evidence. The local index is explicitly
+non-authoritative and rebuildable. Recovery metadata never invents the
+command's final status.
 
 Retention is a separate record so expiry cannot change the immutable capture
 digest. An expiry tombstone pins the original capture reference and exact v2
 sidecar digest (or the base digest for a one-back capture), the manifest
-digest, the retention policy and reason, and the resulting unavailable state.
+digest, authoritative prior capture status, bounded retention policy identity
+and reason, and the resulting unavailable state.
 It never authorizes an automatic rerun. Existing v1 manifests are not rewritten:
 Python remains the only v1 writer, new v2 captures preserve exact v1 stream
 bytes and a v1-readable layout, and the native reader supports one-version-back

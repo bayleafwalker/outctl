@@ -1,8 +1,8 @@
 use crate::index::{rebuild_index_in, record_from_bundle, IndexStore, MAX_REBUILD_CAPTURES};
 use crate::manifest::{
-    read_manifest_bundle, write_v2_sidecar, CompatibilityBinding, DurabilityEvidence,
-    EngineBinding, EventIndexBinding, IndexBinding, PolicyBinding, StreamBinding, StreamBindings,
-    V2ManifestDelta,
+    read_manifest_bundle, read_published_manifest_bundle, write_v2_publication, write_v2_sidecar,
+    CompatibilityBinding, DurabilityEvidence, EngineBinding, EventIndexBinding, IndexBinding,
+    PolicyBinding, StreamBinding, StreamBindings, V2ManifestDelta,
 };
 use crate::presentation::{
     render_capture_files_from_handles_with_status, PersistenceMode, PresentationOptions,
@@ -833,6 +833,15 @@ fn capture_command_pinned(
                 path: spool.final_path.clone(),
                 source,
             })?;
+        if let Some(sidecar_digest) = v2_manifest_digest.as_deref() {
+            write_v2_publication(&spool.partial, &capture_id, sidecar_digest).map_err(
+                |source| CaptureError::Finalize {
+                    capture_id: capture_id.clone(),
+                    path: spool.final_path.clone(),
+                    source: io::Error::other(source),
+                },
+            )?;
+        }
         spool.final_path.clone()
     } else {
         PathBuf::new()
@@ -1372,7 +1381,9 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
         Some(partial_root) => partial_root,
         None => {
             let _ = rebuild_index_in(&root, MAX_REBUILD_CAPTURES).map_err(io::Error::other)?;
-            return Ok(Vec::new());
+            let mut records = Vec::new();
+            append_uncommitted_v2_records(&root, &mut records)?;
+            return Ok(records);
         }
     };
     let captures_root = root.ensure_dir("captures")?;
@@ -1423,6 +1434,19 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
                     match rename_entry_noreplace(&partial_root, name, &captures_root, capture_id) {
                         Ok(()) => {
                             captures_root.sync()?;
+                            if let Some(sidecar_digest) = bundle.sidecar_digest.as_deref() {
+                                if let Err(error) =
+                                    write_v2_publication(&partial, capture_id, sidecar_digest)
+                                {
+                                    records.push(RecoveryRecord {
+                                        capture_id: capture_id.to_owned(),
+                                        path: captures_root.display_path().join(capture_id),
+                                        status: "UNCOMMITTED_RETAINED".to_owned(),
+                                        detail: Some(error.to_string()),
+                                    });
+                                    continue;
+                                }
+                            }
                             let index_status = record_from_bundle(&bundle)
                                 .and_then(|record| {
                                     IndexStore::ensure_in(&root)?.write(&record).map(|_| ())
@@ -1486,7 +1510,44 @@ pub fn recover_partials(root: &Path) -> io::Result<Vec<RecoveryRecord>> {
         });
     }
     let _ = rebuild_index_in(&root, MAX_REBUILD_CAPTURES).map_err(io::Error::other)?;
+    append_uncommitted_v2_records(&root, &mut records)?;
     Ok(records)
+}
+
+fn append_uncommitted_v2_records(
+    root: &PrivateDir,
+    records: &mut Vec<RecoveryRecord>,
+) -> io::Result<()> {
+    let Some(captures) = root.try_open_dir("captures")? else {
+        return Ok(());
+    };
+    let mut names = captures.names_bounded(MAX_REBUILD_CAPTURES)?;
+    names.sort();
+    for name in names {
+        let Some(capture_id) = name.to_str() else {
+            continue;
+        };
+        if records.iter().any(|record| record.capture_id == capture_id) {
+            continue;
+        }
+        let capture = match captures.try_open_dir(capture_id) {
+            Ok(Some(capture)) => capture,
+            _ => continue,
+        };
+        match read_manifest_bundle(&capture, Some(capture_id)) {
+            Ok(bundle) if bundle.delta.is_some() => {}
+            _ => continue,
+        }
+        if let Err(error) = read_published_manifest_bundle(&capture, Some(capture_id)) {
+            records.push(RecoveryRecord {
+                capture_id: capture_id.to_owned(),
+                path: capture.display_path().to_path_buf(),
+                status: "UNCOMMITTED_RETAINED".to_owned(),
+                detail: Some(format!("v2 publication is unavailable: {error}")),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn manifest_artifacts_match(
@@ -1526,6 +1587,7 @@ mod tests {
         MAX_CAPTURE_BYTES, MAX_STDIN_BYTES,
     };
     use crate::presentation::{PersistenceMode, PresentationMode, PresentationOptions};
+    use crate::retrieval::{inspect_capture, verify_capture, RetrievalStatus};
     use crate::storage::PrivateDir;
     use std::ffi::OsString;
     use std::fs;
@@ -2305,6 +2367,67 @@ mod tests {
             super::recover_partials(&root).unwrap();
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn parent_sync_failure_leaves_v2_visible_but_unpublished_and_never_complete() {
+        let root = temporary_root("v2-parent-sync");
+        let metadata = V2CaptureMetadata {
+            request_digest: format!("sha256:{}", "a".repeat(64)),
+            snapshot_id: "snapshot-test".to_owned(),
+            policy_ref: "policy://test".to_owned(),
+            policy_digest: format!("sha256:{}", "b".repeat(64)),
+        };
+        let error = capture_command_pinned(
+            &CaptureOptions {
+                shell_command: None,
+                stdin: CommandStdin::Null,
+                argv: vec![OsString::from("printf"), OsString::from("not-durable")],
+                spool_root: root.clone(),
+                max_bytes: 1024,
+                timeout: None,
+                cwd: None,
+                workspace_id: None,
+                required_capture: true,
+                environment: CommandEnvironment::Inherited,
+            },
+            None,
+            Some(&PresentationOptions::default()),
+            Some(&metadata),
+            &CaptureFaults {
+                parent_sync: true,
+                ..CaptureFaults::default()
+            },
+        )
+        .unwrap_err();
+        let (capture_id, path) = match error {
+            CaptureError::Finalize {
+                capture_id, path, ..
+            } => (capture_id, path),
+            other => panic!("unexpected result: {other:?}"),
+        };
+        assert!(path.join("manifest.v2.json").is_file());
+        assert!(!path.join("published.v2.json").exists());
+        assert_eq!(
+            inspect_capture(&root, &capture_id).status,
+            RetrievalStatus::Tampered
+        );
+        assert_eq!(
+            verify_capture(&root, &capture_id).status,
+            RetrievalStatus::Tampered
+        );
+        let rebuilt = crate::index::rebuild_index(&root, 1024).unwrap();
+        assert!(rebuilt.records.is_empty());
+        assert_eq!(rebuilt.issues.len(), 1);
+        let recovered = super::recover_partials(&root).unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, "UNCOMMITTED_RETAINED");
+        assert_eq!(
+            inspect_capture(&root, &capture_id).status,
+            RetrievalStatus::Tampered
+        );
+        assert!(!path.join("published.v2.json").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

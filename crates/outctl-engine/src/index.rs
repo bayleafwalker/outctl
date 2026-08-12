@@ -1,8 +1,8 @@
 use crate::manifest::{
-    parse_unique_json, read_manifest_bundle, sha256_prefixed, validate_capture_id,
+    parse_unique_json, read_published_manifest_bundle, sha256_prefixed, validate_capture_id,
     validate_prefixed_digest, ManifestBundle, ManifestError,
 };
-use crate::retention::read_retention_with_digest;
+use crate::retention::{read_retention_with_digest, retention_binds_bundle};
 use crate::storage::PrivateDir;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -310,7 +310,7 @@ pub(crate) fn rebuild_index_in(
                 continue;
             }
         };
-        let bundle = match read_manifest_bundle(&directory, Some(capture_id)) {
+        let bundle = match read_published_manifest_bundle(&directory, Some(capture_id)) {
             Ok(bundle) => bundle,
             Err(error) => {
                 issues.push(issue(capture_id, error));
@@ -330,14 +330,7 @@ pub(crate) fn rebuild_index_in(
         };
         match directory.try_open_file("retention.json") {
             Ok(Some(_)) => match read_retention_with_digest(&directory) {
-                Ok((retention, digest))
-                    if retention.capture_id() == bundle.base.capture_id
-                        && retention.manifest_digest()
-                            == bundle
-                                .sidecar_digest
-                                .as_deref()
-                                .unwrap_or(&bundle.base.exact_digest) =>
-                {
+                Ok((retention, digest)) if retention_binds_bundle(&retention, &bundle) => {
                     record.capture_status = "expired".to_owned();
                     record.retained_bytes = 0;
                     record.retention_record_digest = Some(digest);
