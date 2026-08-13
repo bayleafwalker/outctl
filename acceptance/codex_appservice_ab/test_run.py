@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -130,6 +131,62 @@ class GuardTests(unittest.TestCase):
             run._install_home_hook(target, source, arm="A")
             self.assertTrue((target / "hooks/kubectl_readonly_policy.py").is_file())
             self.assertTrue((target / "hooks/kubectl_outctl_guard.py").is_file())
+
+            baseline_source = root / "baseline-source"
+            baseline_home = root / "baseline-home"
+            baseline_source.mkdir()
+            run._install_guard(baseline_source, arm="B", wrapper="unused")
+            baseline_hook = baseline_source / ".codex/hooks/kubectl_readonly_guard.py"
+            baseline_policy = baseline_source / ".codex/hooks/kubectl_readonly_policy.py"
+            self.assertTrue(baseline_hook.is_file())
+            self.assertTrue(baseline_policy.is_file())
+            self.assertFalse((baseline_source / ".codex/outctl-routing-policy.json").exists())
+            run._install_home_hook(baseline_home, baseline_source, arm="B")
+            installed_hook = baseline_home / "hooks/kubectl_readonly_guard.py"
+            self.assertTrue((baseline_home / "hooks/kubectl_readonly_policy.py").is_file())
+            self.assertFalse((baseline_home / "outctl-routing-policy.json").exists())
+
+            hook_log = root / "baseline-hook.jsonl"
+            completed = subprocess.run(
+                [sys.executable, str(installed_hook)],
+                input=json.dumps(
+                    {
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "kubectl get pods -A"},
+                        "session_id": "baseline-session",
+                        "turn_id": "baseline-turn",
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                env={
+                    **os.environ,
+                    "CODEX_AB_ARM": "B",
+                    "CODEX_AB_HOOK_LOG": str(hook_log),
+                },
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0)
+            self.assertEqual(completed.stdout, "")
+            telemetry = json.loads(hook_log.read_text(encoding="utf-8"))
+            self.assertEqual(
+                set(telemetry),
+                {
+                    "arm",
+                    "command_sha256",
+                    "denial_class",
+                    "denied",
+                    "kubectl_invocations",
+                    "model",
+                    "session_id",
+                    "tool_name",
+                    "ts",
+                    "turn_id",
+                },
+            )
+            self.assertFalse(telemetry["denied"])
+            self.assertEqual(telemetry["arm"], "B")
+            self.assertEqual(telemetry["kubectl_invocations"][0]["read_only"], True)
 
     def test_pinned_identity_guidance_is_treatment_neutral(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
