@@ -810,6 +810,11 @@ def _install_guard(worktree: Path, *, arm: str, wrapper: str, require_outctl: bo
     hooks_dir = codex_dir / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
 
+    source_policy = Path(__file__).with_name("kubectl_readonly_policy.py")
+    target_policy = hooks_dir / source_policy.name
+    shutil.copy2(source_policy, target_policy)
+    target_policy.chmod(0o755)
+
     if arm == "A":
         source_guard = Path(__file__).with_name("kubectl_guard.py")
         target_guard = hooks_dir / "kubectl_outctl_guard.py"
@@ -852,6 +857,9 @@ def _install_home_hook(home: Path, worktree: Path, *, arm: str) -> None:
     target = target_dir / source_name
     shutil.copy2(source, target)
     target.chmod(0o755)
+    policy = source_dir / "kubectl_readonly_policy.py"
+    shutil.copy2(policy, target_dir / policy.name)
+    (target_dir / policy.name).chmod(0o755)
     if arm == "A":
         shutil.copy2(
             worktree / ".codex" / "outctl-routing-policy.json",

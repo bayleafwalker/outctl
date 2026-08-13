@@ -7,6 +7,7 @@ import tempfile
 import textwrap
 import unittest
 import zipfile
+from dataclasses import asdict
 from pathlib import Path
 from unittest import mock
 
@@ -88,8 +89,47 @@ class GuardTests(unittest.TestCase):
             self.assertTrue(value[0].read_only)
 
     def test_baseline_guard_contains_no_treatment_guidance(self) -> None:
-        guard = Path(run.__file__).with_name("kubectl_readonly_guard.py")
-        self.assertNotIn("outctl", guard.read_text(encoding="utf-8").casefold())
+        root = Path(run.__file__).parent
+        for name in ("kubectl_readonly_guard.py", "kubectl_readonly_policy.py"):
+            self.assertNotIn("outctl", (root / name).read_text(encoding="utf-8").casefold())
+            self.assertNotIn("treatment", (root / name).read_text(encoding="utf-8").casefold())
+
+    def test_shared_policy_matches_both_arm_classifiers(self) -> None:
+        import kubectl_readonly_policy as shared_policy
+
+        commands = (
+            "kubectl get pods -A",
+            "kubectl describe deployment/app",
+            "kubectl get secrets -A",
+            "kubectl apply -f deployment.yaml",
+            "kubectl config current-context",
+            'bash -lc "kubectl rollout status deployment/app"',
+        )
+        for command in commands:
+            baseline = baseline_guard.classify_kubectl(command)
+            shared = shared_policy.classify_kubectl(command)
+            self.assertEqual(
+                [asdict(item) for item in baseline],
+                [asdict(item) for item in shared],
+                command,
+            )
+
+    def test_each_installed_guard_receives_shared_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            target = root / "target"
+            source.mkdir()
+            (source / ".git").mkdir()
+            # The installer only needs the generated hook tree for this check.
+            run._install_guard(source, arm="A", wrapper="outctl run --")
+            self.assertTrue(
+                (source / ".codex/hooks/kubectl_readonly_policy.py").is_file()
+            )
+            self.assertTrue((source / ".codex/hooks/kubectl_outctl_guard.py").is_file())
+            run._install_home_hook(target, source, arm="A")
+            self.assertTrue((target / "hooks/kubectl_readonly_policy.py").is_file())
+            self.assertTrue((target / "hooks/kubectl_outctl_guard.py").is_file())
 
     def test_pinned_identity_guidance_is_treatment_neutral(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -538,6 +578,9 @@ class HarnessValidationTests(unittest.TestCase):
             hook_dir = worktree / ".codex" / "hooks"
             hook_dir.mkdir(parents=True)
             (hook_dir / "kubectl_outctl_guard.py").write_text("# guard\n", encoding="utf-8")
+            (hook_dir / "kubectl_readonly_policy.py").write_text(
+                "# shared policy\n", encoding="utf-8"
+            )
             (worktree / ".codex" / "outctl-routing-policy.json").write_text(
                 "{}\n", encoding="utf-8"
             )

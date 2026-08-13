@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Codex PreToolUse guard for the outctl appservice A/B experiment.
+"""PreToolUse guard for the bounded-output arm of the appservice pilot.
 
-The guard is intentionally narrow:
-- both arms permit only read-only kubectl operations;
-- arm A additionally requires kubectl to appear behind ``outctl run``;
-- hook telemetry stores hashes and classifications, never raw commands.
+The shared read-only policy owns command parsing and classification.  This
+entrypoint owns the arm's wrapper requirement and its arm-specific telemetry.
 """
 
 from __future__ import annotations
@@ -12,13 +10,22 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shlex
 import sys
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import kubectl_readonly_policy as _policy
+
+classify_args = _policy.classify_args
+identity_denial = _policy.identity_denial
+iter_kubectl_tokens = _policy.iter_kubectl_tokens
+_basename = _policy._basename
+_is_discovery_reference = _policy._is_discovery_reference
+_is_secret_resource = _policy._is_secret_resource
+_positionals = _policy._positionals
+_shell_segments = _policy._shell_segments
 
 
 @dataclass(frozen=True)
@@ -31,319 +38,49 @@ class KubectlInvocation:
     denial_reason: str | None
 
 
-_VALUE_FLAGS = {
-    "-n",
-    "--namespace",
-    "--context",
-    "--cluster",
-    "--user",
-    "--kubeconfig",
-    "--server",
-    "--token",
-    "--request-timeout",
-    "--cache-dir",
-    "--certificate-authority",
-    "--client-certificate",
-    "--client-key",
-    "--tls-server-name",
-    "--as",
-    "--as-group",
-    "-v",
-    "--v",
-    "-o",
-    "--output",
-    "-l",
-    "--selector",
-    "--field-selector",
-    "--sort-by",
-    "--chunk-size",
-    "--since",
-    "--since-time",
-    "--tail",
-    "--limit-bytes",
-    "--container",
-    "-c",
-}
-
-_SIMPLE_READ_ONLY = {
-    "get",
-    "describe",
-    "logs",
-    "top",
-    "events",
-    "version",
-    "api-resources",
-    "api-versions",
-    "explain",
-    "wait",
-}
-
-_MUTATING_OR_INTERACTIVE = {
-    "apply",
-    "create",
-    "delete",
-    "patch",
-    "edit",
-    "replace",
-    "scale",
-    "autoscale",
-    "set",
-    "label",
-    "annotate",
-    "taint",
-    "cordon",
-    "uncordon",
-    "drain",
-    "run",
-    "expose",
-    "exec",
-    "attach",
-    "cp",
-    "debug",
-    "port-forward",
-    "proxy",
-    "certificate",
-}
-
-
-def _basename(token: str) -> str:
-    return Path(token).name
-
-
-def _shell_segments(command: str, *, depth: int = 0) -> Iterable[list[str]]:
-    """Yield tokenized shell command segments, recursing through simple shell -c forms."""
-    if depth > 2:
-        return
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        tokens = list(lexer)
-    except ValueError:
-        return
-
-    segment: list[str] = []
-    for token in tokens + [";"]:
-        if token and all(char in ";&|" for char in token):
-            if segment:
-                shell = _basename(segment[0])
-                if shell in {"bash", "sh", "zsh", "dash"}:
-                    for index, value in enumerate(segment[1:], start=1):
-                        if value in {"-c", "-lc", "-cl"} and index + 1 < len(segment):
-                            yield from _shell_segments(segment[index + 1], depth=depth + 1)
-                            break
-                    else:
-                        yield segment
-                else:
-                    yield segment
-            segment = []
-        else:
-            segment.append(token)
-
-
-def _is_discovery_reference(segment: list[str], index: int) -> bool:
-    """Ignore executable discovery text that does not execute kubectl."""
-
-    prefix = segment[:index]
-    for probe_index, value in enumerate(prefix):
-        probe = _basename(value).casefold()
-        suffix = prefix[probe_index + 1 :]
-        if probe == "command" and any(flag in suffix for flag in ("-v", "-V")):
-            return True
-        if probe in {"type", "which", "whereis"}:
-            return True
-    return False
-
-
 def _identity_denial(command: str, pinned: str | None) -> str | None:
-    for segment in _shell_segments(command):
-        for index, token in enumerate(segment):
-            if _basename(token) != "kubectl" or _is_discovery_reference(segment, index):
-                continue
-            if "/" in token and (pinned is None or Path(token).resolve() != Path(pinned).resolve()):
-                return "absolute kubectl paths cannot bypass the experiment identity pin"
-            args = segment[index + 1 :]
-            for flag in (
-                "--kubeconfig",
-                "--context",
-                "--cluster",
-                "--user",
-                "--server",
-                "--token",
-                "--certificate-authority",
-                "--client-certificate",
-                "--client-key",
-                "--tls-server-name",
-            ):
-                if flag in args or any(value.startswith(flag + "=") for value in args):
-                    return "kubectl identity override flags are not permitted"
-    return None
+    return identity_denial(command, pinned)
 
 
-def _positionals(tokens: list[str]) -> list[str]:
-    result: list[str] = []
-    skip_next = False
-    for token in tokens:
-        if skip_next:
-            skip_next = False
+def _is_outctl_wrapper(prefix: list[str]) -> bool:
+    for index, value in enumerate(prefix):
+        if Path(value).name != "outctl":
             continue
-        if token == "--":
+        suffix = prefix[index + 1 :]
+        if suffix[:1] == ["run"] and "--" in suffix[1:]:
+            return True
+    for index, value in enumerate(prefix):
+        if Path(value).name != "outctl_kubectl_router.py":
             continue
-        if token in _VALUE_FLAGS:
-            skip_next = True
+        suffix = prefix[index + 1 :]
+        if suffix[:1] == ["run"] and "--" in suffix[1:]:
+            return True
+    for index, value in enumerate(prefix):
+        if Path(value).name != "outctl-health":
             continue
-        if any(token.startswith(flag + "=") for flag in _VALUE_FLAGS if flag.startswith("--")):
-            continue
-        if token.startswith("-"):
-            continue
-        result.append(token)
-    return result
-
-
-def _is_secret_resource(resource: str | None) -> bool:
-    if not resource:
-        return False
-    for item in resource.casefold().split(","):
-        base = item.split("/", 1)[0].split(".", 1)[0]
-        if base in {"secret", "secrets"}:
+        if not prefix[index + 1 :]:
             return True
     return False
 
 
 def _classify_args(args: list[str], wrapped: bool) -> KubectlInvocation:
-    positionals = _positionals(args)
-    verb = positionals[0].casefold() if positionals else None
-    subverb = positionals[1].casefold() if len(positionals) > 1 else None
-    resource = positionals[1] if len(positionals) > 1 else None
-
-    if "--raw" in args or any(token.startswith("--raw=") for token in args):
-        return KubectlInvocation(
-            wrapped,
-            verb,
-            subverb,
-            resource,
-            False,
-            "kubectl --raw is outside this health-check scope",
-        )
-
-    if verb is None:
-        return KubectlInvocation(
-            wrapped,
-            None,
-            None,
-            None,
-            False,
-            "could not identify kubectl verb",
-        )
-
-    if verb in _MUTATING_OR_INTERACTIVE:
-        return KubectlInvocation(
-            wrapped, verb, subverb, resource, False, f"kubectl {verb} is not read-only"
-        )
-
-    if verb in {"get", "describe"}:
-        if _is_secret_resource(resource):
-            return KubectlInvocation(
-                wrapped,
-                verb,
-                subverb,
-                resource,
-                False,
-                "reading Kubernetes Secret objects is outside this experiment",
-            )
-        return KubectlInvocation(wrapped, verb, subverb, resource, True, None)
-
-    if verb in _SIMPLE_READ_ONLY:
-        return KubectlInvocation(wrapped, verb, subverb, resource, True, None)
-
-    if verb == "cluster-info":
-        allowed = subverb not in {"dump"}
-        return KubectlInvocation(
-            wrapped,
-            verb,
-            subverb,
-            resource,
-            allowed,
-            None if allowed else "kubectl cluster-info dump is too broad for this experiment",
-        )
-
-    if verb == "auth":
-        allowed = subverb == "can-i"
-        return KubectlInvocation(
-            wrapped,
-            verb,
-            subverb,
-            resource,
-            allowed,
-            None if allowed else "only kubectl auth can-i is permitted",
-        )
-
-    if verb == "config":
-        allowed = subverb in {"current-context", "get-contexts", "view"}
-        return KubectlInvocation(
-            wrapped,
-            verb,
-            subverb,
-            resource,
-            allowed,
-            None if allowed else "only read-only kubectl config inspection is permitted",
-        )
-
-    if verb == "rollout":
-        allowed = subverb in {"status", "history"}
-        return KubectlInvocation(
-            wrapped,
-            verb,
-            subverb,
-            resource,
-            allowed,
-            None if allowed else "only kubectl rollout status/history is permitted",
-        )
-
+    item = classify_args(args)
     return KubectlInvocation(
         wrapped,
-        verb,
-        subverb,
-        resource,
-        False,
-        f"kubectl verb {verb!r} is not in the experiment read-only allowlist",
+        item.verb,
+        item.subverb,
+        item.resource,
+        item.read_only,
+        item.denial_reason,
     )
 
 
 def classify_kubectl(command: str) -> list[KubectlInvocation]:
     invocations: list[KubectlInvocation] = []
-    for segment in _shell_segments(command):
-        for index, token in enumerate(segment):
-            if _basename(token) != "kubectl" or _is_discovery_reference(segment, index):
-                continue
-            preceding = segment[:index]
-            wrapped = False
-            for outctl_index, value in enumerate(preceding):
-                if _basename(value) != "outctl":
-                    continue
-                suffix = preceding[outctl_index + 1 :]
-                if suffix[:1] == ["run"] and "--" in suffix[1:]:
-                    wrapped = True
-                    break
-            if not wrapped:
-                for router_index, value in enumerate(preceding):
-                    if _basename(value) != "outctl_kubectl_router.py":
-                        continue
-                    suffix = preceding[router_index + 1 :]
-                    if suffix[:1] == ["run"] and "--" in suffix[1:]:
-                        wrapped = True
-                        break
-            if not wrapped:
-                for helper_index, value in enumerate(preceding):
-                    if _basename(value) != "outctl-health":
-                        continue
-                    suffix = preceding[helper_index + 1 :]
-                    # ``kubectl`` is the token currently being classified, so
-                    # a helper invocation has no remaining prefix tokens.
-                    if not suffix:
-                        wrapped = True
-                        break
-            invocations.append(_classify_args(segment[index + 1 :], wrapped))
+    for segment, index in iter_kubectl_tokens(command):
+        invocations.append(
+            _classify_args(segment[index + 1 :], _is_outctl_wrapper(segment[:index]))
+        )
     return invocations
 
 
@@ -399,9 +136,9 @@ def main() -> int:
     wrapper_hint = str(policy.get("wrapper_hint", "outctl run -- ..."))
 
     denial: str | None = None
-    identity_denial = _identity_denial(command, os.environ.get("CODEX_AB_KUBECTL_PIN"))
-    if identity_denial:
-        denial = identity_denial
+    identity_violation = _identity_denial(command, os.environ.get("CODEX_AB_KUBECTL_PIN"))
+    if identity_violation:
+        denial = identity_violation
     for invocation in invocations:
         if denial:
             break
@@ -439,7 +176,6 @@ def main() -> int:
             ),
         }
     )
-
     if denial:
         print(json.dumps(_deny(denial)))
     return 0

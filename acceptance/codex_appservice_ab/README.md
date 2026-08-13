@@ -366,6 +366,7 @@ back the implementation itself, remove `acceptance/codex_appservice_ab/`.
 cd acceptance/codex_appservice_ab
 uv run python -m unittest -v
 uv run python -m py_compile run.py kubectl_guard.py kubectl_readonly_guard.py \
+  kubectl_readonly_policy.py \
   summarize_codex_usage.py test_run.py
 ```
 
