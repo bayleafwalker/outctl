@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
 from outctl.contracts import ContractValidationError, validate_contract
+from outctl.serialization import sha256_hex
 
 
 class UxCompileError(ValueError):
@@ -16,9 +16,13 @@ class UxCompileError(ValueError):
 
 
 def _canonical_digest(value: Mapping[str, Any], *, omit: str) -> str:
+    # Deliberately not outctl.serialization.canonical_json_bytes: this digest
+    # binds against a producer contract that does not drop None values, and
+    # changing that would break existing digest bytes. See P0.3 in
+    # docs/plans/agentops/ecosystem-simplification-plan.md.
     body = {key: item for key, item in value.items() if key != omit}
     encoded = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return "sha256:" + sha256_hex(encoded)
 
 
 def _count(value: object, name: str) -> int:
@@ -88,7 +92,7 @@ def compile_ux_evidence(
     evidence = {
         "schema_version": "vuoro.outctl.ux-evidence/v1",
         "task_protocol_digest": protocol_digest,
-        "session_id_sha256": hashlib.sha256(session_id.encode()).hexdigest(),
+        "session_id_sha256": sha256_hex(session_id.encode()),
         "turns": len(turns),
         "logical_commands": totals["logical_commands"],
         "cluster_calls": totals["cluster_calls"],

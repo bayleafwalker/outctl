@@ -15,6 +15,7 @@ from pathlib import Path
 
 from outctl.adapter import AdapterIdentity, AdapterMode, AdapterRequest, AdapterResult, run_adapter
 from outctl.projection import ProjectionLimits
+from outctl.serialization import sha256_hex
 
 _IDENTITY_FLAGS = frozenset(
     {
@@ -134,10 +135,6 @@ class KubernetesReadResult:
     receipt: KubernetesExecutionReceipt
 
 
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -147,7 +144,12 @@ def _sha256_file(path: Path) -> str:
 
 
 def _canonical_digest(value: object) -> str:
-    return _sha256_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+    # Deliberately not outctl.serialization.canonical_json_bytes: this digest
+    # is bound into KubernetesExecutionReceipt and compared against
+    # previously-recorded receipts; ensure_ascii=False or None-dropping would
+    # change existing digest bytes. See P0.3 in
+    # docs/plans/agentops/ecosystem-simplification-plan.md.
+    return sha256_hex(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
 
 
 def _positionals(args: Sequence[str]) -> list[str]:
@@ -230,7 +232,7 @@ def build_kubernetes_receipt(
     )
     executable_sha256 = _sha256_file(identity.executable)
     kubeconfig_sha256 = _sha256_file(identity.kubeconfig)
-    context_sha256 = _sha256_bytes(identity.context.encode())
+    context_sha256 = sha256_hex(identity.context.encode())
     argv_sha256 = _canonical_digest(list(argv))
     binding = _canonical_digest(
         {
