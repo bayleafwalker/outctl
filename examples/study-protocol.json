@@ -1,7 +1,7 @@
 {
   "schema_version": "vuoro.outctl.study-protocol/v1",
   "protocol_id": "controlled-efficacy-example-v1",
-  "protocol_digest": "sha256:f915dc9314e7217fd8c63167b5151ab1cd3ca5da2bf751c8167096abc7fae023",
+  "protocol_digest": "sha256:ecce36fc1b4613c65f242fedd1fdfe58869a3754db828b3546db8b1b279daaba",
   "frozen_at": "2026-08-09T00:00:00Z",
   "repository_commit": "3c3a993b195ef378e95b8e95eed1fe310b4ed009",
   "scenario_manifest_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -16,7 +16,7 @@
   "primary_outcomes": [
     "diagnostic_quality_noninferiority",
     "additional_critical_misses",
-    "model_visible_command_output_bytes",
+    "command_event_aggregated_output_bytes",
     "uncached_read_input_tokens"
   ],
   "secondary_outcomes": ["total_input_tokens", "cost_estimate", "latency_ms", "retrieval_count"],

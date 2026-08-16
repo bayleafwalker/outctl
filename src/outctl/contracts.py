@@ -24,14 +24,19 @@ _SCHEMAS = frozenset(
         "expected-facts",
         "logical-command-request",
         "runner-command-result",
+        "arm-matrix",
+        "scenario-package",
+        "scenario-suite",
         "scenario-manifest",
         "shadow-observation",
         "study-analysis",
+        "study-analysis-v2",
         "study-protocol",
         "study-suite",
         "ux-evidence",
     }
 )
+MAX_PROTOCOL_CANONICAL_BYTES = 64 * 1024
 _RAW_KEY = re.compile(
     r"^(stdout|stderr|raw_output|projection_body|events_jsonl|tool_body|transcript|credential|secret)$",
     re.IGNORECASE,
@@ -166,6 +171,71 @@ def validate_controlled_study_launch(
     return {"protocol": protocol, "suite": suite, "manifest": manifest, "expected_facts": facts}
 
 
+def validate_scenario_launch(
+    repository_root: Path,
+    protocol_path: Path,
+    scenario_id: str,
+    *,
+    mutation_authorized: bool = False,
+) -> dict[str, Any]:
+    """Resolve one provider-neutral v3 scenario without starting a runner.
+
+    v1/v2 controlled-study documents remain readable by the historical
+    acceptance launcher.  This resolver is intentionally v3-only: old
+    artifacts are recorded results, not inputs that are silently upgraded to a
+    new study compiler.
+    """
+    root = repository_root.resolve()
+    protocol = validate_contract(
+        "study-protocol", _read_json_object(protocol_path, "study protocol")
+    )
+    if protocol.get("schema_version") != "vuoro.outctl.study-protocol/v3":
+        raise ContractValidationError("scenario launch requires study-protocol/v3")
+    if protocol.get("repository_commit") != _repository_head(root):
+        raise ContractValidationError("study protocol repository commit does not match HEAD")
+
+    suite_path = _repository_file(root, protocol.get("scenario_suite_path"), "scenario suite")
+    suite = validate_contract("scenario-suite", _read_json_object(suite_path, "scenario suite"))
+    if suite.get("suite_digest") != protocol.get("scenario_suite_digest"):
+        raise ContractValidationError("protocol and scenario suite canonical digests do not match")
+    matrix_path = _repository_file(root, protocol.get("arm_matrix_path"), "arm matrix")
+    matrix = validate_contract("arm-matrix", _read_json_object(matrix_path, "arm matrix"))
+    if matrix.get("matrix_digest") != protocol.get("arm_matrix_digest"):
+        raise ContractValidationError("protocol and arm matrix canonical digests do not match")
+
+    selected = [item for item in suite["scenarios"] if item.get("scenario_id") == scenario_id]
+    if len(selected) != 1:
+        raise ContractValidationError(f"scenario ID is not bound exactly once: {scenario_id}")
+    binding = selected[0]
+    package_path = _bound_repository_file(root, binding["package"], "scenario package")
+    fixture_path = _bound_repository_file(root, binding["fixture"], "scenario fixture")
+    facts_path = _bound_repository_file(root, binding["expected_facts"], "expected facts")
+    package = validate_contract(
+        "scenario-package", _read_json_object(package_path, "scenario package")
+    )
+    facts = validate_contract("expected-facts", _read_json_object(facts_path, "expected facts"))
+    if package.get("scenario_id") != scenario_id or facts.get("scenario_id") != scenario_id:
+        raise ContractValidationError("scenario package/expected facts cross-binding mismatch")
+    if package.get("scenario_class") != binding.get("scenario_class"):
+        raise ContractValidationError("scenario package class contradicts suite binding")
+    if package.get("fixture_digest") != binding["fixture"]["sha256"]:
+        raise ContractValidationError("scenario package does not bind fixture bytes")
+    if package.get("expected_facts_digest") != binding["expected_facts"]["sha256"]:
+        raise ContractValidationError("scenario package does not bind expected-facts bytes")
+    if package.get("mutation_authority_required") is True and not mutation_authorized:
+        raise ContractValidationError("scenario requires mutation authority not granted to launch")
+    return {
+        "protocol": protocol,
+        "suite": suite,
+        "matrix": matrix,
+        "package": package,
+        "package_path": package_path,
+        "fixture_path": fixture_path,
+        "expected_facts_path": facts_path,
+        "expected_facts": facts,
+    }
+
+
 def _plain(value: object) -> Any:
     if isinstance(value, Mapping):
         return {str(key): _plain(item) for key, item in value.items()}
@@ -250,6 +320,72 @@ def _validate_semantics(name: str, value: Mapping[str, Any]) -> None:
     if name == "study-protocol":
         if value.get("protocol_digest") != _canonical_digest(value, omit="protocol_digest"):
             raise ContractValidationError("study protocol digest does not bind canonical bytes")
+        if value.get("schema_version") == "vuoro.outctl.study-protocol/v3":
+            encoded = json.dumps(
+                {key: item for key, item in value.items() if key != "protocol_digest"},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode()
+            if len(encoded) > MAX_PROTOCOL_CANONICAL_BYTES:
+                raise ContractValidationError(
+                    "study protocol canonical bytes exceed the v3 initial limit "
+                    f"of {MAX_PROTOCOL_CANONICAL_BYTES}"
+                )
+            if value.get("digest_scope") != "canonical-json-v1":
+                raise ContractValidationError("study protocol v3 digest scope is unsupported")
+    elif name == "scenario-package":
+        requires = value.get("requires")
+        if isinstance(requires, Mapping) and requires.get("mutation_authority") is not value.get(
+            "mutation_authority_required"
+        ):
+            raise ContractValidationError(
+                "scenario package mutation requirement must match requires.mutation_authority"
+            )
+    elif name == "scenario-suite":
+        if value.get("suite_digest") != _canonical_digest(value, omit="suite_digest"):
+            raise ContractValidationError("scenario suite digest does not bind canonical bytes")
+        scenarios = value.get("scenarios")
+        required = value.get("required_classes")
+        if isinstance(scenarios, list) and isinstance(required, list):
+            identifiers = [
+                item.get("scenario_id") for item in scenarios if isinstance(item, Mapping)
+            ]
+            classes = [
+                item.get("scenario_class") for item in scenarios if isinstance(item, Mapping)
+            ]
+            if len(identifiers) != len(set(identifiers)):
+                raise ContractValidationError("scenario suite scenario IDs must be unique")
+            if set(classes) != set(required):
+                raise ContractValidationError(
+                    "scenario suite scenarios must cover required_classes exactly"
+                )
+    elif name == "arm-matrix":
+        if value.get("matrix_digest") != _canonical_digest(value, omit="matrix_digest"):
+            raise ContractValidationError("arm matrix digest does not bind canonical bytes")
+        arms = value.get("arms")
+        contrasts = value.get("contrasts")
+        arm_records = arms if isinstance(arms, list) else []
+        contrast_records = contrasts if isinstance(contrasts, list) else []
+        arm_ids = [arm.get("arm_id") for arm in arm_records if isinstance(arm, Mapping)]
+        if len(arm_ids) != len(set(arm_ids)):
+            raise ContractValidationError("arm matrix arm IDs must be unique")
+        contrast_ids = [
+            contrast.get("contrast_id")
+            for contrast in contrast_records
+            if isinstance(contrast, Mapping)
+        ]
+        if len(contrast_ids) != len(set(contrast_ids)):
+            raise ContractValidationError("arm matrix contrast IDs must be unique")
+        for contrast in contrast_records:
+            if not isinstance(contrast, Mapping):
+                continue
+            if (
+                contrast.get("treatment_arm") not in arm_ids
+                or contrast.get("control_arm") not in arm_ids
+            ):
+                raise ContractValidationError("arm matrix contrast refers to an unknown arm")
     elif name == "study-suite":
         if value.get("suite_digest") != _canonical_digest(value, omit="suite_digest"):
             raise ContractValidationError("study suite digest does not bind canonical bytes")

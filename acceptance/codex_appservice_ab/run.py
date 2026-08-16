@@ -34,9 +34,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from four_arm_plan import plan_payload
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from kubectl_guard import classify_kubectl
+from trace_handler import (
+    DEFAULT_MAX_EVENTS,
+    DEFAULT_MAX_TRACE_BYTES,
+    TraceCaptureError,
+    capture_runtime_trace,
+)
 
 from outctl.contracts import ContractValidationError, validate_controlled_study_launch
 
@@ -132,8 +139,8 @@ class Usage:
             )
         if self.turn_completed_events != 1:
             warnings.append(
-                f"expected one turn.completed event, observed {self.turn_completed_events}; "
-                "the final cumulative usage event was used"
+                f"observed {self.turn_completed_events} turn.completed events; "
+                "the final cumulative usage event was used for aggregate accounting"
             )
         return warnings
 
@@ -150,6 +157,8 @@ class ProcessResult:
     final_path: Path
     hook_log_path: Path
     outctl_spool_root: Path | None
+    trace_path: Path | None = None
+    trace_summary_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -374,6 +383,43 @@ def _install_isolated_shell_home(
         "kubectl() { command "
         f"{shlex.quote(str(kubectl_bin))} --kubeconfig "
         f'{shlex.quote(str(kubeconfig))} --context {shlex.quote(context)} "$@"; }}\n'
+        "export -f kubectl\n"
+    )
+    profile = target / ".bash_profile"
+    shell_env = target / "shell-env.sh"
+    profile.write_text(body, encoding="utf-8")
+    shell_env.write_text(body, encoding="utf-8")
+    profile.chmod(0o444)
+    shell_env.chmod(0o444)
+    target.chmod(0o555)
+    return shell_env
+
+
+def _install_replay_kubectl(
+    target: Path, *, fixture: Path, fixture_digest: str
+) -> Path:
+    """Install an immutable kubectl-named launcher with no network credential."""
+    target.mkdir(parents=True, exist_ok=True)
+    replay = Path(__file__).with_name("kubectl_replay.py").resolve()
+    wrapper = target / "kubectl"
+    wrapper.write_text(
+        "#!/bin/sh\nexec "
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(replay))} "
+        f"--fixture {shlex.quote(str(fixture))} "
+        f"--fixture-sha256 {shlex.quote(fixture_digest)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o555)
+    target.chmod(0o555)
+    return wrapper
+
+
+def _install_replay_shell_home(target: Path, *, kubectl_bin: Path, pinned_path: str) -> Path:
+    target.mkdir(parents=True, exist_ok=True)
+    body = (
+        "unset KUBECONFIG\n"
+        f"export PATH={shlex.quote(pinned_path)}\n"
+        f"kubectl() {{ command {shlex.quote(str(kubectl_bin))} \"$@\"; }}\n"
         "export -f kubectl\n"
     )
     profile = target / ".bash_profile"
@@ -635,6 +681,8 @@ Rules:
 
 - Use the canonical execution prefix verbatim. Do not replace it with a bare
   `outctl run`, alter its arguments, or write outside its allocated spool.
+- Execute the six requested commands serially in their listed order. Wait for
+  each bounded result before starting the next command.
 - Preserve direct argv after `--`; do not introduce an implicit shell inside outctl.
 - Start from the bounded projection returned by the router. It is derived from
   `outctl run`, while raw capture bytes remain private.
@@ -758,6 +806,7 @@ def _router_prefixes(
     router: Path,
     launcher: Sequence[str],
     kubectl_prefix: Sequence[str] | None = None,
+    projection_profile: str = "generic",
 ) -> tuple[str, str]:
     """Build the exact treatment route, including its sandbox-local uv state."""
 
@@ -777,6 +826,7 @@ def _router_prefixes(
             if kubectl_prefix is not None
             else ""
         )
+        + f"--projection-profile {shlex.quote(projection_profile)} "
         + ' --spool-root "$OUTCTL_AB_SPOOL_ROOT"'
     )
     return router_exec, router_common
@@ -871,6 +921,7 @@ def _write_codex_home(
     kubernetes_api_host: str | None,
     auth_source: Path | None,
     reasoning_effort: str | None,
+    tool_output_token_limit: int | None = None,
 ) -> None:
     target.mkdir(parents=True, exist_ok=True)
     target.chmod(0o700)
@@ -915,6 +966,8 @@ def _write_codex_home(
         f'[permissions.{PERMISSION_PROFILE_NAME}.filesystem.":workspace_roots"]',
         '"." = "read"',
     ]
+    if tool_output_token_limit is not None:
+        lines.insert(2, f"tool_output_token_limit = {tool_output_token_limit}")
     for write_root in dict.fromkeys(write_roots):
         lines.extend(
             (
@@ -960,18 +1013,20 @@ def _build_codex_command(
     final_path: Path,
     prompt: str,
     additional_write_dirs: Sequence[Path] = (),
+    ephemeral: bool = True,
 ) -> list[str]:
     command = [
         codex_bin,
         "exec",
         "--dangerously-bypass-hook-trust",
-        "--ephemeral",
         "--json",
         "--model",
         model,
         "--cd",
         str(worktree),
     ]
+    if ephemeral:
+        command.insert(3, "--ephemeral")
     for directory in dict.fromkeys(additional_write_dirs):
         command.extend(("--add-dir", str(directory)))
     return [
@@ -993,6 +1048,91 @@ def _commissioning_failed(arm: Mapping[str, Any]) -> bool:
         int(commands.get("kubectl_via_outctl_attempts", 0)) > 0
         and int(commands.get("kubectl_via_outctl_completed", 0)) == 0
         and int(spool.get("capture_directory_count", 0)) == 0
+    )
+
+
+def _controlled_completion_needed(events_path: Path, *, arm: str) -> bool:
+    events, _warnings = _read_jsonl(events_path, artifact=f"arm {arm} events")
+    commands = _command_metrics(events)
+    if int(commands["kubectl_completed"]) != 6:
+        return True
+    return arm == "A" and int(commands["retrieval_tool_turns"]) != 1
+
+
+def _thread_id(events_path: Path) -> str:
+    events, _warnings = _read_jsonl(events_path, artifact="Codex events")
+    identifiers = [
+        event.get("thread_id")
+        for event in events
+        if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str)
+    ]
+    if len(identifiers) != 1:
+        raise ExperimentError("controlled completion requires exactly one Codex thread ID")
+    return identifiers[0]
+
+
+def _resume_controlled_completion(
+    result: ProcessResult,
+    *,
+    codex_bin: str,
+    model: str,
+    schema: Path,
+    env: Mapping[str, str],
+    timeout_seconds: int,
+) -> ProcessResult:
+    prompt = (
+        "The frozen corpus postcondition is not satisfied. Review your tool history, execute "
+        "only the omitted command(s) from the six-command checklist, and then replace the final "
+        "structured result using all evidence. Do not rerun a completed command. Arm A must also "
+        "have exactly one bounded tail retrieval from the all-namespaces Pod capture."
+    )
+    command = [
+        codex_bin,
+        "exec",
+        "resume",
+        "--dangerously-bypass-hook-trust",
+        "--json",
+        "--model",
+        model,
+        "--output-schema",
+        str(schema),
+        "--output-last-message",
+        str(result.final_path),
+        _thread_id(result.events_path),
+        prompt,
+    ]
+    started = time.monotonic()
+    with (
+        result.events_path.open("ab") as stdout_handle,
+        result.stderr_path.open("ab") as stderr_handle,
+    ):
+        process = subprocess.Popen(
+            command,
+            env=dict(env),
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            start_new_session=True,
+        )
+        timed_out = False
+        try:
+            return_code = process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _terminate_process_group(process)
+            return_code = process.returncode if process.returncode is not None else -signal.SIGKILL
+    return ProcessResult(
+        arm=result.arm,
+        return_code=return_code,
+        timed_out=result.timed_out or timed_out,
+        duration_ms=result.duration_ms + round((time.monotonic() - started) * 1000),
+        launched_monotonic_ns=result.launched_monotonic_ns,
+        events_path=result.events_path,
+        stderr_path=result.stderr_path,
+        final_path=result.final_path,
+        hook_log_path=result.hook_log_path,
+        outctl_spool_root=result.outctl_spool_root,
+        trace_path=result.trace_path,
+        trace_summary_path=result.trace_summary_path,
     )
 
 
@@ -1027,6 +1167,8 @@ def _run_arm(
     stderr_path = output_dir / "stderr.log"
     final_path = output_dir / "final.json"
     hook_log_path = output_dir / "hook-events.jsonl"
+    trace_path = output_dir / "runtime-trace.jsonl"
+    trace_summary_path = output_dir / "runtime-trace-summary.json"
 
     barrier.wait(timeout=START_BARRIER_TIMEOUT_SECONDS)
     launched = time.monotonic_ns()
@@ -1067,6 +1209,8 @@ def _run_arm(
             if isinstance((value := env.get("OUTCTL_AB_SPOOL_ROOT")), str) and value
             else None
         ),
+        trace_path=trace_path,
+        trace_summary_path=trace_summary_path,
     )
 
 
@@ -1123,6 +1267,126 @@ def _extract_usage(events: Sequence[Mapping[str, Any]]) -> tuple[Usage | None, l
         turn_completed_events=len(completed),
     )
     return usage, usage.validate()
+
+
+def _model_invocation_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Report model boundaries from Codex turn events, never shell timing.
+
+    ``turn.completed`` is the authoritative boundary available in the JSONL
+    transport.  The CLI does not currently expose post-tool-truncation history
+    bytes or sampling-request IDs, so those fields remain explicitly null
+    instead of being reconstructed from command timestamps.  Command items
+    are associated with the following boundary in JSONL order, or an explicit
+    matching turn ID when the event contains one; this is event attribution,
+    not a timing-derived round estimate.
+    """
+
+    completed = [
+        (event_index, event)
+        for event_index, event in enumerate(events)
+        if event.get("type") == "turn.completed"
+    ]
+    command_items = [
+        (event_index, event)
+        for event_index, event in enumerate(events)
+        if event.get("type") == "item.completed"
+        and isinstance(event.get("item"), Mapping)
+        and event["item"].get("type") == "command_execution"
+    ]
+    started_items = [
+        (event_index, event)
+        for event_index, event in enumerate(events)
+        if event.get("type") == "item.started"
+        and isinstance(event.get("item"), Mapping)
+        and event["item"].get("type") == "command_execution"
+    ]
+    records: list[dict[str, Any]] = []
+    for sequence, (_event_index, event) in enumerate(completed, start=1):
+        usage = event.get("usage") if isinstance(event.get("usage"), Mapping) else {}
+        turn_id = event.get("turn_id") if isinstance(event.get("turn_id"), str) else None
+        request_id = event.get("request_id") if isinstance(event.get("request_id"), str) else None
+        records.append(
+            {
+                "sequence": sequence,
+                "request_id": request_id,
+                "turn_id": turn_id,
+                "input_tokens": usage.get("input_tokens"),
+                "cached_input_tokens": usage.get("cached_input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+                "tool_calls_emitted": 0 if command_items else None,
+                "commands_started": 0 if started_items else None,
+                "commands_parallelized": None,
+                "prior_response_id_used": None,
+                "history_bytes_after_tool_truncation": None,
+                "history_tokens_after_tool_truncation": None,
+                "latency_ms": None,
+                "command_event_indices": [],
+            }
+        )
+
+    def event_turn_id(event: Mapping[str, Any]) -> str | None:
+        value = event.get("turn_id")
+        if isinstance(value, str):
+            return value
+        item = event.get("item")
+        if isinstance(item, Mapping) and isinstance(item.get("turn_id"), str):
+            return item["turn_id"]
+        return None
+
+    def boundary_for(event_index: int, event: Mapping[str, Any]) -> tuple[int, str]:
+        explicit_id = event_turn_id(event)
+        if explicit_id is not None:
+            for sequence, (_boundary_index, boundary) in enumerate(completed, start=1):
+                if event_turn_id(boundary) == explicit_id:
+                    return sequence, "explicit_turn_id"
+        for sequence, (boundary_index, _boundary) in enumerate(completed, start=1):
+            if event_index < boundary_index:
+                return sequence, "next_turn_boundary"
+        return 0, "unassigned"
+
+    unassigned_command_events = 0
+    command_associations: list[dict[str, Any]] = []
+    for event_index, event in command_items:
+        item = event["item"]
+        command = item.get("command") if isinstance(item.get("command"), str) else ""
+        sequence, association = boundary_for(event_index, event)
+        command_associations.append(
+            {
+                "event_index": event_index,
+                "command_sha256": _sha256_text(command),
+                "turn_sequence": sequence or None,
+                "association": association,
+            }
+        )
+        if sequence:
+            records[sequence - 1]["tool_calls_emitted"] += 1
+            records[sequence - 1]["command_event_indices"].append(event_index)
+        else:
+            unassigned_command_events += 1
+
+    for event_index, event in started_items:
+        sequence, _association = boundary_for(event_index, event)
+        if sequence:
+            records[sequence - 1]["commands_started"] += 1
+    missing_fields = [
+        "request_id",
+        "commands_parallelized",
+        "prior_response_id_used",
+        "history_bytes_after_tool_truncation",
+        "history_tokens_after_tool_truncation",
+        "latency_ms",
+    ]
+    return {
+        "source": "codex_jsonl_turn_events",
+        "sampling_completion_count": len(completed),
+        "model_invocation_boundaries_observed": bool(completed),
+        "command_item_count": len(command_items),
+        "command_associations": command_associations,
+        "unassigned_command_event_count": unassigned_command_events,
+        "records": records,
+        "unobserved_fields": missing_fields,
+        "timing_round_inference_used": False,
+    }
 
 
 def _cost_ranges(usage: Usage, *, model: str) -> dict[str, Any]:
@@ -1304,8 +1568,10 @@ def _command_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "completed": completed,
         "failed": failed,
         "declined": declined,
-        "model_visible_command_output_bytes": output_bytes,
-        "model_visible_kubectl_output_bytes": kubectl_output_bytes,
+        # Codex's aggregated_output is command stdout/stderr as emitted by the
+        # event stream.  It is not the post-truncation model history.
+        "command_event_aggregated_output_bytes": output_bytes,
+        "command_event_aggregated_kubectl_output_bytes": kubectl_output_bytes,
         "command_sha256": sorted(command_hashes),
         "kubectl_attempts": kubectl_attempts,
         "kubectl_completed": kubectl_completed,
@@ -1490,9 +1756,94 @@ def _canonical_finding_subject(finding: Mapping[str, Any]) -> str:
     return f"id:{str(finding.get('id', '')).strip().casefold()}"
 
 
+def _evidence_coverage(
+    value: Any,
+    spool_root: Path | None,
+) -> tuple[bool | None, list[str], int]:
+    """Bind final evidence refs to private capture/provenance metadata.
+
+    Schema validation proves only that a reference has the right fields.  This
+    check proves that an outctl treatment reference names an actual finalized
+    capture and, for retrieval operations, an operation recorded by the
+    spool.  Native baseline output has no outctl spool and is reported as
+    ``None`` rather than being silently treated as covered.
+    """
+
+    refs: list[Mapping[str, Any]] = []
+    if isinstance(value, Mapping):
+        for section in ("checks", "findings"):
+            entries = value.get(section)
+            if isinstance(entries, list):
+                for entry in entries:
+                    if isinstance(entry, Mapping) and isinstance(entry.get("evidence_refs"), list):
+                        refs.extend(
+                            item for item in entry["evidence_refs"] if isinstance(item, Mapping)
+                        )
+    if not refs:
+        return False, ["final result contained no evidence references"], 0
+    if spool_root is None:
+        return None, ["native command evidence has no outctl spool binding"], len(refs)
+
+    capture_ids: set[str] = set()
+    captures_root = spool_root / "captures"
+    if captures_root.is_dir():
+        capture_ids = {
+            path.name
+            for path in captures_root.iterdir()
+            if path.is_dir() and path.name not in {".", ".."}
+        }
+    recorded_operations: set[tuple[str, str]] = set()
+    for event_name in ("retrieval-events.jsonl", "router-events.jsonl"):
+        path = spool_root / event_name
+        if not path.is_file():
+            continue
+        events, _warnings = _read_jsonl(path, artifact=event_name)
+        for event in events:
+            capture_id = event.get("capture_id")
+            operation = event.get("operation")
+            if isinstance(capture_id, str) and isinstance(operation, str):
+                recorded_operations.add((capture_id, operation))
+
+    unresolved: list[str] = []
+    for index, ref in enumerate(refs):
+        capture_id = ref.get("capture_id")
+        operation = ref.get("operation")
+        if not isinstance(capture_id, str) or capture_id not in capture_ids:
+            unresolved.append(
+                f"evidence_refs[{index}] capture is not finalized in the outctl spool"
+            )
+            continue
+        if not isinstance(operation, str):
+            unresolved.append(f"evidence_refs[{index}] operation is missing")
+            continue
+        manifest = spool_root / "captures" / capture_id / "manifest.json"
+        try:
+            manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            unresolved.append(f"evidence_refs[{index}] manifest is unreadable")
+            continue
+        if (
+            not isinstance(manifest_value, Mapping)
+            or manifest_value.get("capture_status") != "COMPLETE"
+        ):
+            unresolved.append(f"evidence_refs[{index}] capture is not complete")
+        start = ref.get("start")
+        end = ref.get("end")
+        if (
+            isinstance(start, int)
+            and isinstance(end, int)
+            and end < start
+        ):
+            unresolved.append(f"evidence_refs[{index}] range end precedes start")
+        if (capture_id, operation) not in recorded_operations:
+            unresolved.append(f"evidence_refs[{index}] operation was not recorded for capture")
+    return not unresolved, unresolved, len(refs)
+
+
 def _final_metrics(
     path: Path,
     validator: Draft202012Validator,
+    spool_root: Path | None = None,
 ) -> tuple[dict[str, Any], set[tuple[str, str]], list[str]]:
     warnings: list[str] = []
     if not path.exists():
@@ -1508,6 +1859,9 @@ def _final_metrics(
                 "finding_count": 0,
                 "limitation_count": 0,
                 "quality_fingerprint": None,
+                "evidence_coverage_ok": False,
+                "evidence_ref_count": 0,
+                "evidence_coverage_errors": ["final output file is missing"],
             },
             set(),
             ["final output file is missing"],
@@ -1528,6 +1882,9 @@ def _final_metrics(
                 "finding_count": 0,
                 "limitation_count": 0,
                 "quality_fingerprint": None,
+                "evidence_coverage_ok": False,
+                "evidence_ref_count": 0,
+                "evidence_coverage_errors": ["final output is not JSON"],
             },
             set(),
             [f"final output is not JSON: {exc}"],
@@ -1576,6 +1933,9 @@ def _final_metrics(
     fingerprint = _sha256_text(
         json.dumps(sorted(signature), separators=(",", ":"), ensure_ascii=False)
     )
+    evidence_ok, evidence_errors, evidence_ref_count = _evidence_coverage(value, spool_root)
+    if evidence_errors:
+        warnings.extend(evidence_errors)
     return (
         {
             "present": True,
@@ -1588,6 +1948,9 @@ def _final_metrics(
             "finding_count": len(findings),
             "limitation_count": len(limitations),
             "quality_fingerprint": fingerprint,
+            "evidence_coverage_ok": evidence_ok,
+            "evidence_ref_count": evidence_ref_count,
+            "evidence_coverage_errors": evidence_errors,
         },
         signature,
         warnings,
@@ -1658,8 +2021,35 @@ def _parse_arm(
     *,
     requested_model: str,
     validator: Draft202012Validator,
+    trace_exact_redactions: Sequence[str] = (),
+    trace_max_events: int = DEFAULT_MAX_EVENTS,
+    trace_max_bytes: int = DEFAULT_MAX_TRACE_BYTES,
 ) -> tuple[dict[str, Any], set[tuple[str, str]]]:
     events, warnings = _read_jsonl(result.events_path)
+    trace_path = result.trace_path or result.events_path.with_name("runtime-trace.jsonl")
+    trace_summary_path = result.trace_summary_path or result.events_path.with_name(
+        "runtime-trace-summary.json"
+    )
+    try:
+        runtime_trace = capture_runtime_trace(
+            result.events_path,
+            trace_path,
+            trace_summary_path,
+            exact_redactions=trace_exact_redactions,
+            max_events=trace_max_events,
+            max_trace_bytes=trace_max_bytes,
+        )
+    except TraceCaptureError as exc:
+        raise ExperimentError(
+            f"required runtime trace handler failed for arm {result.arm}: {exc}"
+        ) from exc
+    if runtime_trace["invalid_line_count"]:
+        warnings.append(
+            "runtime trace handler skipped "
+            f"{runtime_trace['invalid_line_count']} invalid JSONL lines"
+        )
+    if runtime_trace["normalized_trace"]["truncated"]:
+        warnings.append("normalized runtime trace reached its configured bound")
     event_types: dict[str, int] = {}
     for event in events:
         event_type = event.get("type")
@@ -1702,7 +2092,9 @@ def _parse_arm(
     warnings.extend(hook_warnings)
     spool, spool_warnings = _spool_metrics(result.outctl_spool_root)
     warnings.extend(spool_warnings)
-    final, signature, final_warnings = _final_metrics(result.final_path, validator)
+    final, signature, final_warnings = _final_metrics(
+        result.final_path, validator, result.outctl_spool_root
+    )
     warnings.extend(final_warnings)
     commands = _command_metrics(events)
     thread_ids = [
@@ -1760,6 +2152,8 @@ def _parse_arm(
             "duration_ms": result.duration_ms,
             "thread_id": thread_ids[-1] if thread_ids else None,
             "thread_started_events": len(thread_ids),
+            "model_invocations": _model_invocation_metrics(events),
+            "runtime_trace": runtime_trace,
             "usage": _usage_public(usage),
             "pricing": pricing,
             "commands": commands,
@@ -1782,8 +2176,12 @@ def _parse_arm(
                 "stderr": str(result.stderr_path),
                 "final": str(result.final_path),
                 "hook_log": str(result.hook_log_path),
+                "runtime_trace": str(trace_path),
+                "runtime_trace_summary": str(trace_summary_path),
                 "events_sha256": _sha256_file(result.events_path),
                 "stderr_sha256": _sha256_file(result.stderr_path),
+                "runtime_trace_sha256": _sha256_file(trace_path),
+                "runtime_trace_summary_sha256": _sha256_file(trace_summary_path),
             },
         },
         signature,
@@ -1862,11 +2260,15 @@ def _compare_pair(
         "cache_hit_ratio": _comparison_metric(arm_a, arm_b, ("usage", "cache_hit_ratio")),
         "cache_write_ratio": _comparison_metric(arm_a, arm_b, ("usage", "cache_write_ratio")),
         "uncached_read_ratio": _comparison_metric(arm_a, arm_b, ("usage", "uncached_read_ratio")),
-        "model_visible_command_output_bytes": _comparison_metric(
-            arm_a, arm_b, ("commands", "model_visible_command_output_bytes")
+        "model_sampling_completions": _comparison_metric(
+            arm_a, arm_b, ("model_invocations", "sampling_completion_count")
         ),
-        "model_visible_kubectl_output_bytes": _comparison_metric(
-            arm_a, arm_b, ("commands", "model_visible_kubectl_output_bytes")
+        "command_items": _comparison_metric(arm_a, arm_b, ("commands", "command_items")),
+        "command_event_aggregated_output_bytes": _comparison_metric(
+            arm_a, arm_b, ("commands", "command_event_aggregated_output_bytes")
+        ),
+        "command_event_aggregated_kubectl_output_bytes": _comparison_metric(
+            arm_a, arm_b, ("commands", "command_event_aggregated_kubectl_output_bytes")
         ),
         "duration_ms": _comparison_metric(arm_a, arm_b, ("duration_ms",)),
         "codex_credits": _comparison_metric(arm_a, arm_b, ("pricing", "codex_credits", "value")),
@@ -1906,6 +2308,7 @@ def _compare_pair(
         and int(a_spool.get("manifest_errors", 0)) == 0
         and set(a_spool.get("capture_status_counts", {})) <= {"COMPLETE"}
         and int(a_spool.get("retrieval_count", 0)) == 1
+        and a_final.get("evidence_coverage_ok", True) is True
     )
     wrapped_attempts = int(a_commands.get("kubectl_via_outctl_attempts", 0))
     wrapped_completed = int(a_commands.get("kubectl_via_outctl_completed", 0))
@@ -1919,6 +2322,7 @@ def _compare_pair(
         and int(a_spool.get("manifest_errors", 0)) == 0
         and set(a_spool.get("capture_status_counts", {})) <= {"COMPLETE"}
         and int(a_spool.get("retrieval_count", 0)) == int(a_commands.get("retrieval_tool_turns", 0))
+        and a_final.get("evidence_coverage_ok", True) is True
     )
     treatment_compliant = (
         strict_treatment_compliant
@@ -1948,6 +2352,8 @@ def _compare_pair(
         int(a_hooks.get("events", 0)) > 0 and int(b_hooks.get("events", 0)) > 0
     )
     baseline_spontaneously_used_outctl = int(b_commands.get("kubectl_via_outctl_completed", 0)) > 0
+    treatment_evidence_coverage_ok = a_final.get("evidence_coverage_ok", True) is True
+    baseline_evidence_coverage = b_final.get("evidence_coverage_ok")
     no_mutation_attempts = (
         int(a_commands.get("kubectl_non_read_only_attempts", 0)) == 0
         and int(b_commands.get("kubectl_non_read_only_attempts", 0)) == 0
@@ -2006,7 +2412,9 @@ def _compare_pair(
         )
         quality_basis = "frozen_expected_fact_set"
     raw_retained = _nested_number(arm_a, ("outctl_spool", "retained_total_bytes"))
-    exposed_kubectl = _nested_number(arm_a, ("commands", "model_visible_kubectl_output_bytes"))
+    exposed_kubectl = _nested_number(
+        arm_a, ("commands", "command_event_aggregated_kubectl_output_bytes")
+    )
     outctl_exposure_ratio = (
         exposed_kubectl / raw_retained
         if raw_retained is not None and exposed_kubectl is not None and raw_retained > 0
@@ -2022,6 +2430,10 @@ def _compare_pair(
         flags.append(
             "arm A did not produce one complete capture per wrapped command and one "
             "bounded retrieval"
+        )
+    if not treatment_evidence_coverage_ok:
+        flags.append(
+            "arm A final evidence references could not be bound to finalized outctl captures"
         )
     if treatment_mode == "opt-in" and not treatment_capture_accounted:
         flags.append("arm A opt-in attempts lack matching complete captures or retrieval events")
@@ -2057,6 +2469,7 @@ def _compare_pair(
         and (treatment_mode != "deterministic" or treatment_capture_accounted)
         and (treatment_mode != "opt-in" or not treatment_attempted or treatment_compliant)
         and (treatment_mode != "opt-in" or treatment_capture_accounted)
+        and treatment_evidence_coverage_ok
         and hooks_observed_both_arms
         and not baseline_spontaneously_used_outctl
         and no_mutation_attempts
@@ -2078,6 +2491,8 @@ def _compare_pair(
         "treatment_mode": treatment_mode,
         "treatment_first_try_compliant": treatment_first_try_compliant,
         "treatment_capture_accounted": treatment_capture_accounted,
+        "treatment_evidence_coverage_ok": treatment_evidence_coverage_ok,
+        "baseline_evidence_coverage": baseline_evidence_coverage,
         "hooks_observed_both_arms": hooks_observed_both_arms,
         "baseline_spontaneously_used_outctl": baseline_spontaneously_used_outctl,
         "same_overall_status": same_overall_status,
@@ -2105,7 +2520,7 @@ def _compare_pair(
         "quality_oracle_passed": quality_noninferior is True,
         "requested_model_integrity": requested_model_integrity,
         "quality_signature_jaccard": quality_similarity,
-        "arm_a_outctl_exposure_ratio": outctl_exposure_ratio,
+        "arm_a_command_event_to_retained_ratio": outctl_exposure_ratio,
         "no_non_read_only_kubectl_attempts": no_mutation_attempts,
         "no_cluster_identity_escape": no_identity_escape,
         "pair_valid": protocol_valid,
@@ -2130,8 +2545,8 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "cache_hit_ratio",
         "cache_write_ratio",
         "uncached_read_ratio",
-        "model_visible_command_output_bytes",
-        "model_visible_kubectl_output_bytes",
+        "command_event_aggregated_output_bytes",
+        "command_event_aggregated_kubectl_output_bytes",
         "duration_ms",
         "codex_credits",
         "api_equivalent_usd",
@@ -2335,12 +2750,27 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--model", default="gpt-5.6-terra")
     parser.add_argument("--reasoning-effort", default=None)
     parser.add_argument(
+        "--tool-output-token-limit",
+        type=int,
+        default=None,
+        help=(
+            "Pin Codex's native tool-output context truncation limit. Required for live or "
+            "controlled runs; the value is recorded as configured, not inferred."
+        ),
+    )
+    parser.add_argument(
         "--health-checker",
         type=Path,
         default=None,
         help="Optional appservice read-only checker run once as shared bounded context",
     )
     parser.add_argument("--pairs", type=int, default=1)
+    parser.add_argument(
+        "--pair-offset",
+        type=int,
+        default=0,
+        help="Number of earlier pairs in the same frozen study; controls seeded start order",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--prompt", type=Path, default=here / "prompt.md")
     parser.add_argument(
@@ -2350,6 +2780,15 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help=(
             "deterministic requires outctl for each kubectl command; opt-in measures "
             "adoption of the brief bounded-output guidance without treating direct reads as failure"
+        ),
+    )
+    parser.add_argument(
+        "--projection-profile",
+        choices=("generic", "exact", "semantic-pods"),
+        default="generic",
+        help=(
+            "backend presentation used by the treatment router; semantic-pods only applies "
+            "to the exact unfiltered all-namespaces pod inventory"
         ),
     )
     parser.add_argument(
@@ -2391,6 +2830,26 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
             "before model exposure"
         ),
     )
+    parser.add_argument(
+        "--trace-redaction-exact-json",
+        default=None,
+        help=(
+            "Trusted JSON string array of exact values redacted in normalized runtime traces; "
+            "the private source JSONL remains unchanged"
+        ),
+    )
+    parser.add_argument(
+        "--trace-max-events",
+        type=int,
+        default=DEFAULT_MAX_EVENTS,
+        help="Maximum normalized events written per arm (raw events remain private and intact)",
+    )
+    parser.add_argument(
+        "--trace-max-bytes",
+        type=int,
+        default=DEFAULT_MAX_TRACE_BYTES,
+        help="Maximum normalized trace bytes written per arm",
+    )
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--include-untracked", action="store_true")
     parser.add_argument("--allow-contaminated-baseline", action="store_true")
@@ -2422,14 +2881,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if controlled_study is not None and args.expected_facts is not None:
         raise ExperimentError("--expected-facts is selected by the controlled study protocol")
     expected_facts_path = (
-        Path(controlled_study["suite"]["scenarios"][[
-            item["scenario_id"] for item in controlled_study["suite"]["scenarios"]
-        ].index(args.scenario_id)]["expected_facts"]["path"])
+        controlled_study["expected_facts_path"]
         if controlled_study is not None
         else args.expected_facts.resolve() if args.expected_facts else None
     )
-    if controlled_study is not None:
-        expected_facts_path = Path(__file__).resolve().parents[2] / expected_facts_path
     expected_signature, expected_critical = _load_expected_facts(expected_facts_path)
     if args.search_redaction_exact_json is not None:
         try:
@@ -2440,11 +2895,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             isinstance(value, str) and value for value in redactions
         ):
             raise ExperimentError("--search-redaction-exact-json must be a JSON string array")
-    kubectl_bin = _resolve_trusted_executable(args.kubectl_bin, name="kubectl")
+    trace_redactions: tuple[str, ...] = ()
+    if args.trace_redaction_exact_json is not None:
+        try:
+            parsed_trace_redactions = json.loads(args.trace_redaction_exact_json)
+        except json.JSONDecodeError as exc:
+            raise ExperimentError("--trace-redaction-exact-json must be valid JSON") from exc
+        if not isinstance(parsed_trace_redactions, list) or not all(
+            isinstance(value, str) and value for value in parsed_trace_redactions
+        ):
+            raise ExperimentError("--trace-redaction-exact-json must be a JSON string array")
+        trace_redactions = tuple(parsed_trace_redactions)
+    kubectl_bin = (
+        Path(__file__).with_name("kubectl_replay.py").resolve()
+        if controlled_study is not None
+        else _resolve_trusted_executable(args.kubectl_bin, name="kubectl")
+    )
     if args.pairs < 1:
         raise ExperimentError("--pairs must be at least 1")
+    if args.pair_offset < 0:
+        raise ExperimentError("--pair-offset must be non-negative")
     if args.timeout_seconds < 1:
         raise ExperimentError("--timeout-seconds must be positive")
+    if args.trace_max_events < 1:
+        raise ExperimentError("--trace-max-events must be positive")
+    if args.trace_max_bytes < 1:
+        raise ExperimentError("--trace-max-bytes must be positive")
+    if args.tool_output_token_limit is not None and args.tool_output_token_limit <= 0:
+        raise ExperimentError("--tool-output-token-limit must be positive")
+    if not args.dry_run and args.tool_output_token_limit is None:
+        raise ExperimentError(
+            "live and controlled runs require --tool-output-token-limit so native truncation "
+            "policy is pinned and recorded"
+        )
 
     source = args.appservice.resolve()
     canonical = args.canonical_appservice.resolve()
@@ -2460,7 +2943,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ExperimentError("prompt/output-schema/validator schema file is missing")
     if health_checker is not None and not health_checker.is_file():
         raise ExperimentError(f"--health-checker file is missing: {health_checker}")
-    if not args.dry_run and (kubeconfig is None or not kubeconfig.is_file() or not args.context):
+    if controlled_study is not None and (kubeconfig is not None or args.context):
+        raise ExperimentError("controlled study replay forbids --kubeconfig and --context")
+    if controlled_study is not None and health_checker is not None:
+        raise ExperimentError("controlled study replay forbids a live --health-checker")
+    if (
+        controlled_study is None
+        and not args.dry_run
+        and (kubeconfig is None or not kubeconfig.is_file() or not args.context)
+    ):
         raise ExperimentError("live runs require an explicit readable --kubeconfig and --context")
     if not args.dry_run and args.qualitative_regular_context:
         raise ExperimentError(
@@ -2480,7 +2971,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise ExperimentError(f"Codex output schema is not valid JSON: {exc}") from exc
     preflight: dict[str, Any] | None = None
-    if not args.dry_run:
+    if controlled_study is not None:
+        preflight = {
+            "mode": "digest-bound-offline-replay",
+            "fixture_sha256": controlled_study["manifest"]["fixture_digest"],
+            "network_access": False,
+            "live_kubernetes_identity": False,
+        }
+    elif not args.dry_run:
         assert kubeconfig is not None and args.context is not None
         preflight = _preflight_readonly_kubeconfig(
             kubectl_bin=str(kubectl_bin),
@@ -2488,8 +2986,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             context=args.context,
             allow_broad_identity=args.qualitative_regular_context,
         )
-    kubernetes_api_host = preflight.pop("_api_host") if preflight is not None else None
-    expected_identity = preflight.pop("_identity") if preflight is not None else None
+    kubernetes_api_host = preflight.pop("_api_host", None) if preflight is not None else None
+    expected_identity = preflight.pop("_identity", None) if preflight is not None else None
 
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     output = (
@@ -2506,6 +3004,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     output.chmod(0o700)
     private = output / "private"
     private.mkdir(mode=0o700)
+    if controlled_study is not None:
+        kubectl_bin = _install_replay_kubectl(
+            private / "replay-bin",
+            fixture=controlled_study["fixture_path"],
+            fixture_digest=controlled_study["manifest"]["fixture_digest"],
+        )
 
     commit = _git(source, "rev-parse", "HEAD").decode().strip()
     status = _git(source, "status", "--porcelain=v1", "-z")
@@ -2539,8 +3043,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         kubectl_prefix=(
             (str(kubectl_bin), "--kubeconfig", str(kubeconfig), "--context", args.context)
             if kubeconfig is not None and args.context is not None
-            else None
+            else (str(kubectl_bin),) if controlled_study is not None else None
         ),
+        projection_profile=args.projection_profile,
     )
     retrieval_prefix = f"{router_exec} tail {router_common}"
     wrapper = (
@@ -2634,6 +3139,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         planned_commands: list[dict[str, Any]] = []
         for pair_index in range(1, args.pairs + 1):
+            study_pair_index = args.pair_offset + pair_index
             pair_dir = private / f"pair-{pair_index:03d}"
             home_a = pair_dir / "codex-home-A"
             home_b = pair_dir / "codex-home-B"
@@ -2656,7 +3162,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     policy_ref=args.policy_ref,
                     policy_digest=args.policy_digest,
                 )
-            if kubeconfig is not None and not args.qualitative_regular_context:
+            if controlled_study is not None:
+                base_path = str(kubectl_bin.parent) + os.pathsep + os.environ.get("PATH", "")
+                path_a = (
+                    str(helper_dir_a) + os.pathsep + base_path
+                    if args.treatment_mode == "opt-in"
+                    else base_path
+                )
+                shell_env_a = _install_replay_shell_home(
+                    shell_home_a, kubectl_bin=kubectl_bin, pinned_path=path_a
+                )
+                shell_env_b = _install_replay_shell_home(
+                    shell_home_b, kubectl_bin=kubectl_bin, pinned_path=base_path
+                )
+            elif kubeconfig is not None and not args.qualitative_regular_context:
                 base_path = str(kubectl_bin.parent) + os.pathsep + os.environ.get("PATH", "")
                 path_a = (
                     str(helper_dir_a) + os.pathsep + base_path
@@ -2694,6 +3213,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
+                tool_output_token_limit=args.tool_output_token_limit,
             )
             _write_codex_home(
                 home_b,
@@ -2705,6 +3225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 kubernetes_api_host=kubernetes_api_host,
                 auth_source=auth_source,
                 reasoning_effort=args.reasoning_effort,
+                tool_output_token_limit=args.tool_output_token_limit,
             )
             _install_home_hook(home_a, worktree_a, arm="A")
             _install_home_hook(home_b, worktree_b, arm="B")
@@ -2716,6 +3237,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 final_path=arm_dir_a / "final.json",
                 prompt=prompt,
                 additional_write_dirs=(spool_a,),
+                ephemeral=controlled_study is None,
             )
             command_b = _build_codex_command(
                 codex_bin=args.codex_bin,
@@ -2724,10 +3246,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 schema=output_schema_path,
                 final_path=arm_dir_b / "final.json",
                 prompt=prompt,
+                ephemeral=controlled_study is None,
             )
             planned_commands.append(
                 {
-                    "pair": pair_index,
+                    "pair": study_pair_index,
                     "A": command_a[:-1] + ["<identical prompt>"],
                     "B": command_b[:-1] + ["<identical prompt>"],
                 }
@@ -2740,13 +3263,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_env = os.environ.copy()
             # Never allow either arm to inherit a workstation/admin kubeconfig.
             base_env.pop("KUBECONFIG", None)
+            scoped_identity_env = (
+                {}
+                if controlled_study is not None
+                else {"KUBECONFIG": str(kubeconfig)}
+            )
             env_a = {
                 **base_env,
                 "CODEX_HOME": str(home_a),
                 "CODEX_AB_ARM": "A",
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_a / "hook-events.jsonl"),
-                "KUBECONFIG": str(kubeconfig),
+                **scoped_identity_env,
                 **(
                     {
                         "HOME": str(shell_home_a),
@@ -2786,7 +3314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "CODEX_AB_ARM": "B",
                 "CODEX_AB_EXPERIMENT_ID": run_id,
                 "CODEX_AB_HOOK_LOG": str(arm_dir_b / "hook-events.jsonl"),
-                "KUBECONFIG": str(kubeconfig),
+                **scoped_identity_env,
                 **(
                     {
                         "HOME": str(shell_home_b),
@@ -2799,7 +3327,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 "PATH": str(kubectl_bin.parent) + os.pathsep + base_env.get("PATH", ""),
             }
-            if args.qualitative_regular_context:
+            if controlled_study is not None:
+                replay_identity = {
+                    "identity_sha256": _sha256_text(
+                        controlled_study["manifest"]["fixture_digest"] + "\0offline-replay"
+                    ),
+                    "kubectl_executable_sha256": _sha256_file(kubectl_bin),
+                    "matches_launcher_preflight": True,
+                    "mode": "digest-bound-offline-replay",
+                }
+                identity_a = dict(replay_identity)
+                identity_b = dict(replay_identity)
+            elif args.qualitative_regular_context:
                 identity_a = {"qualitative_regular_context": True}
                 identity_b = {"qualitative_regular_context": True}
             else:
@@ -2874,7 +3413,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     target=worker, args=("B", command_b, env_b, arm_dir_b), daemon=False
                 ),
             }
-            thread_start_order = ["A", "B"] if pair_index % 2 else ["B", "A"]
+            if controlled_study is not None:
+                seed = int(controlled_study["protocol"]["randomization_seed"])
+                starts_with_a = (seed + study_pair_index) % 2 == 0
+            else:
+                starts_with_a = pair_index % 2 == 1
+            thread_start_order = ["A", "B"] if starts_with_a else ["B", "A"]
             for arm in thread_start_order:
                 threads[arm].start()
             try:
@@ -2887,16 +3431,35 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ) from exc
             for thread in threads.values():
                 thread.join()
-            _remove_codex_home(home_a)
-            _remove_codex_home(home_b)
 
             if thread_errors:
+                _remove_codex_home(home_a)
+                _remove_codex_home(home_b)
                 raise ExperimentError(
                     "arm execution failed: "
                     + "; ".join(f"{arm}: {exc}" for arm, exc in thread_errors.items())
                 )
             if set(process_results) != {"A", "B"}:
+                _remove_codex_home(home_a)
+                _remove_codex_home(home_b)
                 raise ExperimentError("did not receive process results for both arms")
+
+            try:
+                if controlled_study is not None:
+                    for arm, env in (("A", env_a), ("B", env_b)):
+                        result = process_results[arm]
+                        if _controlled_completion_needed(result.events_path, arm=arm):
+                            process_results[arm] = _resume_controlled_completion(
+                                result,
+                                codex_bin=args.codex_bin,
+                                model=args.model,
+                                schema=output_schema_path,
+                                env=env,
+                                timeout_seconds=args.timeout_seconds,
+                            )
+            finally:
+                _remove_codex_home(home_a)
+                _remove_codex_home(home_b)
 
             result_a = process_results["A"]
             result_b = process_results["B"]
@@ -2907,11 +3470,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result_a,
                 requested_model=args.model,
                 validator=validator,
+                trace_exact_redactions=trace_redactions,
+                trace_max_events=args.trace_max_events,
+                trace_max_bytes=args.trace_max_bytes,
             )
             arm_b, signature_b = _parse_arm(
                 result_b,
                 requested_model=args.model,
                 validator=validator,
+                trace_exact_redactions=trace_redactions,
+                trace_max_events=args.trace_max_events,
+                trace_max_bytes=args.trace_max_bytes,
             )
             arm_a["cluster_identity"] = identity_a
             arm_b["cluster_identity"] = identity_b
@@ -2927,7 +3496,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             pairs.append(
                 {
-                    "pair": pair_index,
+                    "pair": study_pair_index,
                     "thread_start_order": thread_start_order,
                     "arms": {
                         "A": {
@@ -2947,15 +3516,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 break
 
         _write_json_private(output / "planned-commands.json", planned_commands)
+        measurement_intent = (
+            "controlled_study"
+            if controlled_study is not None
+            else "mechanism" if args.treatment_mode == "deterministic" else "exploratory_ux"
+        )
+        controlled_binding = (
+            {
+                "protocol_id": controlled_study["protocol"]["protocol_id"],
+                "protocol_digest": controlled_study["protocol"]["protocol_digest"],
+                "suite_id": controlled_study["suite"]["suite_id"],
+                "suite_digest": controlled_study["suite"]["suite_digest"],
+                "scenario_id": controlled_study["manifest"]["scenario_id"],
+                "fixture_sha256": controlled_study["manifest"]["fixture_digest"],
+            }
+            if controlled_study is not None
+            else None
+        )
         if args.dry_run:
             report = {
                 "experiment": {
                     "id": run_id,
                     "dry_run": True,
                     "treatment_mode": args.treatment_mode,
-                    "measurement_intent": (
-                        "mechanism" if args.treatment_mode == "deterministic" else "exploratory_ux"
-                    ),
+                    "measurement_intent": measurement_intent,
+                    "controlled_study": controlled_binding,
+                    "preflight": preflight,
                     "created_at": _utc_now(),
                     "appservice_commit": commit,
                     "worktree_a": str(worktree_a),
@@ -2970,9 +3556,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "rendered_prompt_bytes": len(prompt.encode("utf-8")),
                     "model_guidance_inventory": guidance_inventory,
                     "shared_health_checker": shared_checker,
+                    "projection_profile": args.projection_profile,
+                    "runtime_trace": {
+                        "handler": "acceptance/codex_appservice_ab/trace_handler.py",
+                        "required": True,
+                        "max_events_per_arm": args.trace_max_events,
+                        "max_bytes_per_arm": args.trace_max_bytes,
+                        "exact_redaction_count": len(trace_redactions),
+                    },
+                    "native_truncation": {
+                        "tool_output_token_limit_configured": args.tool_output_token_limit,
+                        "context_side_truncation_observed": False,
+                        "status": (
+                            "pinned_configuration_pending_runtime_confirmation"
+                            if args.tool_output_token_limit is not None
+                            else "not_configured"
+                        ),
+                    },
                     "expected_facts_sha256": (
                         _sha256_file(expected_facts_path) if expected_facts_path else None
                     ),
+                    "next_characterization": plan_payload(),
                 }
             }
         else:
@@ -2987,16 +3591,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "included_untracked_files": untracked_counts,
                     "model_requested": args.model,
                     "treatment_mode": args.treatment_mode,
-                    "measurement_intent": (
-                        "mechanism" if args.treatment_mode == "deterministic" else "exploratory_ux"
-                    ),
+                    "measurement_intent": measurement_intent,
+                    "controlled_study": controlled_binding,
                     "codex_version": _codex_version(args.codex_bin),
                     "permissions": {
                         "profile": PERMISSION_PROFILE_NAME,
                         "approval_policy": "never",
                         "sandbox_override": None,
                         "additional_write_roots": {"A": ["outctl_spool"], "B": []},
-                        "network": "one verified Kubernetes API host per run",
+                        "network": (
+                            "disabled for digest-bound replay"
+                            if controlled_study is not None
+                            else "one verified Kubernetes API host per run"
+                        ),
                     },
                     "preflight": preflight,
                     "pinned_tooling": helper_provenance,
@@ -3015,6 +3622,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "codex_output_schema_sha256": _sha256_file(output_schema_path),
                     "policy_ref": args.policy_ref,
                     "policy_digest": args.policy_digest,
+                    "projection_profile": args.projection_profile,
+                    "runtime_trace": {
+                        "handler": "acceptance/codex_appservice_ab/trace_handler.py",
+                        "required": True,
+                        "max_events_per_arm": args.trace_max_events,
+                        "max_bytes_per_arm": args.trace_max_bytes,
+                        "exact_redaction_count": len(trace_redactions),
+                    },
+                    "native_truncation": {
+                        "tool_output_token_limit_configured": args.tool_output_token_limit,
+                        "context_side_truncation_observed": False,
+                        "status": "pinned_configuration_pending_runtime_confirmation",
+                    },
                     "shared_health_checker": shared_checker,
                     "expected_facts_sha256": (
                         _sha256_file(expected_facts_path) if expected_facts_path else None
@@ -3022,6 +3642,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "baseline_native_outctl_guidance": contamination,
                     "baseline_hooks_json_sha256": baseline_hooks_sha256,
                     "model_guidance_inventory": guidance_inventory,
+                    "next_characterization": plan_payload(),
                     "detached_worktree_hooks_mode": (
                         "experiment-only hooks.json in both arms; any baseline hook file is "
                         "recorded by digest and not activated"
@@ -3045,14 +3666,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "experiment-local hook sources; baseline project hooks are not loaded"
                     ),
                     "telemetry_contract": (
-                        "final turn.completed usage; command_execution aggregated_output bytes; "
-                        "PreToolUse model/compliance telemetry; raw-free outctl manifest "
-                        "byte totals"
+                        "turn.completed model invocation boundaries; cumulative usage; "
+                        "command_execution aggregated_output bytes; PreToolUse model/compliance "
+                        "telemetry; raw-free outctl manifest byte totals; native post-truncation "
+                        "history remains unobserved"
                     ),
                     "memory_proxy_note": (
                         "Codex exposes token processing and cache categories, not literal resident "
                         "session-memory bytes. Total input, uncached input, cache hit ratio, and "
-                        "model-visible command-output bytes are the experiment proxies."
+                        "command_event_aggregated_output_bytes are event-stream proxies, not "
+                        "post-truncation model-visible context bytes."
                     ),
                     "cache_interpretation_note": (
                         "Absolute cached tokens are not a lower-is-better metric. Prefer total "

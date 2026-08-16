@@ -1,44 +1,52 @@
-# Vuoro bounded command-output tooling starter
+# outctl discovery artifact
 
 **Working component name:** `outctl`  
-**Status:** implementation-ready repository scaffold  
-**Date:** 2026-08-03
+**Status:** **KILLED — frozen discovery artifact; maintenance-only**
+**Decision:** 2026-08-16
 
-This package defines a small supplemental tool for the Vuoro ecosystem: capture complete command output outside the model context, return a bounded deterministic projection to the harness, and allow later slices to be retrieved without rerunning the command.
+This repository is no longer an active Vuoro product. It preserves the
+implementation, experiments, and acceptance material that tested bounded
+command-output capture so the work can be reproduced or compared later. Do not
+start new feature work here.
 
-The design is deliberately narrow. `outctl` is not a scheduler, queue, workflow engine, shell, model router, knowledge store, or alternate Vuoro control plane.
+The replacement hypothesis is documented in
+[`docs/DISCOVERY_KILL_2026-08-16.md`](docs/DISCOVERY_KILL_2026-08-16.md): use a
+thin harness capture adapter, standard OpenTelemetry, Langfuse or Phoenix,
+and object storage for large pre-discard tool results. Native harnesses own
+execution and reduction. Existing observability infrastructure owns traces,
+sessions, search, UI, retention, and most retrieval.
+
+`outctl` is not a scheduler, queue, workflow engine, shell, model router,
+knowledge store, observability backend, or alternate Vuoro control plane.
 
 ## Recommended reading order
 
-1. [`docs/DESIGN.md`](docs/DESIGN.md) — normative architecture and behavior.
-2. [`docs/ADR-0001-HARNESS-BOUNDARY.md`](docs/ADR-0001-HARNESS-BOUNDARY.md) — why the wrapper belongs at the harness/runner boundary.
-3. [`IMPLEMENTATION_HANDOFF.md`](IMPLEMENTATION_HANDOFF.md) — first delivery slices and stop conditions.
-4. [`acceptance/SCENARIOS.md`](acceptance/SCENARIOS.md) — black-box acceptance suite.
-5. [`config/output-policies.example.yaml`](config/output-policies.example.yaml) and [`schemas/`](schemas/) — starter contracts.
-6. [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) and [`docs/ROLLOUT.md`](docs/ROLLOUT.md).
-7. [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) and
-   [`docs/DEVBOX.md`](docs/DEVBOX.md) — autonomous pass sequence and devbox setup.
-8. [`docs/ENABLEMENT_PLAN.md`](docs/ENABLEMENT_PLAN.md) — current ordered
-   shadow, study, enforcement, integration, and rollback gates.
-9. [`docs/CONTRACT_INTEGRATION.md`](docs/CONTRACT_INTEGRATION.md) — shared
-   contracts and cross-repository attachment mappings.
-10. [`docs/architecture/README.md`](docs/architecture/README.md) and
-    [`docs/MIGRATION_ROADMAP.md`](docs/MIGRATION_ROADMAP.md) — accepted hybrid
-    architecture and W0-W8 migration boundary.
+1. [`docs/DISCOVERY_KILL_2026-08-16.md`](docs/DISCOVERY_KILL_2026-08-16.md) —
+   decision record, evidence, and the one remaining triage hypothesis.
+2. [`docs/DESIGN.md`](docs/DESIGN.md) and
+   [`acceptance/SCENARIOS.md`](acceptance/SCENARIOS.md) — normative Python v1
+   compatibility baseline retained for historical context.
+3. [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) and the accepted ADRs under
+   [`docs/adr/`](docs/adr/).
+4. [`docs/ENABLEMENT_PLAN.md`](docs/ENABLEMENT_PLAN.md) and
+   [`docs/CONTRACT_INTEGRATION.md`](docs/CONTRACT_INTEGRATION.md) — existing
+   pilot and ecosystem integration records, now subordinate to the kill
+   decision.
 
-## Core decision
+## Historical architecture
 
-A command runs under the existing runner or harness. `outctl` observes its stdout/stderr, stores a recoverable capture, creates one or more bounded projections, and returns a result envelope. The command itself remains owned by the existing execution layer.
+The implementation tested a native runner or model harness passing completed
+stdout/stderr artifacts to `outctl`, which stored a verified capture and wrote
+a raw-free observation record. This remains available only as a historical
+control.
 
 ```text
-sprintctl -> actionq -> runner/harness -> outctl capture/projection -> command
-                    |                         |
-                    |                         +-> host-local raw capture / optional replica
-                    +-> auditctl receipts <---+
-
-Vuoro: capability discovery, orchestration view, opaque references
-kctl: curated policies and decisions, never raw command logs
+native harness -> thin capture adapter -> OTLP -> Langfuse/Phoenix
+                                      \-> MinIO/S3 immutable artifact
 ```
+
+The diagram above is the replacement direction, not an implementation claim
+made by this repository.
 
 ## Package contents
 
@@ -47,6 +55,7 @@ kctl: curated policies and decisions, never raw command logs
 - `schemas/output-policy-set.schema.json`: policy-bundle and profile contract.
 - `schemas/command-result-envelope.schema.json`: caller-facing result envelope.
 - `schemas/capture-manifest.schema.json`: immutable capture manifest.
+- `schemas/observation.schema.json`: raw-free durable observation contract.
 - `schemas/audit-event.schema.json`: audit event starter schema.
 - `config/output-policies.example.yaml`: default and command-class policies.
 - `examples/execution-envelope-fragment.yaml`: actionq/runner binding.
@@ -55,18 +64,32 @@ kctl: curated policies and decisions, never raw command logs
 - `acceptance/SCENARIOS.md`: conformance cases.
 - `IMPLEMENTATION_HANDOFF.md`: implementation packet.
 
-## First implementation target
+## Frozen scope
 
-Implement Linux, non-PTY, local capture first. Do not begin with a daemon, cluster service, LLM summarizer, or remote execution service. The first useful slice is a library plus CLI that:
+Do not extend `outctl` as a compression, execution, orchestration, or
+observability product. The commands below are retained as compatibility and
+discovery controls only; they are not the recommended replacement stack.
 
-- executes an argv vector without an implicit shell;
-- drains stdout and stderr concurrently with bounded memory;
-- writes raw streams and an interleave index atomically;
-- returns a generic head/error/tail projection under a hard budget;
-- provides `inspect`, `slice`, `search`, and `verify` without rerunning the command;
-- records explicit truncation, capture failure, hashes, host, path, and policy digest.
+The first sidecar commands are:
 
-That slice is enough to validate the premise against real Vuoro sessions before promoting it into every harness.
+```bash
+outctl import --spool-root .outctl \
+  --stdout result.stdout --stderr result.stderr \
+  --harness codex --session SESSION --tool-call TOOL_CALL \
+  --command-sha256 COMMAND_SHA256 --duration-ms 417
+
+outctl show --spool-root .outctl OBSERVATION_ID
+outctl stdout --spool-root .outctl OBSERVATION_ID
+outctl grep --spool-root .outctl OBSERVATION_ID OOMKilled
+outctl diff --spool-root .outctl OBSERVATION_A OBSERVATION_B
+outctl promote --spool-root .outctl OBSERVATION_ID --reason "supports diagnosis"
+```
+
+`outctl ingest` binds the same raw-free metadata to a capture produced by the
+legacy adapter. Observation IDs are content-addressed; raw streams stay in
+the verified capture store and are never copied into the observation JSON.
+This functionality is frozen and may be removed later if the bounded
+OTel/Langfuse/Phoenix spike makes it unnecessary.
 
 ## Development
 
@@ -90,21 +113,21 @@ bounded retrieval commands, and raw-free pilot-report validation. See
 [`docs/WORKSTATION_PILOT_RUNBOOK.md`](docs/WORKSTATION_PILOT_RUNBOOK.md) for
 the Codex/Claude appservice pilot and review procedure.
 
-The native W6 command path remains generic and starts no Python. Stdin is null
-unless `--stdin inherit` is selected; reviewed explicit-shell and opaque
-process-memory stdin references are available only through the policy-bound
-native library. Python extensions use installed `outctl.extensions.v1` entry
-points through one explicit Linux isolation path and may return only bounded
-commissioning facts or projection candidates. See
-[`docs/W6_HANDOFF.md`](docs/W6_HANDOFF.md) for the exact boundary and gates.
+## Generalized scenario launcher
 
-W8 adds an unpublished hybrid release bundle and fail-closed staged selector.
-The bundle pins the Python wheel, a complete dependency wheelhouse per host
-class, native executables, and canonical native capabilities. Local rollout is
-ordered through clean-install, conformance, rollback, shadow, and canary gates;
-Rust can become the default only with a separate owner authorization after all
-earlier gates pass. See [`docs/W8_HANDOFF.md`](docs/W8_HANDOFF.md). No package
-publication or deployment is performed by the repository tooling.
+New controlled runs use `study-protocol/v3`, `scenario-suite/v2`, and a sealed
+`arm-matrix/v1`. `outctl.harness.Launcher` plans every arm, scenario, and
+replicate before execution, rotates matched start groups from the protocol
+seed, and enforces the protocol's optional session, concurrency, and credit
+limits. A null limit is intentional for exploratory runs; the estimate is
+still emitted in the plan.
+
+Scenario resolution is provider-based through
+`outctl.scenarios.ScenarioHandler`. The first CI provider is
+`ProcessFixtureProvider`; `KubernetesReplayProvider` keeps the existing
+digest-bound replay available through the same interface. Historical v1/v2
+study artifacts remain readable records and are not accepted as inputs to the
+v3 analysis compiler.
 
 ## License status
 

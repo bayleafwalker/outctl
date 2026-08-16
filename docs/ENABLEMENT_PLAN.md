@@ -1,4 +1,9 @@
-# Canonical enablement plan
+# Historical enablement plan — frozen
+
+> **Retired 2026-08-16.** This plan is preserved for discovery and historical
+> reproducibility. Do not advance its stages or run a new outctl efficacy
+> study. See [`DISCOVERY_KILL_2026-08-16.md`](DISCOVERY_KILL_2026-08-16.md) for
+> the active decision and the replacement-first OTel/Langfuse triage.
 
 This document is the current operational sequence for enabling `outctl`.
 `docs/IMPLEMENTATION_PLAN.md` remains the historical Phase 1 build order;
@@ -69,7 +74,9 @@ runs. Start with six scenario classes and three repetitions (18 matched pairs),
 then revise final sample size only from a separate pilot variance estimate.
 
 Co-primary outcomes are diagnostic quality non-inferiority, zero additional
-critical/high misses, model-visible command output, and uncached-read input.
+critical/high misses, command-event aggregated output, and uncached-read input.
+Command-event bytes must not be described as post-truncation model-visible
+context without runtime telemetry that observes the harness history boundary.
 All protocol-valid pairs stay in the dataset when diagnoses disagree. Report
 each pair and paired effects first; pooled totals are secondary.
 

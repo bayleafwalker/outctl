@@ -1,5 +1,10 @@
 # Black-box acceptance scenarios
 
+> **Archived 2026-08-16.** These scenarios are preserved for historical
+> regression and discovery only. They are not an authorization to extend the
+> outctl product or run a new efficacy study. See
+> [`../docs/DISCOVERY_KILL_2026-08-16.md`](../docs/DISCOVERY_KILL_2026-08-16.md).
+
 These scenarios are normative for Phase 1 unless marked later-phase.
 
 ## A. Correctness and completeness

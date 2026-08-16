@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import socket
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,15 @@ from outctl.enforcement import (
     EnforcementError,
     compile_enforcement_observation,
     select_command_mode,
+)
+from outctl.observations import (
+    ObservationError,
+    compare_observations,
+    import_observation,
+    ingest_observation,
+    observation_capture_id,
+    observation_summary,
+    record_observation_action,
 )
 from outctl.pilot import PilotReportError, validate_pilot_report
 from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
@@ -86,6 +96,64 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout", type=float)
     run.add_argument("--cwd", type=Path)
     run.add_argument("argv", nargs=argparse.REMAINDER, help="command after --")
+
+    ingest = commands.add_parser(
+        "ingest", help="bind an existing capture to a durable raw-free observation"
+    )
+    _spool_argument(ingest)
+    ingest.add_argument("capture_id")
+    ingest.add_argument(
+        "--metadata-json",
+        type=Path,
+        required=True,
+        help="JSON object containing source, invocation, and result metadata; use - for stdin",
+    )
+
+    external_import = commands.add_parser(
+        "import", help="import completed stdout/stderr artifacts as an observation"
+    )
+    _spool_argument(external_import)
+    external_import.add_argument("--stdout", type=Path, required=True)
+    external_import.add_argument("--stderr", type=Path)
+    external_import.add_argument("--harness", required=True)
+    external_import.add_argument("--session", required=True)
+    external_import.add_argument("--tool-call", required=True)
+    external_import.add_argument("--tool", default="exec_command")
+    external_import.add_argument("--command-sha256", required=True)
+    external_import.add_argument("--exit-code", type=int, default=0)
+    external_import.add_argument("--duration-ms", type=int, required=True)
+
+    show = commands.add_parser("show", help="show durable observation metadata")
+    _spool_argument(show)
+    show.add_argument("observation_id")
+
+    for stream in ("stdout", "stderr"):
+        stream_command = commands.add_parser(
+            stream, help=f"retrieve a bounded {stream} projection for an observation"
+        )
+        _spool_argument(stream_command)
+        stream_command.add_argument("observation_id")
+        stream_command.add_argument("--max-bytes", type=int, default=_DEFAULT_MAX_BYTES)
+
+    grep = commands.add_parser("grep", help="search a durable observation without rerunning it")
+    _spool_argument(grep)
+    grep.add_argument("observation_id")
+    grep.add_argument("pattern")
+    grep.add_argument("--stream", choices=("stdout", "stderr"), default="stdout")
+    grep.add_argument("--regex", action="store_true")
+    grep.add_argument("--context-bytes", type=int, default=80)
+    grep.add_argument("--max-matches", type=int, default=20)
+
+    diff = commands.add_parser("diff", help="compare two observations by stable artifacts")
+    _spool_argument(diff)
+    diff.add_argument("left_observation_id")
+    diff.add_argument("right_observation_id")
+
+    for action in ("pin", "promote"):
+        action_command = commands.add_parser(action, help=f"{action} an observation for retention")
+        _spool_argument(action_command)
+        action_command.add_argument("observation_id")
+        action_command.add_argument("--reason")
 
     inspect = commands.add_parser("inspect", help="inspect capture metadata")
     _spool_argument(inspect)
@@ -248,6 +316,50 @@ def _metadata_text(value: object) -> str | None:
 
 def _status_code(status: RetrievalStatus) -> int:
     return 0 if status is RetrievalStatus.AVAILABLE else 1
+
+
+def _metadata_json(path: Path) -> dict[str, Any]:
+    try:
+        text = sys.stdin.read() if str(path) == "-" else path.read_text(encoding="utf-8")
+        value = json.loads(text)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ObservationError(f"metadata JSON is unreadable: {error}") from error
+    if not isinstance(value, dict):
+        raise ObservationError("metadata JSON root must be an object")
+    return value
+
+
+def _import_metadata(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "source": {
+            "harness": args.harness,
+            "session": args.session,
+            "tool_call": args.tool_call,
+        },
+        "invocation": {"tool": args.tool, "command_sha256": args.command_sha256},
+        "result": {"exit_code": args.exit_code, "duration_ms": args.duration_ms},
+    }
+
+
+def _observation_stream_payload(
+    args: argparse.Namespace, stream: str
+) -> tuple[dict[str, object], int]:
+    if args.max_bytes <= 0:
+        raise ObservationError("--max-bytes must be positive")
+    capture_id = observation_capture_id(args.spool_root, args.observation_id)
+    result = slice_stream(
+        args.spool_root,
+        capture_id,
+        stream,
+        0,
+        args.max_bytes,
+        max_bytes=args.max_bytes,
+    )
+    payload = _slice_payload(result, args.max_bytes)
+    payload["observation_id"] = args.observation_id
+    if result.status is RetrievalStatus.AVAILABLE:
+        _record_retrieval(args.spool_root, capture_id, f"observation-{stream}")
+    return payload, _status_code(result.status)
 
 
 def _safe_projection(data: bytes, max_bytes: int) -> ProjectionResult:
@@ -449,6 +561,73 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _record_command(args.spool_root, receipt["capture_id"], Path(argv[0]).name)
             _json(payload)
             return exit_code
+        if args.command == "ingest":
+            record = ingest_observation(
+                args.spool_root,
+                args.capture_id,
+                _metadata_json(args.metadata_json),
+            )
+            _json(record)
+            return 0
+        if args.command == "import":
+            record = import_observation(
+                args.spool_root,
+                args.stdout,
+                args.stderr,
+                _import_metadata(args),
+                exit_code=args.exit_code,
+            )
+            _json(record)
+            return 0
+        if args.command == "show":
+            value = observation_summary(args.spool_root, args.observation_id)
+            _record_retrieval(
+                args.spool_root,
+                str(value["capture_id"]),
+                "observation-show",
+            )
+            _json(value)
+            return 0
+        if args.command in {"stdout", "stderr"}:
+            payload, exit_code = _observation_stream_payload(args, args.command)
+            _json(payload)
+            return exit_code
+        if args.command == "grep":
+            capture_id = observation_capture_id(args.spool_root, args.observation_id)
+            searched = search_stream(
+                args.spool_root,
+                capture_id,
+                args.stream,
+                args.pattern,
+                regex=args.regex,
+                context_bytes=args.context_bytes,
+                max_matches=args.max_matches,
+            )
+            payload = _search_payload(searched)
+            payload["observation_id"] = args.observation_id
+            if searched.status is RetrievalStatus.AVAILABLE:
+                _record_retrieval(args.spool_root, capture_id, "observation-grep")
+            _json(payload)
+            return _status_code(searched.status)
+        if args.command == "diff":
+            _json(
+                compare_observations(
+                    args.spool_root,
+                    args.left_observation_id,
+                    args.right_observation_id,
+                )
+            )
+            return 0
+        if args.command in {"pin", "promote"}:
+            _json(
+                record_observation_action(
+                    args.spool_root,
+                    args.observation_id,
+                    args.command,
+                    args.reason,
+                )
+            )
+            return 0
         if args.command == "inspect":
             inspection = inspect_capture(args.spool_root, args.capture_id)
             if inspection.status is RetrievalStatus.AVAILABLE:
@@ -635,6 +814,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise AssertionError(f"unknown policy command {args.policy_command!r}")
     except (
         EnforcementError,
+        ObservationError,
         OSError,
         PilotReportError,
         StudyCompileError,

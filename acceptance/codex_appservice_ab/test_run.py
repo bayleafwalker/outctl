@@ -5,8 +5,11 @@ import os
 import subprocess
 import tempfile
 import textwrap
+import threading
 import unittest
 import zipfile
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -15,12 +18,33 @@ import kubectl_guard as treatment_guard
 import kubectl_readonly_guard as baseline_guard
 import outctl_kubectl_router
 import run
+import semantic_pods
+from four_arm_plan import FOUR_ARM_MATRIX, plan_payload, validate_plan
+from interaction_classifier import classify_trace, evaluate_labeled_traces
 from jsonschema import Draft202012Validator
 from kubectl_guard import classify_kubectl
 from kubectl_readonly_guard import classify_kubectl as classify_readonly_kubectl
 
 
 class GuardTests(unittest.TestCase):
+    def test_router_serializes_commands_within_one_spool(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            first = outctl_kubectl_router._acquire_spool_lock(raw)
+            acquired = threading.Event()
+
+            def acquire_second() -> None:
+                second = outctl_kubectl_router._acquire_spool_lock(raw)
+                acquired.set()
+                second.close()
+
+            thread = threading.Thread(target=acquire_second)
+            thread.start()
+            self.assertFalse(acquired.wait(0.05))
+            first.close()
+            self.assertTrue(acquired.wait(1))
+            thread.join()
+            self.assertEqual((Path(raw) / ".router.lock").stat().st_mode & 0o777, 0o600)
+
     def test_classifies_direct_and_wrapped(self) -> None:
         direct = classify_kubectl(
             "direnv exec /projects/dev/appservice kubectl get deployment,pod -A -o wide"
@@ -75,9 +99,7 @@ class GuardTests(unittest.TestCase):
             self.assertIsNone(guard._identity_denial("kubectl get pods", "/pin/kubectl"))
 
         self.assertIsNotNone(
-            baseline_guard._identity_denial(
-                "direnv exec . kubectl get pods -A", "/pin/kubectl"
-            )
+            baseline_guard._identity_denial("direnv exec . kubectl get pods -A", "/pin/kubectl")
         )
 
     def test_global_flags_before_verb(self) -> None:
@@ -127,9 +149,106 @@ class GuardTests(unittest.TestCase):
         self.assertNotIn(secret, text)
         self.assertIn("[REDACTED]", text)
 
+    def test_semantic_pod_adapter_requires_exact_unfiltered_population(self) -> None:
+        self.assertTrue(
+            semantic_pods.is_exact_unfiltered_inventory(
+                ["kubectl", "get", "pods", "-A", "-o", "wide"]
+            )
+        )
+        self.assertFalse(
+            semantic_pods.is_exact_unfiltered_inventory(
+                [
+                    "kubectl",
+                    "get",
+                    "pods",
+                    "-A",
+                    "--field-selector=status.phase=Running",
+                    "-o",
+                    "wide",
+                ]
+            )
+        )
+
+    def test_semantic_pod_adapter_scopes_zeroes_to_complete_population(self) -> None:
+        projection = semantic_pods.project_pod_inventory(
+            ["kubectl", "get", "pods", "-A", "-o", "wide"],
+            "NAMESPACE NAME READY STATUS RESTARTS AGE\ngatus api 1/1 Running 0 2d\n",
+        )
+        value = json.loads(projection)
+        self.assertEqual(value["coverage"]["source_rows_scanned"], "complete")
+        self.assertEqual(value["selection_scope"]["field_selector"], None)
+        self.assertEqual(value["anomaly_count"], 0)
+        self.assertEqual(value["rows_scanned"], 1)
+
+    def test_semantic_pod_adapter_surfaces_readiness_and_restarts(self) -> None:
+        projection = semantic_pods.project_pod_inventory(
+            ["kubectl", "get", "pods", "-A", "-o", "wide"],
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "metadata": {"namespace": "apps", "name": "api"},
+                            "status": {
+                                "phase": "Running",
+                                "containerStatuses": [{"ready": False, "restartCount": 2}],
+                            },
+                        }
+                    ]
+                }
+            ),
+        )
+        anomaly = json.loads(projection)["anomalies"][0]
+        self.assertEqual(anomaly["restart_count"], 2)
+        self.assertFalse(anomaly["ready"])
+
+    def test_four_arm_matrix_is_explicit_and_held_constant(self) -> None:
+        validate_plan()
+        self.assertEqual([arm.arm_id for arm in FOUR_ARM_MATRIX], ["A", "B", "C", "D"])
+        payload = plan_payload()
+        self.assertEqual(payload["primary_contrasts"]["semantic_projection"], "D_vs_C")
+        self.assertIn("command text", payload["held_constant"])
+
+    def test_interaction_classifier_is_conservative_and_evaluable(self) -> None:
+        result = classify_trace(
+            [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "kubectl get pods -A",
+                    },
+                },
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "kubectl get pods -A",
+                    },
+                },
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "outctl-health tail capture-1",
+                    },
+                },
+            ]
+        )
+        self.assertEqual(result["records"][0]["cause"], "unknown")
+        self.assertEqual(result["records"][1]["cause"], "duplicate_command")
+        self.assertEqual(result["records"][2]["cause"], "retrieval")
+        evaluation = evaluate_labeled_traces(
+            result["records"], ["unknown", "duplicate_command", "retrieval"]
+        )
+        self.assertEqual(evaluation["status"], "validated_against_manual_labels")
+        self.assertEqual(evaluation["sample_count"], 3)
+
     def test_router_rewrites_logical_kubectl_to_pinned_direct_argv(self) -> None:
         prefix = ["/usr/bin/kubectl", "--kubeconfig", "/scoped", "--context", "scoped"]
-        with mock.patch.object(outctl_kubectl_router, "_run", return_value=0) as execute:
+        with (
+            tempfile.TemporaryDirectory() as spool,
+            mock.patch.object(outctl_kubectl_router, "_run", return_value=0) as execute,
+        ):
             result = outctl_kubectl_router.main(
                 [
                     "run",
@@ -138,7 +257,7 @@ class GuardTests(unittest.TestCase):
                     "--kubectl-command-json",
                     json.dumps(prefix),
                     "--spool-root",
-                    "/spool",
+                    spool,
                     "--policy-ref",
                     "health",
                     "--policy-digest",
@@ -153,6 +272,54 @@ class GuardTests(unittest.TestCase):
         routed = execute.call_args.args[0]
         separator = routed.index("--")
         self.assertEqual(routed[separator + 1 :], [*prefix, "get", "pods"])
+
+    def test_router_semantic_profile_records_scoped_provenance(self) -> None:
+        envelope = {
+            "receipt": {"capture_id": "capture-1"},
+            "command": {"exit_code": 0},
+            "envelope": {
+                "projection": {
+                    "inline_text": "NAMESPACE NAME READY STATUS RESTARTS AGE\n"
+                    "gatus api 1/1 Running 0 2d\n"
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as raw:
+            output = StringIO()
+            completed = subprocess.CompletedProcess(["fake"], 0, json.dumps(envelope).encode(), b"")
+            with (
+                mock.patch.object(outctl_kubectl_router, "_run", return_value=completed),
+                redirect_stdout(output),
+            ):
+                result = outctl_kubectl_router.main(
+                    [
+                        "run",
+                        "--outctl-command-json",
+                        json.dumps(["/opt/outctl"]),
+                        "--kubectl-command-json",
+                        json.dumps(["/usr/bin/kubectl"]),
+                        "--spool-root",
+                        raw,
+                        "--policy-ref",
+                        "health",
+                        "--policy-digest",
+                        "sha256:" + "0" * 64,
+                        "--projection-profile",
+                        "semantic-pods",
+                        "--",
+                        "kubectl",
+                        "get",
+                        "pods",
+                        "-A",
+                        "-o",
+                        "wide",
+                    ]
+                )
+            self.assertEqual(result, 0)
+            self.assertIn("semantic_projection", output.getvalue())
+            event = json.loads((Path(raw) / "router-events.jsonl").read_text(encoding="utf-8"))
+            self.assertTrue(event["semantic_applied"])
+            self.assertEqual(event["operation"], "projection")
 
 
 class UsageTests(unittest.TestCase):
@@ -185,14 +352,127 @@ class UsageTests(unittest.TestCase):
         self.assertFalse(costs["codex_credits"]["exact"])
         self.assertLess(costs["codex_credits"]["minimum"], costs["codex_credits"]["maximum"])
 
+    def test_model_invocation_metrics_use_turn_boundaries_not_command_timing(self) -> None:
+        metrics = run._model_invocation_metrics(
+            [
+                {"type": "item.completed", "item": {"type": "command_execution"}},
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 12,
+                        "cached_input_tokens": 4,
+                        "output_tokens": 3,
+                    },
+                },
+                {
+                    "type": "turn.completed",
+                    "usage": {
+                        "input_tokens": 20,
+                        "cached_input_tokens": 8,
+                        "output_tokens": 5,
+                    },
+                },
+            ]
+        )
+        self.assertEqual(metrics["sampling_completion_count"], 2)
+        self.assertFalse(metrics["timing_round_inference_used"])
+        self.assertIn("history_bytes_after_tool_truncation", metrics["unobserved_fields"])
+        self.assertEqual(metrics["command_associations"][0]["turn_sequence"], 1)
+        self.assertEqual(metrics["records"][0]["tool_calls_emitted"], 1)
+
+    def test_command_event_output_metric_is_not_called_model_visible(self) -> None:
+        metrics = run._command_metrics(
+            [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "kubectl get pods -A",
+                        "aggregated_output": "abc",
+                        "status": "completed",
+                    },
+                }
+            ]
+        )
+        self.assertEqual(metrics["command_event_aggregated_output_bytes"], 3)
+        self.assertNotIn("model_visible_command_output_bytes", metrics)
+
 
 class HarnessValidationTests(unittest.TestCase):
+    def test_controlled_completion_detects_missing_corpus_command(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events = Path(raw) / "events.jsonl"
+            rows = [{"type": "thread.started", "thread_id": "thread-1"}]
+            for index in range(5):
+                rows.append(
+                    {
+                        "type": "item.completed",
+                        "item": {
+                            "type": "command_execution",
+                            "status": "completed",
+                            "command": f"kubectl get pods -A -o wide # {index}",
+                            "aggregated_output": "ok",
+                        },
+                    }
+                )
+            events.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            self.assertTrue(run._controlled_completion_needed(events, arm="B"))
+            self.assertEqual(run._thread_id(events), "thread-1")
+
+    def test_controlled_codex_command_is_resumable(self) -> None:
+        command = run._build_codex_command(
+            codex_bin="codex",
+            model="model",
+            worktree=Path("/tmp/worktree"),
+            schema=Path("/tmp/schema.json"),
+            final_path=Path("/tmp/final.json"),
+            prompt="prompt",
+            ephemeral=False,
+        )
+        self.assertNotIn("--ephemeral", command)
+
+    def test_controlled_completion_preserves_process_result_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            events = root / "events.jsonl"
+            events.write_text(
+                json.dumps({"type": "thread.started", "thread_id": "thread-1"}) + "\n"
+            )
+            stderr = root / "stderr.log"
+            stderr.touch()
+            original = run.ProcessResult(
+                arm="A",
+                return_code=0,
+                timed_out=False,
+                duration_ms=10,
+                launched_monotonic_ns=1,
+                events_path=events,
+                stderr_path=stderr,
+                final_path=root / "final.json",
+                hook_log_path=root / "hooks.jsonl",
+                outctl_spool_root=root / "spool",
+            )
+            process = mock.Mock()
+            process.wait.return_value = 0
+            with mock.patch.object(subprocess, "Popen", return_value=process):
+                resumed = run._resume_controlled_completion(
+                    original,
+                    codex_bin="codex",
+                    model="model",
+                    schema=root / "schema.json",
+                    env={},
+                    timeout_seconds=1,
+                )
+            self.assertEqual(resumed.outctl_spool_root, original.outctl_spool_root)
+            self.assertGreaterEqual(resumed.duration_ms, original.duration_ms)
+
     def test_analyst_bundle_is_deterministic_and_excludes_bytecode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "acceptance/codex_appservice_ab/__pycache__").mkdir(parents=True)
             (root / "acceptance/codex_appservice_ab/run.py").write_text("pass\n")
             (root / "acceptance/codex_appservice_ab/__pycache__/run.pyc").write_bytes(b"bytecode")
+            (root / "acceptance/codex_appservice_ab/run.py").chmod(0o755)
             first, second = root / "first.zip", root / "second.zip"
             inputs = [Path("acceptance/codex_appservice_ab")]
             build_analyst_bundle.build(root, first, "analyst-safe", inputs)
@@ -204,8 +484,11 @@ class HarnessValidationTests(unittest.TestCase):
                     archive.namelist(),
                 )
                 manifest = json.loads(archive.read("bundle-manifest.json"))
+                run_info = archive.getinfo("acceptance/codex_appservice_ab/run.py")
             self.assertEqual(manifest["package_class"], "analyst-safe")
             self.assertEqual(len(manifest["files"]), 1)
+            self.assertEqual(manifest["files"][0]["mode"], "0755")
+            self.assertEqual((run_info.external_attr >> 16) & 0o777, 0o755)
 
     @staticmethod
     def _identity(value: str = "same") -> dict[str, object]:
@@ -235,16 +518,12 @@ class HarnessValidationTests(unittest.TestCase):
             "queries": [
                 {
                     "pattern": "FailedMount",
-                    "matches": [
-                        {"projection": {"text": "FailedMount evidence"}}
-                    ],
+                    "matches": [{"projection": {"text": "FailedMount evidence"}}],
                 },
                 {"pattern": "CrashLoopBackOff", "matches": []},
             ],
         }
-        capture_id, text = outctl_kubectl_router._safe_search_many(
-            json.dumps(payload).encode()
-        )
+        capture_id, text = outctl_kubectl_router._safe_search_many(json.dumps(payload).encode())
         self.assertEqual(capture_id, "capture-1")
         self.assertIn("FailedMount evidence", text)
         self.assertIn("no bounded matches", text)
@@ -464,6 +743,7 @@ class HarnessValidationTests(unittest.TestCase):
                 kubernetes_api_host="192.0.2.10",
                 auth_source=None,
                 reasoning_effort="high",
+                tool_output_token_limit=12000,
             )
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn('web_search = "disabled"', config)
@@ -475,6 +755,7 @@ class HarnessValidationTests(unittest.TestCase):
             self.assertIn("apps = false", config)
             self.assertIn("plugins = false", config)
             self.assertIn('default_permissions = "outctl-ab-readonly"', config)
+            self.assertIn("tool_output_token_limit = 12000", config)
             self.assertIn('extends = ":read-only"', config)
             self.assertIn('"192.0.2.10" = "allow"', config)
             self.assertNotIn("sandbox_mode", config)
@@ -580,6 +861,67 @@ class HarnessValidationTests(unittest.TestCase):
             self.assertTrue(metrics["schema_valid_basic"])
             self.assertFalse(metrics["schema_valid"])
             self.assertTrue(any("schema validation failed" in item for item in warnings))
+
+    def test_final_evidence_refs_are_bound_to_outctl_spool(self) -> None:
+        schema = json.loads(
+            Path(run.__file__).with_name("health-result.schema.json").read_text(encoding="utf-8")
+        )
+        validator = Draft202012Validator(schema)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            spool = root / "spool"
+            capture = spool / "captures" / "capture-1"
+            capture.mkdir(parents=True)
+            (capture / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "capture_status": "COMPLETE",
+                        "streams": {"stdout": {"bytes": 1}, "stderr": {"bytes": 0}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (spool / "router-events.jsonl").write_text(
+                json.dumps({"capture_id": "capture-1", "operation": "projection"}) + "\n",
+                encoding="utf-8",
+            )
+            final = root / "final.json"
+            final.write_text(
+                json.dumps(
+                    {
+                        "overall_status": "healthy",
+                        "summary": "ok",
+                        "coverage": {
+                            name: {"status": "healthy", "evidence": "ok"}
+                            for name in run.REQUIRED_COVERAGE_AREAS
+                        },
+                        "checks": [
+                            {
+                                "area": "pods",
+                                "status": "healthy",
+                                "evidence": "ok",
+                                "evidence_refs": [
+                                    {
+                                        "capture_id": "capture-1",
+                                        "operation": "projection",
+                                        "stream": None,
+                                        "start": None,
+                                        "end": None,
+                                    }
+                                ],
+                            }
+                        ],
+                        "findings": [],
+                        "limitations": [],
+                        "mutations_performed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            metrics, _, warnings = run._final_metrics(final, validator, spool)
+            self.assertTrue(metrics["evidence_coverage_ok"])
+            self.assertEqual(metrics["evidence_ref_count"], 1)
+            self.assertFalse(warnings)
 
     def test_model_reroute_disables_pricing(self) -> None:
         schema = json.loads(
@@ -728,6 +1070,9 @@ class EndToEndTests(unittest.TestCase):
                             "evidence_refs": [{
                                 "capture_id": "capture-1",
                                 "operation": "projection",
+                                "stream": None,
+                                "start": None,
+                                "end": None,
                             }],
                         }],
                         "findings": [],
@@ -761,6 +1106,10 @@ class EndToEndTests(unittest.TestCase):
                                 "stderr": {"bytes": 0}
                             }
                         }))
+                        (spool / "router-events.jsonl").write_text(
+                            json.dumps({"capture_id": "capture-1", "operation": "projection"})
+                            + "\\n"
+                        )
                     else:
                         command = "kubectl get pods -A"
                         output = "x" * 1000
@@ -838,6 +1187,8 @@ class EndToEndTests(unittest.TestCase):
                     str(output),
                     "--codex-bin",
                     str(fake_codex),
+                    "--tool-output-token-limit",
+                    "12000",
                     "--policy-ref",
                     "health",
                     "--policy-digest",
@@ -876,6 +1227,22 @@ class EndToEndTests(unittest.TestCase):
             )
             self.assertEqual(
                 (output / "private" / "pair-001" / "A" / "events.jsonl").stat().st_mode & 0o777,
+                0o600,
+            )
+            trace_summary = json.loads(
+                (
+                    output / "private" / "pair-001" / "A" / "runtime-trace-summary.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(trace_summary["handler_status"], "complete")
+            self.assertTrue(trace_summary["source"]["raw_preserved"])
+            self.assertTrue(
+                pair["arms"]["A"]["runtime_trace"]["marker_presence"]["custom_tool_call"]
+                is False
+            )
+            self.assertEqual(
+                (output / "private" / "pair-001" / "A" / "runtime-trace.jsonl").stat().st_mode
+                & 0o777,
                 0o600,
             )
             self.assertFalse((output / "private" / "pair-001" / "codex-home-A").exists())

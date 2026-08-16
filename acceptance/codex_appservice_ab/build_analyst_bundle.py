@@ -66,11 +66,21 @@ def build(root: Path, output: Path, package_class: str, inputs: list[Path]) -> N
     files = _safe_files(root, selected)
     inventory = []
     bodies: dict[str, bytes] = {}
+    modes: dict[str, int] = {}
     for relative in files:
         body = (root / relative).read_bytes()
         name = relative.as_posix()
         bodies[name] = body
-        inventory.append({"path": name, "bytes": len(body), "sha256": _sha256(body)})
+        mode = (root / relative).stat().st_mode & 0o777
+        modes[name] = mode
+        inventory.append(
+            {
+                "path": name,
+                "mode": f"{mode:04o}",
+                "bytes": len(body),
+                "sha256": _sha256(body),
+            }
+        )
     manifest = {
         "schema_version": 1,
         "package_class": package_class,
@@ -87,7 +97,8 @@ def build(root: Path, output: Path, package_class: str, inputs: list[Path]) -> N
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for name in sorted(bodies):
             info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-            info.external_attr = 0o100600 << 16
+            mode = modes.get(name, 0o600)
+            info.external_attr = (0o100000 | mode) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, bodies[name])
 

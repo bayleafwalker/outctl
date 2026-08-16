@@ -1,9 +1,15 @@
 # Historical implementation handoff: `outctl` Python Phase 1
 
-> **Status:** Baseline delivered. New migration work starts at
-> [`docs/architecture/README.md`](docs/architecture/README.md) and follows
+> **Archived 2026-08-16.** No implementation work should follow this handoff.
+> The repository is retained as a frozen discovery artifact after the product
+> thesis was killed. See
+> [`docs/DISCOVERY_KILL_2026-08-16.md`](docs/DISCOVERY_KILL_2026-08-16.md) for
+> the replacement-first OTel/Langfuse hypothesis.
+
+> **Status:** Baseline delivered. For new design and migration work, start at
+> [`docs/architecture/README.md`](docs/architecture/README.md) and execute
 > [`docs/MIGRATION_ROADMAP.md`](docs/MIGRATION_ROADMAP.md) wave by wave. This
-> document remains the v1 compatibility record, not the active product plan.
+> handoff remains the v1 compatibility record, not the active product plan.
 
 ## Objective
 

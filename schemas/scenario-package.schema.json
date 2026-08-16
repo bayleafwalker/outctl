@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:scenario-package:v2",
+  "title": "Provider-neutral scenario package",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scenario_id", "scenario_class", "provider", "requires", "seed", "fixture_digest", "expected_facts_digest", "replayable", "mutation_authority_required"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.scenario-package/v2"},
+    "scenario_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "scenario_class": {"type": "string", "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)?$"},
+    "provider": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+    "requires": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cluster", "network", "mutation_authority", "session_budget"],
+      "properties": {
+        "cluster": {"type": "boolean"},
+        "network": {"type": "boolean"},
+        "mutation_authority": {"type": "boolean"},
+        "session_budget": {"type": "integer", "minimum": 1, "maximum": 4096}
+      }
+    },
+    "seed": {"type": "integer", "minimum": 0},
+    "fixture_digest": {"$ref": "#/$defs/digest"},
+    "expected_facts_digest": {"$ref": "#/$defs/digest"},
+    "replayable": {"const": true},
+    "mutation_authority_required": {"type": "boolean"},
+    "metadata": {"type": "object", "additionalProperties": {"type": ["string", "integer", "boolean", "null"]}}
+  },
+  "$defs": {"digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}
+}

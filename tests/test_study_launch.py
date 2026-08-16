@@ -82,7 +82,7 @@ def _make_study(root: Path) -> Path:
         "variance_pilot_pairs": 6, "confirmatory_pairs": 18, "randomization_seed": 1,
         "cache_strata": ["unknown"],
         "primary_outcomes": ["diagnostic_quality_noninferiority", "additional_critical_misses",
-                             "model_visible_command_output_bytes", "uncached_read_input_tokens"],
+                             "command_event_aggregated_output_bytes", "uncached_read_input_tokens"],
         "secondary_outcomes": [], "exclusion_rules": [], "stopping_rules": ["stop on mutation"],
     }
     protocol["protocol_digest"] = _canonical(protocol, "protocol_digest")
