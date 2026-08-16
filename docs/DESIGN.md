@@ -1,7 +1,13 @@
 # Vuoro supplemental tooling design: bounded, recoverable command output
 
+> **Historical design — frozen 2026-08-16.** This document describes the
+> product thesis that was killed after the Code Mode commissioning evidence.
+> It is retained as a compatibility and discovery record, not as a new
+> implementation mandate. See
+> [`DISCOVERY_KILL_2026-08-16.md`](DISCOVERY_KILL_2026-08-16.md).
+
 **Working name:** `outctl`  
-**Status:** Implemented Python v1 baseline; retained as the compatibility contract
+**Status:** Implemented Python v1 baseline; frozen compatibility contract
 **Date:** 2026-08-03  
 **Intended consumers:** Vuoro, actionq/dispatcher, runner implementations, Claude Code/Codex/OpenCode adapters, sprintctl, auditctl, kctl, AgentOps project sessions
 

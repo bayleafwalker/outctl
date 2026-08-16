@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:observation:v1",
+  "title": "Vuoro outctl durable observation",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "observation_id",
+    "created_at",
+    "capture_id",
+    "capture_ref",
+    "capture_manifest_sha256",
+    "source",
+    "invocation",
+    "result"
+  ],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.observation/v1"},
+    "observation_id": {"type": "string", "pattern": "^obs-[a-f0-9]{64}$"},
+    "created_at": {"type": "string", "minLength": 1},
+    "capture_id": {"type": "string", "minLength": 1},
+    "capture_ref": {"type": "string", "pattern": "^outctl://capture/"},
+    "capture_manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source": {
+      "type": "object",
+      "required": ["harness", "session", "tool_call"],
+      "properties": {
+        "harness": {"type": "string", "minLength": 1, "maxLength": 512},
+        "session": {"type": "string", "minLength": 1, "maxLength": 512},
+        "tool_call": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "invocation": {
+      "type": "object",
+      "required": ["tool", "command_sha256"],
+      "properties": {
+        "tool": {"type": "string", "minLength": 1, "maxLength": 512},
+        "command_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "result": {
+      "type": "object",
+      "required": ["exit_code", "duration_ms", "stdout", "stderr"],
+      "properties": {
+        "exit_code": {"type": ["integer", "null"]},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "stdout": {"type": "string", "pattern": "^artifact:sha256:[a-f0-9]{64}$"},
+        "stderr": {"type": "string", "pattern": "^artifact:sha256:[a-f0-9]{64}$"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

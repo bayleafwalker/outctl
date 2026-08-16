@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:study-analysis:v2",
+  "title": "Raw-free N-arm controlled study analysis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol_digest", "analysis_code_digest", "dataset_class", "sessions", "contrasts", "pooled_secondary", "gate_results", "generated_at"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.study-analysis/v2"},
+    "protocol_digest": {"$ref": "#/$defs/digest"},
+    "analysis_code_digest": {"$ref": "#/$defs/digest"},
+    "dataset_class": {"enum": ["variance-pilot", "confirmatory"]},
+    "sessions": {"type": "array", "minItems": 1, "maxItems": 65536, "items": {"$ref": "#/$defs/session"}},
+    "contrasts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/contrast"}},
+    "pooled_secondary": {"type": "object", "additionalProperties": {"type": ["integer", "number", "null"]}},
+    "gate_results": {"type": "object", "additionalProperties": {"type": "boolean"}},
+    "generated_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "session": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "scenario_id", "arm_id", "replicate", "start_group", "start_order", "protocol_valid", "identity_binding_match", "quality_score_ppm", "critical_miss", "command_event_aggregated_output_bytes", "uncached_read_input_tokens"],
+      "properties": {
+        "session_id": {"type": "string", "minLength": 1}, "scenario_id": {"type": "string", "minLength": 1}, "arm_id": {"type": "string", "minLength": 1},
+        "replicate": {"type": "integer", "minimum": 1}, "start_group": {"type": "string", "minLength": 1}, "start_order": {"type": "integer", "minimum": 0},
+        "protocol_valid": {"type": "boolean"}, "identity_binding_match": {"type": "boolean"},
+        "quality_score_ppm": {"type": ["integer", "null"], "minimum": 0, "maximum": 1000000}, "critical_miss": {"type": ["boolean", "null"]},
+        "command_event_aggregated_output_bytes": {"type": "integer", "minimum": 0}, "uncached_read_input_tokens": {"type": "integer", "minimum": 0}
+      }
+    },
+    "contrast": {
+      "type": "object", "additionalProperties": false,
+      "required": ["contrast_id", "treatment_arm", "control_arm", "protocol_valid_sessions", "median_output_reduction_ppm", "median_uncached_read_reduction_ppm", "quality_noninferior", "additional_critical_misses"],
+      "properties": {
+        "contrast_id": {"type": "string", "minLength": 1}, "treatment_arm": {"type": "string", "minLength": 1}, "control_arm": {"type": "string", "minLength": 1},
+        "protocol_valid_sessions": {"type": "integer", "minimum": 0}, "median_output_reduction_ppm": {"type": ["integer", "null"]}, "median_uncached_read_reduction_ppm": {"type": ["integer", "null"]},
+        "quality_noninferior": {"type": ["boolean", "null"]}, "additional_critical_misses": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

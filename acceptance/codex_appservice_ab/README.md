@@ -1,4 +1,13 @@
-# Concurrent Codex / appservice A/B pilot for outctl
+# Historical Codex / appservice A/B pilot for outctl
+
+> **Archived — do not extend.** The outctl product thesis was killed on
+> 2026-08-16. This directory is retained only as commissioning evidence and a
+> historical control. New evidence-capture work targets native harness
+> adapters, OpenTelemetry, Langfuse or Phoenix, and object storage.
+
+This directory retains the closed A/B commissioning runner and its recorded
+proof artifacts. New provider-neutral runs use `outctl.harness.Launcher` with
+the v3 protocol and are not compiled from this historical pair shape.
 
 This harness runs matched GPT-5.6 Terra health-check sessions against the same
 appservice cluster state:
@@ -32,8 +41,9 @@ study follows `docs/ENABLEMENT_PLAN.md` and is deliberately staged:
 5. Freeze scenario denominators and sample size before confirmatory runs.
 
 Backend prompt-cache sharing is a confound. Cache values are descriptive; the
-decision metrics are total input, uncached-read input, model-visible command
-output bytes, and weighted credits.
+decision metrics are total input, uncached-read input,
+command-event aggregated output bytes, and weighted credits. Native
+post-truncation context is a separate unmeasured quantity.
 
 ## Recommendation
 
@@ -48,9 +58,10 @@ of the wrapper alone. That is the useful operational question for adoption.
 
 ## Why `codex exec --json` is the accounting source
 
-Capture the final cumulative `turn.completed.usage` object from Codex JSONL.
-Do not use the local SQLite state, history files, UI estimates, or a Stop hook as
-the primary token ledger.
+Capture every `turn.completed` model-invocation boundary and the final
+cumulative `turn.completed.usage` object from Codex JSONL. Do not infer model
+rounds from shell-command timing. Do not use the local SQLite state, history
+files, UI estimates, or a Stop hook as the primary token ledger.
 
 A minimal standalone capture looks like this:
 
@@ -76,13 +87,109 @@ The harness records:
 - cache-hit, cache-write, and uncached-read ratios;
 - output tokens and reasoning-output tokens;
 - Codex credits and API-equivalent US dollars;
-- model-visible command-output bytes, including a kubectl-only subset;
+- `command_event_aggregated_output_bytes`, including a kubectl-only subset;
 - raw-free outctl manifest totals for retained stdout/stderr bytes and capture
   status; and
+ attribution, and per-invocation latency when the JSONL transport does not
+ expose them; and
+- model sampling-completion count from `turn.completed` boundaries, plus
+- raw-free command-to-turn associations from JSONL event order or explicit turn
+- IDs;
+- explicit nulls for request IDs, post-truncation history size, command
+- parallelization, prior-response IDs, and per-invocation latency when the
+- JSONL transport does not expose them; and
 - duration, hook compliance, and final health-result parity.
+
+The aggregated-output fields are command-event accounting only. They do not
+prove content admitted to model history after Codex tool-output truncation.
+Pass `--tool-output-token-limit N` for live or controlled runs; the generated
+Codex config pins `tool_output_token_limit`, while the report records native
+context-side truncation as unobserved until a supported runtime telemetry path
+is wired.
 
 Reasoning-output tokens are already contained in output tokens and are never
 charged twice.
+
+### Runtime protocol tracing
+
+Every non-dry run now requires the experiment-local trace handler. It preserves
+the private `events.jsonl` byte-for-byte and writes, per arm,
+`runtime-trace.jsonl` plus `runtime-trace-summary.json`. The normalized trace
+is metadata-first: it records event hashes, field paths, safe scalar metadata,
+IDs, structural event types, and program-code hashes/behavior summaries. It
+does not copy arbitrary event bodies or program source.
+
+Detection is structural rather than lexical. Transport evidence is kept
+separate from semantic PTC evidence and program behavior. `program`, nested
+`function_call`, `function_call_output`, and `program_output` objects are
+validated relationally using `call_id` and `caller.caller_id`; the summary
+reports `linked_programs`, orphan nodes, and `caller_linkage_valid`.
+`tools.exec_command` and `Promise.all` are inspected only inside a structurally
+identified program code body. The handler records evidence for
+`custom_tool_call`, `code_mode_only`, PTC objects, the `exec` envelope, and
+program behavior when those structures are exposed by the runtime.
+
+The handler records absence as an observation, not proof that an internal
+mechanism was unused. Raw JSONL remains private and should be supplied to a
+reviewer only through an approved secure handoff. Exact values can be removed
+from normalized traces with `--trace-redaction-exact-json`; built-in patterns
+also redact common bearer/API-key/password forms. Use `--trace-max-events` and
+`--trace-max-bytes` to bound normalized handoff material without changing the
+raw source capture.
+
+For an existing private Codex event stream, the handler is independently
+replayable:
+
+```bash
+python acceptance/codex_appservice_ab/trace_handler.py private/pair-001/A/events.jsonl \
+  --trace /tmp/runtime-trace.jsonl \
+  --summary /tmp/runtime-trace-summary.json
+```
+
+Build a portable checked handoff from a private run root. The generated
+`SHA256SUMS` uses archive-relative paths; Codex homes, shell-home directories,
+generated tooling, temporary files, and UV caches are excluded from the archive.
+
+```bash
+python acceptance/codex_appservice_ab/build_trace_handoff.py \
+  --source-root "$AB_LIVE" \
+  --observer acceptance/codex_appservice_ab/trace_handler.py \
+  --output /tmp/codex-outctl-runtime-trace-handoff.tar.gz
+```
+
+### Minimal Responses API PTC commissioning probe
+
+The Codex CLI JSONL stream may expose only high-level `command_execution` items.
+When the required PTC topology itself must be observed, use the separate
+Responses API probe. It explicitly enables the hosted
+`programmatic_tool_calling` tool, gives two deterministic read-only functions
+`allowed_callers: ["programmatic"]`, preserves every response output item, and
+returns each client-owned function result with the original `call_id` and
+`caller`.
+
+The probe does not access Kubernetes or run shell commands. It writes a private
+`raw-responses/` capture, `events.jsonl`, the existing metadata-only runtime
+trace and summary, plus `metrics.json`. Metrics include response and
+continuation counts, response latency, item-type counts, function-call counts,
+usage totals, final-message presence, and the validated PTC caller graph.
+
+Run it only as a separately budgeted API commissioning request:
+
+```bash
+export OPENAI_API_KEY='...'
+uv run python acceptance/codex_appservice_ab/responses_ptc_probe.py \
+  --model gpt-5.6-terra \
+  --output /tmp/responses-ptc-commissioning
+```
+
+The deterministic test uses a fake transport and does not spend API tokens:
+
+```bash
+uv run python acceptance/codex_appservice_ab/test_responses_ptc_probe.py
+```
+
+This probe observes the Responses API PTC contract, not native Codex CLI
+behavior; keep its evidence domain separate from the Codex A/B report.
 
 ### Terra rate block pinned on 2026-08-08
 
@@ -207,6 +314,7 @@ uv run python acceptance/codex_appservice_ab/run.py \
   --outctl-cmd 'uv run --project /projects/dev/outctl outctl' \
   --policy-ref "$OUTCTL_POLICY_REF" \
   --policy-digest "$OUTCTL_POLICY_DIGEST" \
+  --tool-output-token-limit 12000 \
   --model gpt-5.6-terra \
   --pairs 1 \
   --timeout-seconds 1800 \
@@ -285,11 +393,33 @@ caught it at the fence.
 
 ### Controlled-study gates
 
+A `study-protocol/v2` launch is deliberately different from a live wiring or
+UX run. Each suite entry binds the scenario manifest, expected facts, and the
+fixture bytes. The harness installs an immutable offline `kubectl` replay for
+both arms and rejects `--kubeconfig`, `--context`, and `--health-checker`.
+Commands outside the frozen six-command corpus fail closed. This makes seeded
+variance and confirmatory runs independent of changing cluster state and
+prevents a study protocol from accidentally authorizing live access.
+
+Run one scenario only with a protocol whose repository commit matches HEAD:
+
+```bash
+uv run python acceptance/codex_appservice_ab/run.py \
+  --study-protocol /path/to/frozen-protocol.json \
+  --scenario-id crashloop-v1 \
+  --appservice /projects/dev/appservice \
+  --canonical-appservice /projects/dev/appservice \
+  --policy-ref "$OUTCTL_POLICY_REF" \
+  --policy-digest "$OUTCTL_POLICY_DIGEST" \
+  --tool-output-token-limit 12000 \
+  --pairs 6
+```
+
 For selected enforcement, use:
 
 ```text
-median model-visible command-output bytes reduction   >= 50%
-median model-visible kubectl-output bytes reduction   >= 50%
+median command-event aggregated output reduction      >= 50%
+median command-event aggregated kubectl reduction    >= 50%
 diagnostic quality                                     non-inferior
 additional critical/high misses                       0
 ```
@@ -306,10 +436,11 @@ A flat output-token result is not a failure: both arms are required to return a
 similarly bounded health report. The expected gain is primarily command output
 no longer being dragged through every later model request.
 
-For Arm A, `arm_a_outctl_exposure_ratio` compares the JSON/projection bytes
-visible to Codex with the retained stdout/stderr byte total from outctl
-manifests. It is a mechanism check, not a token substitute: serialization,
-tokenization, retrieval calls, and non-kubectl commands still matter.
+For Arm A, `arm_a_command_event_to_retained_ratio` compares router/event bytes
+with the retained stdout/stderr byte total from outctl manifests. It is a
+mechanism check, not a token substitute: native Codex truncation,
+serialization, tokenization, retrieval calls, and non-kubectl commands still
+matter.
 
 ## Private artifacts
 
@@ -351,8 +482,9 @@ back the implementation itself, remove `acceptance/codex_appservice_ab/`.
   prefixes. Codex does not expose a cache-isolation key here. Repeated matched
   pairs and launch-skew recording reduce, but do not eliminate, that confound.
 - Codex exposes token/cache accounting, not literal resident session-memory
-  bytes. Input tokens, uncached input, and model-visible output bytes are the
-  relevant context-footprint proxies.
+  bytes. Input tokens, uncached input, and command-event aggregated output are
+  event-stream proxies; post-truncation history remains separate and
+  unobserved until runtime instrumentation is available.
 - The shell classifier covers ordinary Bash/unified-exec calls. Hooks are not a
   complete security boundary; use Kubernetes RBAC for that job.
 - Cluster state can still change during the pair. Concurrency narrows the
@@ -392,6 +524,19 @@ while `search <capture-id> <literal-term>` returns at most three
 Both modes keep the same read-only/secret-denial guard and private spool. Live
 `--qualitative-regular-context` runs are disabled; use genuine read-only RBAC
 through the pinned runner boundary.
+
+The next characterization is frozen as a four-arm matrix in
+`four_arm_plan.py`: A native Codex truncation, B outctl exact/native-like, C
+outctl generic bounded, and D outctl semantic pod projection. The current
+launcher remains pair-shaped; `next_characterization` in the dry-run report is
+planning evidence only and must not be mistaken for a completed four-arm run.
+All arms must keep the same prompt, instruction surface, command text, model,
+schema, and normal command tool surface.
+
+The semantic pod adapter is deliberately narrow. It claims complete coverage
+only for the exact unfiltered `kubectl get pods -A -o wide` population. A
+field-selector, namespace, label-selector, or other scoped command remains a
+generic projection and cannot produce cluster-wide zero conclusions.
 
 Checks and findings must cite capture IDs and bounded retrieval operations in
 `evidence_refs`. Core retrieval supports `inspect`, `tail`, `search`, and

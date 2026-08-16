@@ -1,6 +1,6 @@
 {
   "schema_version": "vuoro.outctl.study-analysis/v1",
-  "protocol_digest": "sha256:f915dc9314e7217fd8c63167b5151ab1cd3ca5da2bf751c8167096abc7fae023",
+  "protocol_digest": "sha256:ecce36fc1b4613c65f242fedd1fdfe58869a3754db828b3546db8b1b279daaba",
   "analysis_code_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
   "dataset_class": "confirmatory",
   "pairs": [
