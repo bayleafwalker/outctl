@@ -8,7 +8,7 @@ import signal
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -16,8 +16,13 @@ from pathlib import Path
 from outctl.capture.runner import CaptureResult, CommandResult, capture_command
 from outctl.envelope import build_result_envelope
 from outctl.models import CommandResultEnvelope, CommandResultInvocation
-from outctl.projection import ProjectionLimits, project_bytes
+from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
 from outctl.retrieval import RetrievalStatus, slice_stream
+from outctl.semantic import (
+    detect_semantic_adapter,
+    project_pod_health,
+    semantic_full_if_under_bytes,
+)
 
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
@@ -115,6 +120,7 @@ class AdapterRequest:
     )
     exact_values: Sequence[bytes | str] = ()
     exact_redaction_rules: Mapping[str, Sequence[bytes | str]] | None = None
+    semantic_adapter: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.argv, (str, bytes)) or not self.argv:
@@ -224,6 +230,12 @@ def _capture_chunks(capture: CaptureResult) -> Iterator[bytes]:
                 yield chunk
 
 
+def _capture_chunks_for_stream(capture: CaptureResult, filename: str) -> Iterator[bytes]:
+    with (capture.path / filename).open("rb") as raw:
+        while chunk := raw.read(64 * 1024):
+            yield chunk
+
+
 def _receipt(
     request: AdapterRequest, capture: CaptureResult, envelope: CommandResultEnvelope
 ) -> dict[str, JsonValue]:
@@ -262,6 +274,11 @@ def _receipt(
             "redaction": envelope.projection.extra["redaction"]
             if envelope.projection.extra is not None
             else {"rules": []},
+            "annotations": {
+                key: value
+                for key, value in (envelope.projection.extra or {}).items()
+                if key != "redaction"
+            },
         },
     }
 
@@ -369,12 +386,27 @@ async def run_adapter(request: AdapterRequest) -> AdapterResult:
     )
     ended_at = _utc_now()
     duration_ms = round((time.monotonic() - started) * 1000)
-    projection = project_bytes(
-        _capture_chunks(capture),
-        exact_values=request.exact_values,
-        exact_redaction_rules=request.exact_redaction_rules,
-        limits=request.projection_limits,
-    )
+    semantic_adapter = request.semantic_adapter or detect_semantic_adapter(request.argv)
+    projection: ProjectionResult | None = None
+    if (
+        semantic_adapter == "kubernetes.pod-health/v1"
+        and capture.stdout_bytes > semantic_full_if_under_bytes()
+    ):
+        projection = project_pod_health(
+            _capture_chunks_for_stream(capture, "stdout.raw"),
+            exact_values=request.exact_values,
+            exact_redaction_rules=request.exact_redaction_rules,
+            limits=request.projection_limits,
+        )
+    if projection is None:
+        projection = project_bytes(
+            _capture_chunks(capture),
+            exact_values=request.exact_values,
+            exact_redaction_rules=request.exact_redaction_rules,
+            limits=request.projection_limits,
+        )
+        if not projection.lossy and capture.stderr_bytes == 0:
+            projection = replace(projection, annotations={"presentation": "exact-passthrough"})
     invocation = CommandResultInvocation(
         argv_display=list(request.argv),
         shell=False,

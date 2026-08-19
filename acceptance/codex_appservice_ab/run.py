@@ -34,11 +34,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from interaction import analyze_events
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
-from kubectl_guard import classify_kubectl
+from kubectl_guard import classify_kubectl, extract_kubectl_argvs
 
 from outctl.contracts import ContractValidationError, validate_controlled_study_launch
+from outctl.policy import PolicyError, load_policy_set, resolve_and_digest
 
 RATE_DATE = "2026-08-08"
 TERRA_MODEL_ALIASES = {"gpt-5.6-terra", "terra"}
@@ -54,6 +56,9 @@ TERRA_API_USD_PER_M = {
     "cache_write_input": 2.5,
     "output": 12.0,
 }
+DEFAULT_POLICY_SET_PATH = (
+    Path(__file__).resolve().parents[2] / "config" / "output-policies.example.yaml"
+)
 LONG_CONTEXT_THRESHOLD = 272_000
 START_BARRIER_TIMEOUT_SECONDS = 15
 REQUIRED_COVERAGE_AREAS = frozenset(
@@ -236,6 +241,26 @@ def _validate_policy_digest(value: str) -> None:
         raise ExperimentError("--policy-digest must be sha256:<64 hex characters>")
 
 
+def _policy_binding(policy_set: Path, requested_ref: str, requested_digest: str) -> dict[str, Any]:
+    try:
+        resolved, resolved_digest = resolve_and_digest(load_policy_set(policy_set), requested_ref)
+    except PolicyError as exc:
+        raise ExperimentError(f"unable to resolve policy binding: {exc}") from exc
+    binding = {
+        "requested_ref": requested_ref,
+        "resolved_ref": resolved.metadata.name,
+        "requested_digest": requested_digest,
+        "resolved_digest": resolved_digest,
+        "policy_digest_match": requested_digest == resolved_digest,
+    }
+    if not binding["policy_digest_match"]:
+        raise ExperimentError(
+            "policy digest mismatch: requested policy digest does not match selected policy "
+            f"({requested_ref} resolves to {resolved_digest})"
+        )
+    return binding
+
+
 def _resolve_trusted_executable(value: str, *, name: str) -> Path:
     """Resolve an executable without inheriting detached-worktree mise state."""
     candidate = Path(value)
@@ -267,6 +292,35 @@ def _kubectl_output(
         capture_output=True,
         check=False,
     )
+
+
+def _kubectl_can_i(
+    kubectl_bin: str,
+    kubeconfig: Path,
+    context: str,
+    verb: str,
+    resource: str,
+    namespace: str | None,
+    scope: str | None,
+) -> tuple[bool | None, str | None]:
+    args = ["auth", "can-i", verb, resource]
+    if namespace is not None:
+        args.extend(("--namespace", namespace))
+    if scope is not None:
+        args.append(scope)
+    result = _kubectl_output(kubectl_bin, kubeconfig, context, *args)
+    stdout = result.stdout.decode("utf-8", errors="replace").strip().casefold()
+    if stdout == "yes":
+        return True, None
+    if stdout == "no":
+        return False, None
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        details = stderr or stdout
+        if not details:
+            details = f"command exit {result.returncode}"
+        return None, details
+    return None, f"unexpected can-i response: {stdout!r}"
 
 
 def _preflight_readonly_kubeconfig(
@@ -312,20 +366,57 @@ def _preflight_readonly_kubeconfig(
         ("create", "pods/ephemeralcontainers", "gatus", None),
     )
 
-    def can_i(verb: str, resource: str, namespace: str | None, scope: str | None) -> bool:
-        args = ["auth", "can-i", verb, resource]
+    def describe_check(
+        check: tuple[str, str, str | None, str | None]
+    ) -> str:
+        verb, resource, namespace, scope = check
+        pieces = [verb, resource]
         if namespace is not None:
-            args.extend(("--namespace", namespace))
+            pieces.extend(["-n", namespace])
         if scope is not None:
-            args.append(scope)
-        result = _kubectl_output(kubectl_bin, kubeconfig, context, *args)
-        answer = result.stdout.decode("utf-8", errors="replace").strip()
-        return result.returncode == 0 and answer == "yes"
+            pieces.append(scope)
+        return " ".join(pieces)
 
-    allowed = [can_i(*check) for check in allow_checks]
-    denied = [not can_i(*check) for check in deny_checks]
+    allowed: list[bool] = []
+    denied: list[bool] = []
+    for check in allow_checks:
+        verb, resource, namespace, scope = check
+        can_execute, reason = _kubectl_can_i(
+            kubectl_bin, kubeconfig, context, verb, resource, namespace, scope
+        )
+        if reason is not None:
+            raise ExperimentError(
+                "kubeconfig authorization preflight could not verify required permission "
+                f"'{describe_check(check)}': {reason}"
+            )
+        allowed.append(can_execute is True)
+
+    for check in deny_checks:
+        verb, resource, namespace, scope = check
+        can_execute, reason = _kubectl_can_i(
+            kubectl_bin, kubeconfig, context, verb, resource, namespace, scope
+        )
+        if reason is not None:
+            raise ExperimentError(
+                "kubeconfig authorization preflight could not verify prohibited permission "
+                f"'{describe_check(check)}': {reason}"
+            )
+        denied.append(not can_execute)
+
     if not all(allowed):
-        raise ExperimentError("read-only kubeconfig lacks a required fixed-corpus permission")
+        missing_permissions = [
+            describe_check(check)
+            for index, check in enumerate(allow_checks)
+            if not allowed[index]
+        ]
+        raise ExperimentError(
+            "read-only kubeconfig lacks a required fixed-corpus permission"
+            + (
+                f": {', '.join(missing_permissions)}"
+                if missing_permissions
+                else ""
+            )
+        )
     if not all(denied) and not allow_broad_identity:
         raise ExperimentError(
             "read-only kubeconfig has prohibited mutation or sensitive-read authority"
@@ -662,8 +753,12 @@ description: Use bounded, recoverable output for potentially large read-only com
 - When omitted evidence matters, retrieve from the capture ID with bounded
   `outctl-health search-many <capture-id> --literal <term> ...` or `tail`;
   batch related terms and do not rerun only to recover output.
+- An all-namespaces Pod inventory returns a complete health scan with
+  authoritative zero counts for standard failure predicates; do not search
+  merely to confirm those predicates.
 - Direct read-only `kubectl` is fine for predictably small output.
-- `outctl-health --help` describes the available safe surface.
+- This document is the available safe surface; do not spend a model/tool round
+  calling `outctl-health --help`.
 
 Never inspect raw spool files. The experiment guard still denies mutations,
 interactive operations, and Kubernetes Secret reads.
@@ -1226,6 +1321,17 @@ def _cost_ranges(usage: Usage, *, model: str) -> dict[str, Any]:
     }
 
 
+def _kubectl_sequence_digest(sequence: Sequence[Sequence[str]]) -> str:
+    payload = json.dumps(
+        [list(argv) for argv in sequence], ensure_ascii=True, separators=(",", ":")
+    )
+    return _sha256_text(payload)
+
+
+def _kubectl_argvs(command: str) -> list[tuple[str, ...]]:
+    return extract_kubectl_argvs(command)
+
+
 def _command_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     total = 0
     completed = 0
@@ -1244,6 +1350,8 @@ def _command_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     retrieval_tool_turns = 0
     search_tool_turns = 0
     search_hits = 0
+    kubectl_sequence: list[tuple[str, ...]] = []
+    kubectl_output_bytes_sequence: list[int] = []
 
     for event in events:
         if event.get("type") != "item.completed":
@@ -1283,8 +1391,16 @@ def _command_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             ):
                 search_hits += 1
         kubectl_attempts += len(invocations)
+        extracted_argvs = _kubectl_argvs(command)
+        if len(extracted_argvs) == len(invocations):
+            kubectl_sequence.extend(extracted_argvs)
+        else:
+            kubectl_sequence.extend(("<unparsed>",) for _ in invocations)
         if invocations and isinstance(output, str):
             kubectl_output_bytes += len(output.encode("utf-8"))
+        kubectl_output_bytes_sequence.extend(
+            [len(output.encode("utf-8")) if isinstance(output, str) else 0] * len(invocations)
+        )
         for invocation in invocations:
             if not invocation.read_only:
                 non_read_only_attempts += 1
@@ -1314,6 +1430,9 @@ def _command_metrics(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "kubectl_via_outctl_attempts": wrapped_attempts,
         "kubectl_via_outctl_completed": wrapped_completed,
         "kubectl_non_read_only_attempts": non_read_only_attempts,
+        "kubectl_sequence_count": len(kubectl_sequence),
+        "kubectl_sequence_sha256": _kubectl_sequence_digest(kubectl_sequence),
+        "kubectl_output_bytes_sequence": kubectl_output_bytes_sequence,
         "retrieval_tool_turns": retrieval_tool_turns,
         "search_tool_turns": search_tool_turns,
         "search_hit_count": search_hits,
@@ -1328,6 +1447,7 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
         "capture_directory_count": 0,
         "capture_count": 0,
         "partial_capture_count": 0,
+        "complete_capture_count": 0,
         "capture_status_counts": {},
         "retained_stdout_bytes": 0,
         "retained_stderr_bytes": 0,
@@ -1335,6 +1455,20 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
         "manifest_errors": 0,
         "retrieval_count": 0,
         "retrieval_operation_counts": {},
+        "command_event_count": 0,
+        "command_event_capture_ids": [],
+        "command_event_capture_id_sequence": [],
+        "command_event_ids": [],
+        "command_event_capture_id_duplicates": 0,
+        "command_event_id_continuity_ok": True,
+        "command_event_id_gaps": 0,
+        "command_event_capture_id_coverage": {},
+        "retrieval_event_count": 0,
+        "retrieval_event_ids": [],
+        "retrieval_capture_ids": [],
+        "retrieval_capture_id_duplicates": 0,
+        "retrieval_capture_id_continuity_ok": True,
+        "retrieval_event_id_gaps": 0,
     }
     warnings: list[str] = []
     if root is None:
@@ -1343,16 +1477,95 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
     captures_root = root / "captures"
     partial_root = root / "partial"
     metrics["present"] = root.exists()
+
+    command_events = root / "command-events.jsonl"
+    if command_events.is_file():
+        events, command_warnings = _read_jsonl(command_events, artifact="command event log")
+        warnings.extend(command_warnings)
+        metrics["command_event_count"] = len(events)
+        capture_ids: list[str] = []
+        seen_capture_ids: set[str] = set()
+        seen_event_ids: list[int] = []
+        duplicates = 0
+        previous_event_id: int | None = None
+        event_step: int | None = None
+        continuity_ok = True
+        continuity_gaps = 0
+        for event in events:
+            event_id = event.get("event_id")
+            if isinstance(event_id, int):
+                seen_event_ids.append(event_id)
+                if previous_event_id is not None:
+                    if event_step is None:
+                        step = event_id - previous_event_id
+                        if step != 0:
+                            event_step = step
+                    elif event_id - previous_event_id != event_step:
+                        continuity_ok = False
+                        continuity_gaps += 1
+                previous_event_id = event_id
+            capture_id = event.get("capture_id")
+            if not isinstance(capture_id, str) or not capture_id:
+                warnings.append("command-events.jsonl has a missing or invalid capture_id")
+                continue
+            capture_ids.append(capture_id)
+            if capture_id in seen_capture_ids:
+                duplicates += 1
+            seen_capture_ids.add(capture_id)
+        metrics["command_event_capture_ids"] = sorted(set(capture_ids))
+        metrics["command_event_capture_id_sequence"] = capture_ids
+        metrics["command_event_ids"] = seen_event_ids
+        metrics["command_event_capture_id_duplicates"] = duplicates
+        metrics["command_event_id_continuity_ok"] = continuity_ok
+        metrics["command_event_id_gaps"] = continuity_gaps
+        if duplicates:
+            warnings.append("command-events.jsonl contains duplicate capture_ids")
+
     retrieval_events = root / "retrieval-events.jsonl"
     if retrieval_events.is_file():
         retrievals, retrieval_warnings = _read_jsonl(retrieval_events, artifact="retrieval log")
         metrics["retrieval_count"] = len(retrievals)
         operations: dict[str, int] = {}
+        capture_ids: list[str] = []
+        seen_capture_ids: set[str] = set()
+        duplicates = 0
+        seen_event_ids: list[int] = []
+        previous_event_id: int | None = None
+        event_step: int | None = None
+        continuity_ok = True
+        continuity_gaps = 0
         for event in retrievals:
             operation = event.get("operation")
             if isinstance(operation, str):
                 operations[operation] = operations.get(operation, 0) + 1
+            event_id = event.get("event_id")
+            if isinstance(event_id, int):
+                seen_event_ids.append(event_id)
+                if previous_event_id is not None:
+                    if event_step is None:
+                        step = event_id - previous_event_id
+                        if step != 0:
+                            event_step = step
+                    elif event_id - previous_event_id != event_step:
+                        continuity_ok = False
+                        continuity_gaps += 1
+                previous_event_id = event_id
+            capture_id = event.get("capture_id")
+            if not isinstance(capture_id, str) or not capture_id:
+                warnings.append("retrieval-events.jsonl has a missing or invalid capture_id")
+                continue
+            capture_ids.append(capture_id)
+            if capture_id in seen_capture_ids:
+                duplicates += 1
+            seen_capture_ids.add(capture_id)
         metrics["retrieval_operation_counts"] = operations
+        metrics["retrieval_event_ids"] = seen_event_ids
+        metrics["retrieval_capture_ids"] = sorted(set(capture_ids))
+        metrics["retrieval_capture_id_duplicates"] = duplicates
+        metrics["retrieval_capture_id_continuity_ok"] = continuity_ok
+        metrics["retrieval_event_id_gaps"] = continuity_gaps
+        if duplicates:
+            warnings.append("retrieval-events.jsonl contains duplicate capture_ids")
         warnings.extend(retrieval_warnings)
     if partial_root.is_dir():
         try:
@@ -1367,12 +1580,35 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
         return metrics, warnings
 
     status_counts: dict[str, int] = {}
+    capture_sizes: dict[str, int] = {}
     try:
         capture_directories = sorted(path for path in captures_root.iterdir() if path.is_dir())
     except OSError as exc:
         warnings.append(f"could not enumerate outctl captures: {exc}")
         return metrics, warnings
     metrics["capture_directory_count"] = len(capture_directories)
+    capture_names = {capture_directory.name for capture_directory in capture_directories}
+    command_capture_ids = set(metrics["command_event_capture_ids"])
+    if command_capture_ids:
+        if command_capture_ids != capture_names:
+            metrics["command_event_capture_id_coverage"] = {
+                "command_event_capture_ids": sorted(command_capture_ids),
+                "manifest_capture_ids": sorted(capture_names),
+            }
+            warnings.append(
+                "command-events.jsonl does not 1:1 match capture manifest directory set"
+            )
+        else:
+            metrics["command_event_capture_id_coverage"] = {
+                "command_event_capture_ids": [],
+                "manifest_capture_ids": [],
+            }
+    elif capture_names:
+        metrics["command_event_capture_id_coverage"] = {
+            "command_event_capture_ids": [],
+            "manifest_capture_ids": sorted(capture_names),
+        }
+        warnings.append("command-events.jsonl is present but empty")
 
     for capture_directory in capture_directories:
         manifest_path = capture_directory / "manifest.json"
@@ -1405,12 +1641,21 @@ def _spool_metrics(root: Path | None) -> tuple[dict[str, Any], list[str]]:
         metrics["capture_count"] = int(metrics["capture_count"]) + 1
         metrics["retained_stdout_bytes"] = int(metrics["retained_stdout_bytes"]) + stdout_bytes
         metrics["retained_stderr_bytes"] = int(metrics["retained_stderr_bytes"]) + stderr_bytes
+        capture_sizes[capture_directory.name] = stdout_bytes + stderr_bytes
         status_counts[status_name] = status_counts.get(status_name, 0) + 1
+        if status_name == "COMPLETE":
+            metrics["complete_capture_count"] = int(metrics["complete_capture_count"]) + 1
 
     metrics["capture_status_counts"] = status_counts
     metrics["retained_total_bytes"] = int(metrics["retained_stdout_bytes"]) + int(
         metrics["retained_stderr_bytes"]
     )
+    capture_sequence = metrics["command_event_capture_id_sequence"]
+    if isinstance(capture_sequence, list):
+        metrics["capture_total_bytes_sequence"] = [
+            capture_sizes.get(capture_id, -1)
+            for capture_id in capture_sequence
+        ]
     return metrics, warnings
 
 
@@ -1632,6 +1877,78 @@ def _load_expected_facts(
     return signature, critical
 
 
+def _load_workflow_manifest(
+    path: Path | None,
+) -> tuple[dict[str, Any] | None, tuple[tuple[str, ...], ...] | None]:
+    if path is None:
+        return None, None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ExperimentError(f"workflow manifest is invalid: {exc}") from exc
+    if not isinstance(value, Mapping):
+        raise ExperimentError("workflow manifest root must be an object")
+    if value.get("schema_version") != "outctl.codex-ab.workflow/v1":
+        raise ExperimentError("workflow manifest has an unsupported schema_version")
+    workflow_id = value.get("workflow_id")
+    commands_value = value.get("commands")
+    large_index = value.get("large_output_sequence_index")
+    large_min_bytes = value.get("large_output_min_bytes")
+    large_max_bytes = value.get("large_output_max_bytes")
+    minimum_post_large = value.get("minimum_post_large_kubectl_cycles")
+    if not isinstance(workflow_id, str) or not workflow_id:
+        raise ExperimentError("workflow manifest requires a non-empty workflow_id")
+    if not isinstance(commands_value, list) or not commands_value:
+        raise ExperimentError("workflow manifest requires a non-empty commands array")
+    if not isinstance(large_index, int) or isinstance(large_index, bool):
+        raise ExperimentError("workflow manifest large_output_sequence_index must be an integer")
+    if not isinstance(minimum_post_large, int) or isinstance(minimum_post_large, bool):
+        raise ExperimentError(
+            "workflow manifest minimum_post_large_kubectl_cycles must be an integer"
+        )
+    if (
+        not isinstance(large_min_bytes, int)
+        or isinstance(large_min_bytes, bool)
+        or not isinstance(large_max_bytes, int)
+        or isinstance(large_max_bytes, bool)
+        or large_min_bytes < 30_000
+        or large_max_bytes > 100_000
+        or large_min_bytes > large_max_bytes
+    ):
+        raise ExperimentError(
+            "workflow manifest large-output byte bounds must be an ordered 30,000–100,000 range"
+        )
+    if not 1 <= large_index <= len(commands_value):
+        raise ExperimentError("workflow manifest large-output index is outside commands")
+    if len(commands_value) - large_index < minimum_post_large:
+        raise ExperimentError(
+            "workflow manifest does not contain enough post-large-output kubectl cycles"
+        )
+    sequence: list[tuple[str, ...]] = []
+    for index, command in enumerate(commands_value, start=1):
+        if (
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(argument, str) and argument for argument in command)
+            or command[0] != "kubectl"
+        ):
+            raise ExperimentError(f"workflow manifest command {index} is not a direct kubectl argv")
+        sequence.append(tuple(command))
+    binding = {
+        "schema_version": value["schema_version"],
+        "workflow_id": workflow_id,
+        "path": str(path),
+        "sha256": _sha256_file(path),
+        "sequence_count": len(sequence),
+        "large_output_sequence_index": large_index,
+        "large_output_min_bytes": large_min_bytes,
+        "large_output_max_bytes": large_max_bytes,
+        "minimum_post_large_kubectl_cycles": minimum_post_large,
+        "sequence_sha256": _kubectl_sequence_digest(sequence),
+    }
+    return binding, tuple(sequence)
+
+
 def _usage_public(usage: Usage | None) -> dict[str, Any] | None:
     if usage is None:
         return None
@@ -1705,6 +2022,7 @@ def _parse_arm(
     final, signature, final_warnings = _final_metrics(result.final_path, validator)
     warnings.extend(final_warnings)
     commands = _command_metrics(events)
+    interaction = analyze_events(events)
     thread_ids = [
         event.get("thread_id")
         for event in events
@@ -1763,6 +2081,7 @@ def _parse_arm(
             "usage": _usage_public(usage),
             "pricing": pricing,
             "commands": commands,
+            "interaction": interaction.to_dict(),
             "hooks": hook,
             "outctl_spool": spool,
             "final": final,
@@ -1833,6 +2152,11 @@ def _compare_pair(
     treatment_mode: str,
     expected_signature: set[tuple[str, str]] | None = None,
     expected_critical: set[tuple[str, str]] | None = None,
+    expected_kubectl_sequence_digest: str | None = None,
+    expected_kubectl_sequence_count: int | None = None,
+    expected_large_output_sequence_index: int | None = None,
+    expected_large_output_min_bytes: int | None = None,
+    expected_large_output_max_bytes: int | None = None,
 ) -> dict[str, Any]:
     a_identity = arm_a.get("cluster_identity")
     b_identity = arm_b.get("cluster_identity")
@@ -1878,19 +2202,57 @@ def _compare_pair(
 
     a_commands = arm_a.get("commands") if isinstance(arm_a.get("commands"), Mapping) else {}
     b_commands = arm_b.get("commands") if isinstance(arm_b.get("commands"), Mapping) else {}
+    a_interaction = (
+        arm_a.get("interaction") if isinstance(arm_a.get("interaction"), Mapping) else {}
+    )
+    b_interaction = (
+        arm_b.get("interaction") if isinstance(arm_b.get("interaction"), Mapping) else {}
+    )
     a_hooks = arm_a.get("hooks") if isinstance(arm_a.get("hooks"), Mapping) else {}
     b_hooks = arm_b.get("hooks") if isinstance(arm_b.get("hooks"), Mapping) else {}
     a_spool = arm_a.get("outctl_spool") if isinstance(arm_a.get("outctl_spool"), Mapping) else {}
+    b_spool = arm_b.get("outctl_spool") if isinstance(arm_b.get("outctl_spool"), Mapping) else {}
     a_final = arm_a.get("final") if isinstance(arm_a.get("final"), Mapping) else {}
     b_final = arm_b.get("final") if isinstance(arm_b.get("final"), Mapping) else {}
+    workflow_sequence_valid = expected_kubectl_sequence_digest is None or (
+        int(a_commands.get("kubectl_sequence_count", -1)) == expected_kubectl_sequence_count
+        and int(b_commands.get("kubectl_sequence_count", -1)) == expected_kubectl_sequence_count
+        and a_commands.get("kubectl_sequence_sha256") == expected_kubectl_sequence_digest
+        and b_commands.get("kubectl_sequence_sha256") == expected_kubectl_sequence_digest
+    )
+    expected_kubectl_count = (
+        expected_kubectl_sequence_count
+        if expected_kubectl_sequence_count is not None
+        else EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
+    )
+    workflow_output_size_valid = True
+    if expected_large_output_sequence_index is not None:
+        large_index = expected_large_output_sequence_index - 1
+        a_sizes = a_spool.get("capture_total_bytes_sequence")
+        a_large_bytes = (
+            a_sizes[large_index]
+            if isinstance(a_sizes, list) and len(a_sizes) > large_index
+            else None
+        )
+        # Arm A has a complete outctl capture, so use its retained bytes to
+        # establish the underlying command size. Arm B remains uncaptured by
+        # design; the frozen sequence proves it ran the same argv.
+        workflow_output_size_valid = all(
+            isinstance(size, int)
+            and not isinstance(size, bool)
+            and expected_large_output_min_bytes is not None
+            and expected_large_output_max_bytes is not None
+            and expected_large_output_min_bytes <= size <= expected_large_output_max_bytes
+            for size in (a_large_bytes,)
+        )
 
     strict_treatment_compliant = (
         int(a_commands.get("kubectl_via_outctl_attempts", 0))
-        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
-        and int(a_commands.get("kubectl_completed", 0)) == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
+        == expected_kubectl_count
+        and int(a_commands.get("kubectl_completed", 0)) == expected_kubectl_count
         and int(a_commands.get("kubectl_direct_completed", 0)) == 0
         and int(a_commands.get("kubectl_via_outctl_completed", 0))
-        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
+        == expected_kubectl_count
     )
     strict_treatment_first_try_compliant = (
         strict_treatment_compliant
@@ -1898,14 +2260,15 @@ def _compare_pair(
         and int(a_hooks.get("require_outctl_denials", 0)) == 0
     )
     strict_treatment_capture_accounted = (
-        int(a_spool.get("capture_directory_count", 0)) == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
+        int(a_spool.get("capture_directory_count", 0)) == expected_kubectl_count
         and int(a_commands.get("kubectl_via_outctl_attempts", 0))
-        == EXPECTED_HEALTHCHECK_KUBECTL_COMMANDS
+        == expected_kubectl_count
         and int(a_spool.get("capture_count", 0)) == int(a_spool.get("capture_directory_count", 0))
         and int(a_spool.get("partial_capture_count", 0)) == 0
         and int(a_spool.get("manifest_errors", 0)) == 0
         and set(a_spool.get("capture_status_counts", {})) <= {"COMPLETE"}
-        and int(a_spool.get("retrieval_count", 0)) == 1
+        and int(a_spool.get("retrieval_count", 0))
+        >= int(a_commands.get("retrieval_tool_turns", 0))
     )
     wrapped_attempts = int(a_commands.get("kubectl_via_outctl_attempts", 0))
     wrapped_completed = int(a_commands.get("kubectl_via_outctl_completed", 0))
@@ -1918,7 +2281,8 @@ def _compare_pair(
         and int(a_spool.get("partial_capture_count", 0)) == 0
         and int(a_spool.get("manifest_errors", 0)) == 0
         and set(a_spool.get("capture_status_counts", {})) <= {"COMPLETE"}
-        and int(a_spool.get("retrieval_count", 0)) == int(a_commands.get("retrieval_tool_turns", 0))
+        and int(a_spool.get("retrieval_count", 0))
+        >= int(a_commands.get("retrieval_tool_turns", 0))
     )
     treatment_compliant = (
         strict_treatment_compliant
@@ -1979,6 +2343,7 @@ def _compare_pair(
         and not bool(arm_b.get("model_reroute_signal"))
     )
     quality_similarity = _jaccard(signature_a, signature_b)
+    critical_high_disagreement_count = len(critical_high_a ^ critical_high_b)
     # Arm agreement is descriptive only.  It is not a denominator-based quality
     # oracle and must never decide whether an otherwise valid execution enters
     # the analysis population.
@@ -2000,9 +2365,8 @@ def _compare_pair(
         critical = expected_critical or set()
         critical_miss_a = bool(critical - signature_a)
         critical_miss_b = bool(critical - signature_b)
-        quality_noninferior = (
-            quality_score_a >= quality_score_b - 0.05
-            and not (critical_miss_a and not critical_miss_b)
+        quality_noninferior = quality_score_a >= quality_score_b - 0.05 and not (
+            critical_miss_a and not critical_miss_b
         )
         quality_basis = "frozen_expected_fact_set"
     raw_retained = _nested_number(arm_a, ("outctl_spool", "retained_total_bytes"))
@@ -2012,6 +2376,165 @@ def _compare_pair(
         if raw_retained is not None and exposed_kubectl is not None and raw_retained > 0
         else None
     )
+    a_model_visible_bytes = _nested_number(
+        arm_a, ("commands", "model_visible_command_output_bytes")
+    )
+    b_model_visible_bytes = _nested_number(
+        arm_b, ("commands", "model_visible_command_output_bytes")
+    )
+    a_total_input = _nested_number(arm_a, ("usage", "input_tokens"))
+    b_total_input = _nested_number(arm_b, ("usage", "input_tokens"))
+    a_uncached_read_input = _nested_number(arm_a, ("usage", "uncached_read_input_tokens"))
+    b_uncached_read_input = _nested_number(arm_b, ("usage", "uncached_read_input_tokens"))
+    coverage = a_spool.get("command_event_capture_id_coverage", {})
+    command_event_coverage_ok = (
+        isinstance(coverage, Mapping)
+        and not coverage.get("command_event_capture_ids")
+        and not coverage.get("manifest_capture_ids")
+    )
+    a_capture_count = int(a_spool.get("capture_count", 0))
+    a_complete_capture_count = int(
+        a_spool.get(
+            "complete_capture_count", a_spool.get("capture_status_counts", {}).get("COMPLETE", 0)
+        )
+    )
+    a_noncomplete_capture_count = max(a_capture_count - a_complete_capture_count, 0)
+    a_manifest_errors = int(a_spool.get("manifest_errors", 0))
+    a_retrieval_count = int(a_spool.get("retrieval_count", 0))
+    b_retrieval_count = int(b_spool.get("retrieval_count", 0))
+    a_retrieval_ops = (
+        a_spool.get("retrieval_operation_counts")
+        if isinstance(a_spool.get("retrieval_operation_counts"), Mapping)
+        else {}
+    )
+    a_retrieval_tool_turns = int(a_commands.get("retrieval_tool_turns", 0))
+    a_retrieval_verify_turns = int(a_retrieval_ops.get("verify", 0))
+    a_command_omission = (
+        (
+            raw_retained is not None
+            and a_model_visible_bytes is not None
+            and a_model_visible_bytes < raw_retained
+        )
+        or a_noncomplete_capture_count > 0
+        or a_manifest_errors > 0
+    )
+    a_selected_missing_capture_count = max(
+        1 if a_command_omission and a_capture_count else 0, a_noncomplete_capture_count
+    )
+    a_had_to_retrieve_raw_evidence = a_retrieval_tool_turns > 0 and a_command_omission
+    a_retrieval_recovered_omitted_output = a_command_omission is False or (
+        a_retrieval_tool_turns > 0
+        and a_retrieval_count >= a_selected_missing_capture_count
+        and a_retrieval_verify_turns >= a_selected_missing_capture_count
+    )
+    a_evidence_issues = (
+        int(a_spool.get("manifest_errors", 0)) > 0
+        or int(a_spool.get("command_event_capture_id_duplicates", 0)) > 0
+        or int(a_spool.get("retrieval_capture_id_duplicates", 0)) > 0
+        or not bool(a_spool.get("command_event_id_continuity_ok", True))
+        or not bool(a_spool.get("retrieval_event_id_continuity_ok", True))
+        or not command_event_coverage_ok
+    )
+    instrumentation_valid = (
+        int(arm_a.get("exit_code", -1)) == 0
+        and int(arm_b.get("exit_code", -1)) == 0
+        and not bool(arm_a.get("timed_out"))
+        and not bool(arm_b.get("timed_out"))
+        and bool(a_final.get("schema_valid"))
+        and bool(b_final.get("schema_valid"))
+        and (treatment_mode != "deterministic" or treatment_compliant)
+        and (treatment_mode != "deterministic" or treatment_capture_accounted)
+        and (treatment_mode != "opt-in" or not treatment_attempted or treatment_compliant)
+        and (treatment_mode != "opt-in" or treatment_capture_accounted)
+        and hooks_observed_both_arms
+        and not baseline_spontaneously_used_outctl
+        and no_mutation_attempts
+        and no_identity_escape
+        and workflow_sequence_valid
+        and workflow_output_size_valid
+        and requested_model_integrity
+        and launch_skew_ms <= 250
+    )
+    execution_identity_valid = cluster_identity_match
+    protocol_valid = instrumentation_valid and execution_identity_valid
+    economics_eligible = protocol_valid
+
+    def _cost_value(value: Mapping[str, Any] | None, key: str, metric: str) -> float | None:
+        if not isinstance(value, Mapping):
+            return None
+        payload = value.get(key)
+        if not isinstance(payload, Mapping):
+            return None
+        candidate = payload.get(metric)
+        return (
+            float(candidate)
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool)
+            else None
+        )
+
+    a_codex = _cost_value(arm_a.get("pricing"), "codex_credits", "value")
+    b_codex = _cost_value(arm_b.get("pricing"), "codex_credits", "value")
+    a_api = _cost_value(arm_a.get("pricing"), "api_equivalent_usd", "value")
+    b_api = _cost_value(arm_b.get("pricing"), "api_equivalent_usd", "value")
+
+    economics = {
+        "eligible_for_analysis": economics_eligible,
+        "model_visible_output_bytes": {
+            "a": a_model_visible_bytes,
+            "b": b_model_visible_bytes,
+            "delta": (
+                a_model_visible_bytes - b_model_visible_bytes
+                if (a_model_visible_bytes is not None and b_model_visible_bytes is not None)
+                else None
+            ),
+        },
+        "total_input": {
+            "a": a_total_input,
+            "b": b_total_input,
+            "delta": a_total_input - b_total_input
+            if (a_total_input is not None and b_total_input is not None)
+            else None,
+        },
+        "uncached_read_input": {
+            "a": a_uncached_read_input,
+            "b": b_uncached_read_input,
+            "delta": (
+                a_uncached_read_input - b_uncached_read_input
+                if (a_uncached_read_input is not None and b_uncached_read_input is not None)
+                else None
+            ),
+        },
+        "retrieval_count": {
+            # This is the physical outctl retrieval-event count. Keep it
+            # separate from model/tool-turn detection: a harness can retrieve
+            # through a helper that does not appear as a Bash command.
+            "a": a_retrieval_count,
+            "b": b_retrieval_count,
+            "delta": a_retrieval_count - b_retrieval_count,
+        },
+        "retrieval_tool_turns": {
+            "a": a_retrieval_tool_turns,
+            "b": int(b_commands.get("retrieval_tool_turns", 0)),
+            "delta": a_retrieval_tool_turns
+            - int(b_commands.get("retrieval_tool_turns", 0)),
+        },
+        "weighted_cost": {
+            "codex": {
+                "a": a_codex,
+                "b": b_codex,
+                "delta": a_codex - b_codex
+                if (a_codex is not None and b_codex is not None)
+                else None,
+            },
+            "api": {
+                "a": a_api,
+                "b": b_api,
+                "delta": a_api - b_api if (a_api is not None and b_api is not None) else None,
+            },
+        },
+        "a_had_to_retrieve_raw_evidence": a_had_to_retrieve_raw_evidence,
+        "a_retrieval_recovered_omitted_output": a_retrieval_recovered_omitted_output,
+    }
 
     flags: list[str] = []
     if treatment_mode == "deterministic" and not treatment_compliant:
@@ -2033,6 +2556,10 @@ def _compare_pair(
         flags.append("at least one non-read-only kubectl attempt was observed and guarded")
     if not no_identity_escape:
         flags.append("at least one kubectl identity-pin bypass was attempted and guarded")
+    if not workflow_sequence_valid:
+        flags.append("one or both arms deviated from the frozen kubectl workflow sequence")
+    if not workflow_output_size_valid:
+        flags.append("the frozen workflow's early large-output byte bound was not met")
     if not same_overall_status:
         flags.append("arms reached different overall health statuses")
     if not critical_high_findings_agree:
@@ -2046,31 +2573,28 @@ def _compare_pair(
     if not cluster_identity_match:
         flags.append("arm cluster context/server fingerprint mismatch; metrics suppressed")
 
-    instrumentation_valid = (
-        int(arm_a.get("exit_code", -1)) == 0
-        and int(arm_b.get("exit_code", -1)) == 0
-        and not bool(arm_a.get("timed_out"))
-        and not bool(arm_b.get("timed_out"))
-        and bool(a_final.get("schema_valid"))
-        and bool(b_final.get("schema_valid"))
-        and (treatment_mode != "deterministic" or treatment_compliant)
-        and (treatment_mode != "deterministic" or treatment_capture_accounted)
-        and (treatment_mode != "opt-in" or not treatment_attempted or treatment_compliant)
-        and (treatment_mode != "opt-in" or treatment_capture_accounted)
-        and hooks_observed_both_arms
-        and not baseline_spontaneously_used_outctl
-        and no_mutation_attempts
-        and no_identity_escape
-        and requested_model_integrity
-        and launch_skew_ms <= 250
+    interaction_metric_names = (
+        "command_count",
+        "serial_tool_round_count",
+        "sequential_model_tool_boundaries",
+        "parallel_round_count",
+        "max_parallelism",
+        "repeated_command_count",
+        "follow_up_count",
     )
-    execution_identity_valid = cluster_identity_match
-    protocol_valid = instrumentation_valid and execution_identity_valid
-    economics_eligible = protocol_valid
+    interaction_metrics = {
+        name: _comparison_metric(arm_a, arm_b, ("interaction", name))
+        for name in interaction_metric_names
+    }
+    interaction_metrics["follow_up_reason_counts"] = {
+        "a": a_interaction.get("follow_up_reason_counts", {}),
+        "b": b_interaction.get("follow_up_reason_counts", {}),
+    }
 
     return {
         "launch_skew_ms": launch_skew_ms,
         "metrics": metrics,
+        "interaction": interaction_metrics,
         "cluster_identity_match": cluster_identity_match,
         "treatment_compliant": treatment_compliant,
         "treatment_adopted": treatment_adopted,
@@ -2078,9 +2602,10 @@ def _compare_pair(
         "treatment_mode": treatment_mode,
         "treatment_first_try_compliant": treatment_first_try_compliant,
         "treatment_capture_accounted": treatment_capture_accounted,
+        "workflow_sequence_valid": workflow_sequence_valid,
+        "workflow_output_size_valid": workflow_output_size_valid,
         "hooks_observed_both_arms": hooks_observed_both_arms,
         "baseline_spontaneously_used_outctl": baseline_spontaneously_used_outctl,
-        "same_overall_status": same_overall_status,
         "critical_high_findings_agree": critical_high_findings_agree,
         "validity": {
             "instrumentation_valid": instrumentation_valid,
@@ -2099,12 +2624,19 @@ def _compare_pair(
             "quality_noninferior": quality_noninferior,
             "quality_basis": quality_basis,
         },
-        "economics": {"eligible_for_analysis": economics_eligible},
+        "economics": economics,
         # Deprecated compatibility fields.  ``pair_valid`` now means protocol
         # validity only; quality disagreement remains an outcome.
         "quality_oracle_passed": quality_noninferior is True,
         "requested_model_integrity": requested_model_integrity,
         "quality_signature_jaccard": quality_similarity,
+        "critical_high_disagreements": critical_high_disagreement_count,
+        "same_overall_status": same_overall_status,
+        "evidence_coverage_ok": command_event_coverage_ok and not a_evidence_issues,
+        "missing_or_misbound_evidence": a_evidence_issues,
+        "a_had_to_retrieve_raw_evidence": a_had_to_retrieve_raw_evidence,
+        "a_retrieval_recovered_omitted_output": a_retrieval_recovered_omitted_output,
+        "command_omission_risk": a_command_omission,
         "arm_a_outctl_exposure_ratio": outctl_exposure_ratio,
         "no_non_read_only_kubectl_attempts": no_mutation_attempts,
         "no_cluster_identity_escape": no_identity_escape,
@@ -2140,11 +2672,7 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         pair
         for pair in pairs
         if isinstance(pair.get("comparison"), Mapping)
-        and bool(
-            pair.get("comparison", {})
-            .get("economics", {})
-            .get("eligible_for_analysis")
-        )
+        and bool(pair.get("comparison", {}).get("economics", {}).get("eligible_for_analysis"))
     ]
     medians: dict[str, Any] = {}
     for name in metric_names:
@@ -2169,9 +2697,7 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 ):
                     ratios.append(float(left) / float(right))
         geometric_ratio = (
-            math.exp(sum(math.log(value) for value in ratios) / len(ratios))
-            if ratios
-            else None
+            math.exp(sum(math.log(value) for value in ratios) / len(ratios)) if ratios else None
         )
         medians[name] = {
             "median_reduction_pct": _median(values),
@@ -2206,6 +2732,15 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         }
     retrievals = {
         arm: {
+            "physical_events": sum(
+                int(
+                    pair.get("arms", {})
+                    .get(arm, {})
+                    .get("outctl_spool", {})
+                    .get("retrieval_count", 0)
+                )
+                for pair in valid_pairs
+            ),
             "tool_turns": sum(
                 int(
                     pair.get("arms", {})
@@ -2243,6 +2778,44 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         )
         for arm in ("A", "B")
     }
+    interaction: dict[str, Any] = {}
+    for arm in ("A", "B"):
+        arm_interactions = [
+            pair.get("arms", {}).get(arm, {}).get("interaction", {})
+            for pair in pairs
+            if isinstance(pair.get("arms", {}).get(arm, {}).get("interaction"), Mapping)
+        ]
+        reason_counts: dict[str, int] = {}
+        for value in arm_interactions:
+            for reason, count in value.get("follow_up_reason_counts", {}).items():
+                if isinstance(reason, str) and isinstance(count, int):
+                    reason_counts[reason] = reason_counts.get(reason, 0) + count
+        interaction[arm] = {
+            "command_count": sum(
+                int(value.get("command_count", 0)) for value in arm_interactions
+            ),
+            "serial_tool_round_count": sum(
+                int(value.get("serial_tool_round_count", 0)) for value in arm_interactions
+            ),
+            "sequential_model_tool_boundaries": sum(
+                int(value.get("sequential_model_tool_boundaries", 0))
+                for value in arm_interactions
+            ),
+            "repeated_command_count": sum(
+                int(value.get("repeated_command_count", 0)) for value in arm_interactions
+            ),
+            "parallel_round_count": sum(
+                int(value.get("parallel_round_count", 0)) for value in arm_interactions
+            ),
+            "max_parallelism": max(
+                (int(value.get("max_parallelism", 0)) for value in arm_interactions),
+                default=0,
+            ),
+            "follow_up_count": sum(
+                int(value.get("follow_up_count", 0)) for value in arm_interactions
+            ),
+            "follow_up_reason_counts": reason_counts,
+        }
     return {
         "pairs": len(pairs),
         "protocol_valid_pairs": len(valid_pairs),
@@ -2290,6 +2863,247 @@ def _aggregate_pairs(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "pooled_metrics": pooled,
         "retrievals": retrievals,
         "tool_turns": tool_turns,
+        "interaction": interaction,
+    }
+
+
+def _build_acceptance_json(
+    experiment: Mapping[str, Any],
+    pairs: Sequence[Mapping[str, Any]],
+    treatment_mode: str,
+    policy_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    comparisons: list[Mapping[str, Any]] = [
+        pair.get("comparison", {}) for pair in pairs if isinstance(pair.get("comparison"), Mapping)
+    ]
+    pair_count = len(pairs)
+    comparison_count = len(comparisons)
+
+    def _numeric(value: Any) -> float | None:
+        return (
+            float(value)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else None
+        )
+
+    def _sum_if_complete(values: Sequence[float | None]) -> float | None:
+        return float(sum(values)) if all(value is not None for value in values) else None
+
+    baseline_clean = all(
+        not bool(comp.get("baseline_spontaneously_used_outctl")) for comp in comparisons
+    )
+    treatment_compliant = all(bool(comp.get("treatment_compliant")) for comp in comparisons)
+    read_only = all(
+        bool(comp.get("no_non_read_only_kubectl_attempts"))
+        and bool(comp.get("no_cluster_identity_escape"))
+        for comp in comparisons
+    )
+    captures_verified = all(bool(comp.get("treatment_capture_accounted")) for comp in comparisons)
+    workflow_sequence_valid = all(
+        bool(comp.get("workflow_sequence_valid", True)) for comp in comparisons
+    )
+    workflow_output_size_valid = all(
+        bool(comp.get("workflow_output_size_valid", True)) for comp in comparisons
+    )
+    protocol = {
+        "baseline_clean": baseline_clean,
+        "treatment_compliant": treatment_compliant,
+        "read_only": read_only,
+        "captures_verified": captures_verified,
+        "workflow_sequence_valid": workflow_sequence_valid,
+        "workflow_output_size_valid": workflow_output_size_valid,
+        "policy_binding_valid": bool(policy_binding.get("policy_digest_match", False)),
+    }
+    protocol_valid_count = sum(1 for comp in comparisons if bool(comp.get("pair_valid")))
+    protocol["all_pairs_protocol_valid"] = (
+        pair_count > 0
+        and pair_count == comparison_count
+        and protocol_valid_count == comparison_count
+        and bool(protocol["policy_binding_valid"])
+    )
+
+    critical_high_disagreements = sum(
+        int(not comp.get("critical_high_findings_agree")) for comp in comparisons
+    )
+    status_mismatch = sum(1 for comp in comparisons if not bool(comp.get("same_overall_status")))
+    evidence_overlap_values = [
+        _numeric(comp.get("quality_signature_jaccard")) for comp in comparisons
+    ]
+    diagnostic = {
+        "comparable": pair_count > 0
+        and comparison_count == pair_count
+        and all(comp.get("pair_valid") is not False for comp in comparisons),
+        "critical_high_disagreements": critical_high_disagreements,
+        "evidence_overlap": _median(evidence_overlap_values),
+        "status_mismatch": status_mismatch,
+        "missing_or_misbound_evidence_indicators": [
+            pair.get("pair")
+            for pair in pairs
+            if pair.get("comparison", {}).get("missing_or_misbound_evidence")
+        ],
+    }
+    if not policy_binding.get("policy_digest_match", False):
+        diagnostic["missing_or_misbound_evidence_indicators"].append("policy-digest-mismatch")
+
+    protocol_economic_values = [comp.get("economics", {}) for comp in comparisons]
+    model_visible_deltas = [
+        _numeric(comp.get("model_visible_output_bytes", {}).get("delta"))
+        for comp in protocol_economic_values
+    ]
+    total_input_deltas = [
+        _numeric(comp.get("total_input", {}).get("delta")) for comp in protocol_economic_values
+    ]
+    uncached_read_deltas = [
+        _numeric(comp.get("uncached_read_input", {}).get("delta"))
+        for comp in protocol_economic_values
+    ]
+    model_visible_a = [
+        _numeric(comp.get("model_visible_output_bytes", {}).get("a"))
+        for comp in protocol_economic_values
+    ]
+    model_visible_b = [
+        _numeric(comp.get("model_visible_output_bytes", {}).get("b"))
+        for comp in protocol_economic_values
+    ]
+    total_input_a = [
+        _numeric(comp.get("total_input", {}).get("a")) for comp in protocol_economic_values
+    ]
+    total_input_b = [
+        _numeric(comp.get("total_input", {}).get("b")) for comp in protocol_economic_values
+    ]
+    uncached_read_a = [
+        _numeric(comp.get("uncached_read_input", {}).get("a")) for comp in protocol_economic_values
+    ]
+    uncached_read_b = [
+        _numeric(comp.get("uncached_read_input", {}).get("b")) for comp in protocol_economic_values
+    ]
+    codex_cost_a = [
+        _numeric(comp.get("weighted_cost", {}).get("codex", {}).get("a"))
+        for comp in protocol_economic_values
+    ]
+    codex_cost_b = [
+        _numeric(comp.get("weighted_cost", {}).get("codex", {}).get("b"))
+        for comp in protocol_economic_values
+    ]
+    api_cost_a = [
+        _numeric(comp.get("weighted_cost", {}).get("api", {}).get("a"))
+        for comp in protocol_economic_values
+    ]
+    api_cost_b = [
+        _numeric(comp.get("weighted_cost", {}).get("api", {}).get("b"))
+        for comp in protocol_economic_values
+    ]
+    model_visible_sum_a = _sum_if_complete(model_visible_a)
+    model_visible_sum_b = _sum_if_complete(model_visible_b)
+    total_input_sum_a = _sum_if_complete(total_input_a)
+    total_input_sum_b = _sum_if_complete(total_input_b)
+    uncached_read_sum_a = _sum_if_complete(uncached_read_a)
+    uncached_read_sum_b = _sum_if_complete(uncached_read_b)
+    codex_cost_sum_a = _sum_if_complete(codex_cost_a)
+    codex_cost_sum_b = _sum_if_complete(codex_cost_b)
+    api_cost_sum_a = _sum_if_complete(api_cost_a)
+    api_cost_sum_b = _sum_if_complete(api_cost_b)
+    economics = {
+        "model_visible_output_delta": _sum_if_complete(model_visible_deltas),
+        "model_visible_output_bytes": {
+            "a": model_visible_sum_a,
+            "b": model_visible_sum_b,
+        },
+        "total_input": {
+            "a": total_input_sum_a,
+            "b": total_input_sum_b,
+            "delta": _sum_if_complete(total_input_deltas),
+        },
+        "uncached_read_input": {
+            "a": uncached_read_sum_a,
+            "b": uncached_read_sum_b,
+            "delta": _sum_if_complete(uncached_read_deltas),
+        },
+        "weighted_cost": {
+            "codex": {
+                "a": codex_cost_sum_a,
+                "b": codex_cost_sum_b,
+                "delta": (
+                    codex_cost_sum_a - codex_cost_sum_b
+                    if codex_cost_sum_a is not None and codex_cost_sum_b is not None
+                    else None
+                ),
+                "unit": "codex credits",
+            },
+            "api": {
+                "a": api_cost_sum_a,
+                "b": api_cost_sum_b,
+                "delta": (
+                    api_cost_sum_a - api_cost_sum_b
+                    if api_cost_sum_a is not None and api_cost_sum_b is not None
+                    else None
+                ),
+                "unit": "usd",
+            },
+        },
+        "retrieval_count": {
+            "a": sum(
+                _numeric(economic.get("retrieval_count", {}).get("a")) or 0
+                for economic in protocol_economic_values
+            ),
+            "b": sum(
+                _numeric(economic.get("retrieval_count", {}).get("b")) or 0
+                for economic in protocol_economic_values
+            ),
+            "a_had_to_retrieve_raw_evidence": sum(
+                1 for comp in comparisons if bool(comp.get("a_had_to_retrieve_raw_evidence"))
+            ),
+            "delta": (
+                sum(
+                    _numeric(economic.get("retrieval_count", {}).get("a")) or 0
+                    for economic in protocol_economic_values
+                )
+                - sum(
+                    _numeric(economic.get("retrieval_count", {}).get("b")) or 0
+                    for economic in protocol_economic_values
+                )
+            ),
+        },
+        "retrieval_tool_turns": {
+            "a": sum(
+                _numeric(economic.get("retrieval_tool_turns", {}).get("a")) or 0
+                for economic in protocol_economic_values
+            ),
+            "b": sum(
+                _numeric(economic.get("retrieval_tool_turns", {}).get("b")) or 0
+                for economic in protocol_economic_values
+            ),
+            "delta": (
+                sum(
+                    _numeric(economic.get("retrieval_tool_turns", {}).get("a")) or 0
+                    for economic in protocol_economic_values
+                )
+                - sum(
+                    _numeric(economic.get("retrieval_tool_turns", {}).get("b")) or 0
+                    for economic in protocol_economic_values
+                )
+            ),
+        },
+        "result": "informational"
+        if pair_count == 1
+        else ("pass" if protocol["all_pairs_protocol_valid"] else "fail"),
+    }
+    interaction = _aggregate_pairs(pairs).get("interaction", {})
+
+    return {
+        "commissioning_valid": bool(protocol["all_pairs_protocol_valid"]),
+        "protocol": protocol,
+        "diagnostic": diagnostic,
+        "economics": economics,
+        "interaction": interaction,
+        "treatment_mode": treatment_mode,
+        "policy": policy_binding,
+        "pair_count": pair_count,
+        "experiment_id": experiment.get("id"),
+        "pairs": pair_count,
+        "result": "informational"
+        if pair_count == 1
+        else ("pass" if protocol["all_pairs_protocol_valid"] else "fail"),
     }
 
 
@@ -2344,6 +3158,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--timeout-seconds", type=int, default=1800)
     parser.add_argument("--prompt", type=Path, default=here / "prompt.md")
     parser.add_argument(
+        "--workflow-manifest",
+        type=Path,
+        default=None,
+        help="Optional frozen kubectl workflow whose order is validated in both arms",
+    )
+    parser.add_argument(
         "--treatment-mode",
         choices=("deterministic", "opt-in"),
         default="deterministic",
@@ -2384,6 +3204,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--policy-ref", required=True)
     parser.add_argument("--policy-digest", required=True)
     parser.add_argument(
+        "--policy-set",
+        type=Path,
+        default=DEFAULT_POLICY_SET_PATH,
+        help="Output-policy set to resolve --policy-ref and verify --policy-digest.",
+    )
+    parser.add_argument(
         "--search-redaction-exact-json",
         default=None,
         help=(
@@ -2422,15 +3248,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     if controlled_study is not None and args.expected_facts is not None:
         raise ExperimentError("--expected-facts is selected by the controlled study protocol")
     expected_facts_path = (
-        Path(controlled_study["suite"]["scenarios"][[
-            item["scenario_id"] for item in controlled_study["suite"]["scenarios"]
-        ].index(args.scenario_id)]["expected_facts"]["path"])
+        Path(
+            controlled_study["suite"]["scenarios"][
+                [item["scenario_id"] for item in controlled_study["suite"]["scenarios"]].index(
+                    args.scenario_id
+                )
+            ]["expected_facts"]["path"]
+        )
         if controlled_study is not None
-        else args.expected_facts.resolve() if args.expected_facts else None
+        else args.expected_facts.resolve()
+        if args.expected_facts
+        else None
     )
     if controlled_study is not None:
         expected_facts_path = Path(__file__).resolve().parents[2] / expected_facts_path
     expected_signature, expected_critical = _load_expected_facts(expected_facts_path)
+    workflow_manifest_path = (
+        args.workflow_manifest.resolve() if args.workflow_manifest is not None else None
+    )
+    workflow_binding, workflow_sequence = _load_workflow_manifest(workflow_manifest_path)
+    workflow_sequence_digest = (
+        workflow_binding.get("sequence_sha256") if workflow_binding is not None else None
+    )
+    workflow_sequence_count = (
+        int(workflow_binding["sequence_count"]) if workflow_binding is not None else None
+    )
+    policy_set = args.policy_set.resolve()
+    if not policy_set.is_file():
+        raise ExperimentError(f"--policy-set does not exist: {policy_set}")
+    policy_binding = _policy_binding(policy_set, args.policy_ref, args.policy_digest)
+    policy_ref = policy_binding["resolved_ref"]
+    policy_digest = policy_binding["resolved_digest"]
     if args.search_redaction_exact_json is not None:
         try:
             redactions = json.loads(args.search_redaction_exact_json)
@@ -2545,8 +3393,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     retrieval_prefix = f"{router_exec} tail {router_common}"
     wrapper = (
         f"{router_exec} run {router_common} "
-        f"--policy-ref {shlex.quote(args.policy_ref)} "
-        f"--policy-digest {shlex.quote(args.policy_digest)} "
+        f"--policy-ref {shlex.quote(policy_ref)} "
+        f"--policy-digest {shlex.quote(policy_digest)} "
         "--"
     )
 
@@ -2555,6 +3403,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if prompt_template.count(placeholder) != 1:
         raise ExperimentError(f"prompt template must contain exactly one {placeholder} placeholder")
     prompt = prompt_template.replace(placeholder, str(canonical))
+    if workflow_sequence is not None:
+        sequence_lines = "\n".join(
+            f"{index}. `{shlex.join(argv)}`"
+            for index, argv in enumerate(workflow_sequence, start=1)
+        )
+        prompt += (
+            "\n\nFrozen kubectl workflow argv (the manifest digest in the report is "
+            "authoritative):\n"
+            + sequence_lines
+        )
     auth_candidate = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "auth.json"
     auth_source = auth_candidate if auth_candidate.is_file() else None
     if not args.dry_run and auth_source is None and not os.environ.get("CODEX_API_KEY"):
@@ -2573,8 +3431,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cwd=canonical,
                 kubeconfig=kubeconfig,
                 spool_root=private / "shared-health-checker-spool",
-                policy_ref=args.policy_ref,
-                policy_digest=args.policy_digest,
+                policy_ref=policy_ref,
+                policy_digest=policy_digest,
             )
             prompt += "\n\nShared bounded appservice health-checker evidence:\n" + text
     pairs: list[dict[str, Any]] = []
@@ -2653,8 +3511,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     helper_dir_a,
                     router_exec=router_exec,
                     router_common=router_common,
-                    policy_ref=args.policy_ref,
-                    policy_digest=args.policy_digest,
+                    policy_ref=policy_ref,
+                    policy_digest=policy_digest,
                 )
             if kubeconfig is not None and not args.qualitative_regular_context:
                 base_path = str(kubectl_bin.parent) + os.pathsep + os.environ.get("PATH", "")
@@ -2924,10 +3782,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 treatment_mode=args.treatment_mode,
                 expected_signature=expected_signature,
                 expected_critical=expected_critical,
+                expected_kubectl_sequence_digest=workflow_sequence_digest,
+                expected_kubectl_sequence_count=workflow_sequence_count,
+                expected_large_output_sequence_index=(
+                    int(workflow_binding["large_output_sequence_index"])
+                    if workflow_binding is not None
+                    else None
+                ),
+                expected_large_output_min_bytes=(
+                    int(workflow_binding["large_output_min_bytes"])
+                    if workflow_binding is not None
+                    else None
+                ),
+                expected_large_output_max_bytes=(
+                    int(workflow_binding["large_output_max_bytes"])
+                    if workflow_binding is not None
+                    else None
+                ),
             )
             pairs.append(
                 {
                     "pair": pair_index,
+                    "policy": policy_binding,
                     "thread_start_order": thread_start_order,
                     "arms": {
                         "A": {
@@ -2961,6 +3837,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "worktree_a": str(worktree_a),
                     "worktree_b": str(worktree_b),
                     "wrapper": wrapper,
+                    "policy_requested_ref": args.policy_ref,
+                    "policy_requested_digest": args.policy_digest,
+                    "policy_resolved_ref": policy_ref,
+                    "policy_resolved_digest": policy_digest,
+                    "policy_set": str(policy_set),
+                    "policy_digest_match": bool(policy_binding.get("policy_digest_match", False)),
+                    "policy": dict(policy_binding),
+                    "workflow": workflow_binding,
                     "baseline_outctl_guidance": contamination,
                     "baseline_overlay_outctl_guidance": baseline_overlay_contamination,
                     "baseline_hooks_json_sha256": baseline_hooks_sha256,
@@ -3013,8 +3897,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "rendered_prompt_bytes": len(prompt.encode("utf-8")),
                     "output_schema_sha256": _sha256_file(schema_path),
                     "codex_output_schema_sha256": _sha256_file(output_schema_path),
-                    "policy_ref": args.policy_ref,
-                    "policy_digest": args.policy_digest,
+                    "policy_requested_ref": args.policy_ref,
+                    "policy_requested_digest": args.policy_digest,
+                    "policy_ref": policy_ref,
+                    "policy_digest": policy_digest,
+                    "policy_set": str(policy_set),
+                    "policy_digest_match": bool(policy_binding.get("policy_digest_match", False)),
+                    "policy": dict(policy_binding),
+                    "workflow": workflow_binding,
                     "shared_health_checker": shared_checker,
                     "expected_facts_sha256": (
                         _sha256_file(expected_facts_path) if expected_facts_path else None
@@ -3065,6 +3955,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "aggregate": _aggregate_pairs(pairs),
             }
         _write_json_private(output / "report.json", report)
+        _write_json_private(
+            output / "acceptance.json",
+            _build_acceptance_json(
+                experiment=report["experiment"],
+                pairs=pairs,
+                treatment_mode=args.treatment_mode,
+                policy_binding=policy_binding,
+            ),
+        )
         print(str(output / "report.json"))
         if not args.dry_run and not bool(report["aggregate"]["all_pairs_valid"]):
             return 1

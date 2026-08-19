@@ -72,6 +72,10 @@ def build_result_envelope(
             for rule in projection.redaction_rules
         ]
     }
+    projection_metadata = {
+        "redaction": redaction_metadata,
+        **(projection.annotations or {}),
+    }
     return CommandResultEnvelope(
         capture_ref=capture_ref,
         capture_id=capture.capture_id,
@@ -119,7 +123,7 @@ def build_result_envelope(
             token_estimator="utf8-bytes-div-4-v1",
             # The schema intentionally permits projection extensions.  This
             # metadata identifies rules and match counts only: never values.
-            extra={"redaction": redaction_metadata},
+            extra=projection_metadata,
         ),
         retrieval=CommandResultRetrieval(
             available=True,

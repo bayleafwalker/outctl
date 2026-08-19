@@ -85,9 +85,15 @@ commit other than the candidate study commit invalidate the protocol.
 
 Run separately from the controlled efficacy study. Measure adoption, logical
 command count, reruns avoided, retrieval contribution to cited findings,
-bypass reasons, and multi-turn context accumulation. Require `evidence_refs`
-for findings and checks. Retrieval should answer a specific unresolved
-question and batch related literals with `search-many`.
+bypass reasons, and multi-turn context accumulation. The first long-horizon
+workflow should place a 30–100 KB result near the beginning, require 15–30
+later investigation/tool cycles, freeze the exact command order in both arms,
+and record context-size proxies per inference when the harness exposes them.
+Require `evidence_refs` for findings and checks. Retrieval should answer a
+specific unresolved question and batch related literals with `search-many`.
+The checked-in Codex scaffold is
+`acceptance/codex_appservice_ab/long-horizon-workflow.json`; it remains
+non-evidence until a scoped read-only live run is authorized.
 
 ## Stage 6 — selected enforcement
 
@@ -118,8 +124,10 @@ outage must not remove local retrieval or bypass.
 ## Deferred features
 
 PTY capture, compression, sparse indexes, live bounded progress, exact
-tokenizers, semantic derived summaries, and remote-only operation require
-separate measured need and design approval.
+tokenizers, and remote-only operation require separate measured need and
+design approval. Semantic derived summaries are now a scoped exception:
+docs/INTERACTION_ERGONOMICS.md defines the separate ergonomics hypothesis,
+and the first adapter is limited to complete Kubernetes Pod health tables.
 
 ## Rollback
 

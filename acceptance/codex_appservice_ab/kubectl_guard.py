@@ -347,6 +347,19 @@ def classify_kubectl(command: str) -> list[KubectlInvocation]:
     return invocations
 
 
+def extract_kubectl_argvs(command: str) -> list[tuple[str, ...]]:
+    """Extract executed kubectl argv sequences through simple shell wrappers."""
+    argvs: list[tuple[str, ...]] = []
+    for segment in _shell_segments(command):
+        for index, token in enumerate(segment):
+            if _basename(token).casefold() != "kubectl" or _is_discovery_reference(
+                segment, index
+            ):
+                continue
+            argvs.append(("kubectl", *segment[index + 1 :]))
+    return argvs
+
+
 def _load_policy() -> dict[str, Any]:
     path = Path(__file__).resolve().parents[1] / "outctl-routing-policy.json"
     with path.open("r", encoding="utf-8") as handle:

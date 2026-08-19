@@ -84,6 +84,13 @@ The harness records:
 Reasoning-output tokens are already contained in output tokens and are never
 charged twice.
 
+In `report.json` and `acceptance.json`, economics deltas use the same `A - B`
+convention: negative means the guided treatment was lower. `retrieval_count`
+counts physical records in outctl's `retrieval-events.jsonl`; it is separate
+from `retrieval_tool_turns`, which counts retrieval-shaped model command turns.
+The two can differ when a helper performs retrieval without a visible Bash
+turn, so both are reported.
+
 ### Terra rate block pinned on 2026-08-08
 
 For current token-based Codex accounting:
@@ -401,3 +408,31 @@ Build deterministic raw-free evidence packages with
 `build_analyst_bundle.py`. `analyst-safe` and `reproducibility` packages both
 exclude bytecode and private/raw captures and include a bundle inventory with
 SHA-256 hashes; the reproducibility class also includes core source and tests.
+
+## Long-horizon follow-up
+
+`long-horizon-workflow.json` and `long-horizon-prompt.md` define the next
+economics experiment: twenty fixed read-only `kubectl` calls, with the large
+all-namespaces Pod inventory second and eighteen later calls. Pass the manifest
+with `--workflow-manifest`; the harness hashes the observed `kubectl` order and
+invalidates a pair when either arm deviates. The workflow is a protocol
+scaffold, not live evidence, until an explicitly scoped read-only kubeconfig
+and context are authorized.
+
+Dry-run the exact planned sequence with:
+
+```bash
+uv run python acceptance/codex_appservice_ab/run.py \
+  --dry-run \
+  --prompt acceptance/codex_appservice_ab/long-horizon-prompt.md \
+  --workflow-manifest acceptance/codex_appservice_ab/long-horizon-workflow.json \
+  --policy-ref "$OUTCTL_POLICY_REF" \
+  --policy-digest "$OUTCTL_POLICY_DIGEST"
+```
+
+Every arm report now also carries raw-free interaction telemetry: observable
+serial tool rounds, commands per concurrent wave, parallelism, sequential
+boundaries, repeated-command counts, and categorical follow-up reasons. Codex
+does not expose internal model invocation IDs in this JSONL contract, so the
+report states that limitation explicitly. Frozen offline replay cases for the
+telemetry classifier are in replay-scenarios.json.

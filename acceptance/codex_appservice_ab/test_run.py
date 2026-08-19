@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -14,10 +16,14 @@ import build_analyst_bundle
 import kubectl_guard as treatment_guard
 import kubectl_readonly_guard as baseline_guard
 import outctl_kubectl_router
+import replay
 import run
 from jsonschema import Draft202012Validator
 from kubectl_guard import classify_kubectl
 from kubectl_readonly_guard import classify_kubectl as classify_readonly_kubectl
+
+POLICY_REF = "interactive-default-v1"
+POLICY_DIGEST = "sha256:e375fe09b170e70b4a9508a91322b7e2384a8389559ebe429dfb0520104cc773"
 
 
 class GuardTests(unittest.TestCase):
@@ -31,9 +37,8 @@ class GuardTests(unittest.TestCase):
 
         wrapped = classify_kubectl(
             "uv run --project /projects/dev/outctl outctl run --mode enforce "
-            "--spool-root /tmp/x --policy-ref health --policy-digest sha256:"
-            + "0" * 64
-            + " -- kubectl get pods -A"
+            f"--spool-root /tmp/x --policy-ref {POLICY_REF} --policy-digest {POLICY_DIGEST} "
+            "-- kubectl get pods -A"
         )
         self.assertEqual(len(wrapped), 1)
         self.assertTrue(wrapped[0].wrapped_by_outctl)
@@ -52,6 +57,16 @@ class GuardTests(unittest.TestCase):
         helper = classify_kubectl("outctl-health kubectl get pods -A")
         self.assertEqual(len(helper), 1)
         self.assertTrue(helper[0].wrapped_by_outctl)
+
+    def test_extracts_argvs_through_shell_wrappers(self) -> None:
+        self.assertEqual(
+            run._kubectl_argvs("/usr/bin/bash -lc 'outctl-health kubectl get pods -A'"),
+            [("kubectl", "get", "pods", "-A")],
+        )
+        self.assertEqual(
+            run._kubectl_argvs("/usr/bin/bash -c 'kubectl get nodes -o wide'"),
+            [("kubectl", "get", "nodes", "-o", "wide")],
+        )
 
     def test_denies_mutation_and_secret_read(self) -> None:
         delete = classify_kubectl("kubectl delete pod example")
@@ -75,9 +90,7 @@ class GuardTests(unittest.TestCase):
             self.assertIsNone(guard._identity_denial("kubectl get pods", "/pin/kubectl"))
 
         self.assertIsNotNone(
-            baseline_guard._identity_denial(
-                "direnv exec . kubectl get pods -A", "/pin/kubectl"
-            )
+            baseline_guard._identity_denial("direnv exec . kubectl get pods -A", "/pin/kubectl")
         )
 
     def test_global_flags_before_verb(self) -> None:
@@ -140,9 +153,9 @@ class GuardTests(unittest.TestCase):
                     "--spool-root",
                     "/spool",
                     "--policy-ref",
-                    "health",
+                    POLICY_REF,
                     "--policy-digest",
-                    "sha256:" + "0" * 64,
+                    POLICY_DIGEST,
                     "--",
                     "kubectl",
                     "get",
@@ -187,6 +200,104 @@ class UsageTests(unittest.TestCase):
 
 
 class HarnessValidationTests(unittest.TestCase):
+    def test_long_horizon_workflow_manifest_freezes_early_large_step_and_tail_cycles(self) -> None:
+        binding, sequence = run._load_workflow_manifest(
+            Path(run.__file__).with_name("long-horizon-workflow.json")
+        )
+        assert binding is not None
+        assert sequence is not None
+        self.assertEqual(binding["workflow_id"], "appservice-health-long-horizon-v1")
+        self.assertEqual(binding["sequence_count"], 20)
+        self.assertEqual(binding["large_output_sequence_index"], 2)
+        self.assertEqual(binding["large_output_min_bytes"], 30000)
+        self.assertEqual(binding["large_output_max_bytes"], 100000)
+        self.assertEqual(binding["minimum_post_large_kubectl_cycles"], 18)
+        self.assertEqual(len(sequence) - int(binding["large_output_sequence_index"]), 18)
+
+    def test_command_metrics_hash_the_frozen_kubectl_order_without_exposing_argv(self) -> None:
+        sequence = [
+            ("kubectl", "version", "-o", "json"),
+            ("kubectl", "get", "pods", "-A", "-o", "wide"),
+        ]
+        metrics = run._command_metrics(
+            [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "kubectl version -o json",
+                        "status": "completed",
+                        "aggregated_output": "version",
+                    },
+                },
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "env python router run -- kubectl get pods -A -o wide",
+                        "status": "completed",
+                        "aggregated_output": "pods",
+                    },
+                },
+            ]
+        )
+        self.assertEqual(metrics["kubectl_sequence_count"], 2)
+        self.assertEqual(metrics["kubectl_output_bytes_sequence"], [7, 4])
+        self.assertEqual(
+            metrics["kubectl_sequence_sha256"], run._kubectl_sequence_digest(sequence)
+        )
+
+    def test_workflow_sequence_mismatch_invalidates_protocol_pair(self) -> None:
+        sequence = (("kubectl", "get", "pods", "-A"),)
+        common = {
+            "exit_code": 0,
+            "timed_out": False,
+            "final": {"schema_valid": True, "overall_status": "healthy"},
+            "model_observed": True,
+            "model_mismatch": False,
+            "model_reroute_signal": False,
+            "commands": {
+                "kubectl_completed": 1,
+                "kubectl_direct_completed": 1,
+                "kubectl_sequence_count": 1,
+                "kubectl_sequence_sha256": run._kubectl_sequence_digest(sequence),
+            },
+            "hooks": {"events": 1, "read_only_policy_denials": 0},
+            "outctl_spool": {},
+            "cluster_identity": self._identity(),
+        }
+        valid = run._compare_pair(
+            common,
+            common,
+            set(),
+            set(),
+            0,
+            treatment_mode="opt-in",
+            expected_kubectl_sequence_digest=run._kubectl_sequence_digest(sequence),
+            expected_kubectl_sequence_count=1,
+        )
+        self.assertTrue(valid["workflow_sequence_valid"])
+        self.assertTrue(valid["pair_valid"])
+        invalid_arm = {
+            **common,
+            "commands": {
+                **common["commands"],
+                "kubectl_sequence_sha256": "not-the-frozen-sequence",
+            },
+        }
+        invalid = run._compare_pair(
+            common,
+            invalid_arm,
+            set(),
+            set(),
+            0,
+            treatment_mode="opt-in",
+            expected_kubectl_sequence_digest=run._kubectl_sequence_digest(sequence),
+            expected_kubectl_sequence_count=1,
+        )
+        self.assertFalse(invalid["workflow_sequence_valid"])
+        self.assertFalse(invalid["pair_valid"])
+
     def test_analyst_bundle_is_deterministic_and_excludes_bytecode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -235,19 +346,50 @@ class HarnessValidationTests(unittest.TestCase):
             "queries": [
                 {
                     "pattern": "FailedMount",
-                    "matches": [
-                        {"projection": {"text": "FailedMount evidence"}}
-                    ],
+                    "matches": [{"projection": {"text": "FailedMount evidence"}}],
                 },
                 {"pattern": "CrashLoopBackOff", "matches": []},
             ],
         }
-        capture_id, text = outctl_kubectl_router._safe_search_many(
-            json.dumps(payload).encode()
-        )
+        capture_id, text = outctl_kubectl_router._safe_search_many(json.dumps(payload).encode())
         self.assertEqual(capture_id, "capture-1")
         self.assertIn("FailedMount evidence", text)
         self.assertIn("no bounded matches", text)
+
+    def test_router_passes_exact_small_output_without_ceremony(self) -> None:
+        payload = {
+            "receipt": {"capture_id": "capture-1"},
+            "command": {"exit_code": 0},
+            "envelope": {
+                "projection": {
+                    "inline_text": "No resources found.\n",
+                    "presentation": "exact-passthrough",
+                }
+            },
+        }
+        capture_id, exit_code, text, presentation = outctl_kubectl_router._safe_envelope(
+            json.dumps(payload).encode()
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            outctl_kubectl_router._emit(capture_id, exit_code, text, presentation)
+        self.assertEqual(output.getvalue(), "No resources found.\n")
+
+    def test_frozen_interaction_replays_classify_serial_churn_and_parallelism(self) -> None:
+        scenarios = replay.load_replay_scenarios(
+            Path(replay.__file__).with_name("replay-scenarios.json")
+        )
+        observed = {scenario["id"]: replay.replay_scenario(scenario) for scenario in scenarios}
+        serial = observed["serial-help-and-search"]
+        self.assertEqual(serial["serial_tool_round_count"], 3)
+        self.assertEqual(serial["commands_per_round"], [1, 1, 1])
+        self.assertEqual(
+            serial["follow_up_reason_counts"],
+            {"interface_discovery": 1, "confirm_absence": 1},
+        )
+        parallel = observed["parallel-baseline-wave"]
+        self.assertEqual(parallel["serial_tool_round_count"], 1)
+        self.assertEqual(parallel["max_parallelism"], 2)
 
     def test_opt_in_comparison_records_adoption_without_mandating_it(self) -> None:
         arm = {
@@ -292,6 +434,64 @@ class HarnessValidationTests(unittest.TestCase):
         self.assertEqual(comparison["treatment_adoption_state"], "attempted_failure")
         self.assertFalse(comparison["treatment_capture_accounted"])
         self.assertFalse(comparison["pair_valid"])
+
+    def test_opt_in_capture_accounting_tolerates_retrieval_events_without_model_turns(self) -> None:
+        arm = {
+            "exit_code": 0,
+            "timed_out": False,
+            "final": {"schema_valid": True, "overall_status": "healthy"},
+            "model_observed": True,
+            "model_mismatch": False,
+            "model_reroute_signal": False,
+            "commands": {
+                "kubectl_completed": 6,
+                "kubectl_direct_completed": 0,
+                "kubectl_via_outctl_attempts": 6,
+                "kubectl_via_outctl_completed": 6,
+                "retrieval_tool_turns": 0,
+            },
+            "hooks": {"events": 1, "read_only_policy_denials": 0},
+            "outctl_spool": {
+                "capture_directory_count": 6,
+                "capture_count": 6,
+                "partial_capture_count": 0,
+                "manifest_errors": 0,
+                "capture_status_counts": {"COMPLETE": 6},
+                "retrieval_count": 1,
+            },
+            "pricing": {
+                "codex_credits": {"value": 1.0},
+                "api_equivalent_usd": {"value": 0.10},
+            },
+            "cluster_identity": self._identity(),
+        }
+        baseline = {
+            **arm,
+            "commands": {
+                "kubectl_completed": 6,
+                "kubectl_direct_completed": 6,
+            },
+            "outctl_spool": {},
+            "pricing": {
+                "codex_credits": {"value": 2.0},
+                "api_equivalent_usd": {"value": 0.20},
+            },
+            "cluster_identity": self._identity(),
+        }
+        comparison = run._compare_pair(arm, baseline, set(), set(), 0, treatment_mode="opt-in")
+        self.assertTrue(comparison["treatment_capture_accounted"])
+        self.assertTrue(comparison["pair_valid"])
+        self.assertEqual(comparison["economics"]["retrieval_count"], {"a": 1, "b": 0, "delta": 1})
+        self.assertEqual(
+            comparison["economics"]["retrieval_tool_turns"],
+            {"a": 0, "b": 0, "delta": 0},
+        )
+        self.assertEqual(comparison["economics"]["weighted_cost"]["codex"]["delta"], -1.0)
+        self.assertEqual(comparison["economics"]["weighted_cost"]["api"]["delta"], -0.1)
+        self.assertNotIn(
+            "arm A opt-in attempts lack matching complete captures or retrieval events",
+            comparison["flags"],
+        )
 
     def test_opt_in_quality_disagreement_remains_an_outcome(self) -> None:
         arm = {
@@ -479,6 +679,104 @@ class HarnessValidationTests(unittest.TestCase):
             self.assertIn('"192.0.2.10" = "allow"', config)
             self.assertNotIn("sandbox_mode", config)
 
+    def test_acceptance_json_builds_protocol_diagnostic_economics(self) -> None:
+        policy_binding = {
+            "requested_ref": POLICY_REF,
+            "resolved_ref": POLICY_REF,
+            "requested_digest": POLICY_DIGEST,
+            "resolved_digest": POLICY_DIGEST,
+            "policy_digest_match": True,
+        }
+        comparison = {
+            "pair": 1,
+            "baseline_spontaneously_used_outctl": False,
+            "treatment_compliant": True,
+            "no_non_read_only_kubectl_attempts": True,
+            "no_cluster_identity_escape": True,
+            "treatment_capture_accounted": True,
+            "pair_valid": True,
+            "quality_signature_jaccard": 0.8,
+            "critical_high_findings_agree": True,
+            "same_overall_status": True,
+            "missing_or_misbound_evidence": False,
+            "economics": {
+                "model_visible_output_bytes": {"a": 256.0, "b": 1024.0, "delta": -768.0},
+                "total_input": {"a": 40_000.0, "b": 60_000.0, "delta": -20_000.0},
+                "uncached_read_input": {"a": 30_000.0, "b": 45_000.0, "delta": -15_000.0},
+                "retrieval_count": {
+                    "a": 1,
+                    "b": 2,
+                    "a_had_to_retrieve_raw_evidence": 1,
+                    "delta": -1,
+                },
+                "retrieval_tool_turns": {
+                    "a": 0,
+                    "b": 0,
+                    "delta": 0,
+                },
+                "weighted_cost": {
+                    "codex": {"a": 1.2, "b": 2.4, "delta": -1.2},
+                    "api": {"a": 0.05, "b": 0.11, "delta": -0.06},
+                },
+                "eligible_for_analysis": True,
+            },
+            "critical_high_disagreements": 0,
+        }
+        output = run._build_acceptance_json(
+            experiment={"id": "acceptance-check"},
+            pairs=[{"comparison": comparison}],
+            treatment_mode="deterministic",
+            policy_binding=policy_binding,
+        )
+        self.assertTrue(output["commissioning_valid"])
+        self.assertEqual(output["result"], "informational")
+        self.assertEqual(output["economics"]["result"], "informational")
+        self.assertTrue(output["protocol"]["baseline_clean"])
+        self.assertTrue(output["protocol"]["treatment_compliant"])
+        self.assertTrue(output["protocol"]["read_only"])
+        self.assertTrue(output["protocol"]["captures_verified"])
+        self.assertEqual(output["policy"], policy_binding)
+        self.assertEqual(output["diagnostic"]["critical_high_disagreements"], 0)
+        self.assertEqual(output["diagnostic"]["status_mismatch"], 0)
+        self.assertEqual(
+            output["economics"]["retrieval_count"],
+            {"a": 1, "b": 2, "a_had_to_retrieve_raw_evidence": 0, "delta": -1},
+        )
+        self.assertEqual(
+            output["economics"]["retrieval_tool_turns"],
+            {"a": 0, "b": 0, "delta": 0},
+        )
+        self.assertEqual(
+            output["economics"]["weighted_cost"],
+            {
+                "codex": {"a": 1.2, "b": 2.4, "delta": -1.2, "unit": "codex credits"},
+                "api": {"a": 0.05, "b": 0.11, "delta": -0.06, "unit": "usd"},
+            },
+        )
+
+    def test_acceptance_json_marks_policy_mismatch_as_noncompliant(self) -> None:
+        policy_binding = {
+            "requested_ref": POLICY_REF,
+            "resolved_ref": POLICY_REF,
+            "requested_digest": POLICY_DIGEST,
+            "resolved_digest": POLICY_DIGEST,
+            "policy_digest_match": True,
+        }
+        mismatched_binding = policy_binding | {"policy_digest_match": False}
+        output = run._build_acceptance_json(
+            experiment={"id": "acceptance-check"},
+            pairs=[{"comparison": {"pair_valid": True}}],
+            treatment_mode="deterministic",
+            policy_binding=mismatched_binding,
+        )
+        self.assertFalse(output["protocol"]["policy_binding_valid"])
+        self.assertFalse(output["commissioning_valid"])
+        self.assertFalse(output["protocol"]["all_pairs_protocol_valid"])
+        self.assertIn(
+            "policy-digest-mismatch",
+            output["diagnostic"]["missing_or_misbound_evidence_indicators"],
+        )
+
     def test_codex_command_uses_permission_profile_not_sandbox_flag(self) -> None:
         spool = Path("/tmp/outctl-spool")
         command = run._build_codex_command(
@@ -661,6 +959,80 @@ class HarnessValidationTests(unittest.TestCase):
             self.assertTrue(parsed["model_reroute_signal"])
             self.assertFalse(parsed["pricing"]["available"])
 
+    def test_preflight_distinguishes_transport_failures(self) -> None:
+        kubeconfig = Path("/tmp/read-only.kubeconfig")
+        context = "readonly"
+
+        def fake_kubectl_output(
+            kubectl_bin: str,
+            _kubeconfig: Path,
+            _context: str,
+            *args: str,
+        ) -> subprocess.CompletedProcess[bytes]:
+            if tuple(args[:2]) == ("config", "current-context"):
+                return subprocess.CompletedProcess(args, 0, b"readonly", b"")
+            if tuple(args[:2]) == ("config", "view"):
+                return subprocess.CompletedProcess(
+                    args, 0, b"https://192.168.20.10:6443", b""
+                )
+            if tuple(args[:2]) == ("auth", "can-i"):
+                if args[2] == "get" and args[3] == "nodes":
+                    return subprocess.CompletedProcess(
+                        args, 2, b"", b"Unable to connect to the server: dial tcp ...",
+                    )
+                return subprocess.CompletedProcess(args, 0, b"yes", b"")
+            return subprocess.CompletedProcess(args, 2, b"", b"unexpected authz command")
+
+        with (
+            mock.patch.object(run, "_kubectl_output", side_effect=fake_kubectl_output),
+            self.assertRaisesRegex(
+                run.ExperimentError,
+                r"kubeconfig authorization preflight could not verify required permission",
+            ),
+        ):
+            run._preflight_readonly_kubeconfig(
+                kubectl_bin="kubectl",
+                kubeconfig=kubeconfig,
+                context=context,
+                allow_broad_identity=False,
+            )
+
+    def test_preflight_reports_real_rbac_deny_as_missing_permission(self) -> None:
+        kubeconfig = Path("/tmp/read-only.kubeconfig")
+        context = "readonly"
+
+        def fake_kubectl_output(
+            kubectl_bin: str,
+            _kubeconfig: Path,
+            _context: str,
+            *args: str,
+        ) -> subprocess.CompletedProcess[bytes]:
+            if tuple(args[:2]) == ("config", "current-context"):
+                return subprocess.CompletedProcess(args, 0, b"readonly", b"")
+            if tuple(args[:2]) == ("config", "view"):
+                return subprocess.CompletedProcess(
+                    args, 0, b"https://192.168.20.10:6443", b""
+                )
+            if tuple(args[:2]) == ("auth", "can-i"):
+                if args[2] == "list" and args[3] == "persistentvolumeclaims":
+                    return subprocess.CompletedProcess(args, 0, b"no", b"")
+                return subprocess.CompletedProcess(args, 0, b"yes", b"")
+            return subprocess.CompletedProcess(args, 2, b"", b"unexpected authz command")
+
+        with (
+            mock.patch.object(run, "_kubectl_output", side_effect=fake_kubectl_output),
+            self.assertRaisesRegex(
+                run.ExperimentError,
+                r"read-only kubeconfig lacks a required fixed-corpus permission",
+            ),
+        ):
+            run._preflight_readonly_kubeconfig(
+                kubectl_bin="kubectl",
+                kubeconfig=kubeconfig,
+                context=context,
+                allow_broad_identity=False,
+            )
+
 
 class EndToEndTests(unittest.TestCase):
     def test_concurrent_pair_with_fake_codex(self) -> None:
@@ -728,6 +1100,9 @@ class EndToEndTests(unittest.TestCase):
                             "evidence_refs": [{
                                 "capture_id": "capture-1",
                                 "operation": "projection",
+                                "stream": "stdout",
+                                "start": 0,
+                                "end": 120,
                             }],
                         }],
                         "findings": [],
@@ -739,8 +1114,10 @@ class EndToEndTests(unittest.TestCase):
                     if arm == "A":
                         command = (
                             "outctl run --mode enforce --spool-root /tmp/x "
-                            "--policy-ref p --policy-digest sha256:"
-                            + "0" * 64
+                            "--policy-ref "
+                            + os.environ["POLICY_REF"]
+                            + " --policy-digest "
+                            + os.environ["POLICY_DIGEST"]
                             + " -- kubectl get pods -A"
                         )
                         output = "x" * 100
@@ -821,6 +1198,8 @@ class EndToEndTests(unittest.TestCase):
             output = root / "result"
             env = os.environ.copy()
             env["CODEX_HOME"] = str(fake_home)
+            env["POLICY_REF"] = POLICY_REF
+            env["POLICY_DIGEST"] = POLICY_DIGEST
             completed = subprocess.run(
                 [
                     str(Path(run.__file__).resolve()),
@@ -839,9 +1218,9 @@ class EndToEndTests(unittest.TestCase):
                     "--codex-bin",
                     str(fake_codex),
                     "--policy-ref",
-                    "health",
+                    POLICY_REF,
                     "--policy-digest",
-                    "sha256:" + "0" * 64,
+                    POLICY_DIGEST,
                     "--pairs",
                     "1",
                     "--treatment-mode",

@@ -1,0 +1,100 @@
+{
+  "schema_version": "outctl.codex-ab.replay/v1",
+  "scenarios": [
+    {
+      "id": "serial-help-and-search",
+      "events": [
+        {
+          "type": "item.started",
+          "item": {"id": "c1", "type": "command_execution"}
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "c1",
+            "type": "command_execution",
+            "command": "outctl-health --help",
+            "aggregated_output": "usage\\n",
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.started",
+          "item": {"id": "c2", "type": "command_execution"}
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "c2",
+            "type": "command_execution",
+            "command": "outctl-health kubectl get pods -A -o wide",
+            "aggregated_output": "capture_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n[... output omitted ...]\\n",
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.started",
+          "item": {"id": "c3", "type": "command_execution"}
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "c3",
+            "type": "command_execution",
+            "command": "outctl-health search-many aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --literal Pending --literal CrashLoopBackOff",
+            "aggregated_output": "capture_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\nno bounded matches\\n",
+            "status": "completed"
+          }
+        }
+      ],
+      "expected": {
+        "serial_tool_round_count": 3,
+        "commands_per_round": [1, 1, 1],
+        "follow_up_reason_counts": {
+          "interface_discovery": 1,
+          "confirm_absence": 1
+        }
+      }
+    },
+    {
+      "id": "parallel-baseline-wave",
+      "events": [
+        {
+          "type": "item.started",
+          "item": {"id": "c1", "type": "command_execution"}
+        },
+        {
+          "type": "item.started",
+          "item": {"id": "c2", "type": "command_execution"}
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "c1",
+            "type": "command_execution",
+            "command": "kubectl get nodes",
+            "aggregated_output": "NAME\\nnode-1\\n",
+            "status": "completed"
+          }
+        },
+        {
+          "type": "item.completed",
+          "item": {
+            "id": "c2",
+            "type": "command_execution",
+            "command": "kubectl get pods -A",
+            "aggregated_output": "NAME\\nfoo\\n",
+            "status": "completed"
+          }
+        }
+      ],
+      "expected": {
+        "serial_tool_round_count": 1,
+        "commands_per_round": [2],
+        "parallel_round_count": 1,
+        "max_parallelism": 2,
+        "follow_up_count": 0
+      }
+    }
+  ]
+}

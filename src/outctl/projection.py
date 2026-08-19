@@ -70,6 +70,7 @@ class ProjectionResult:
     sha256: str
     gap_marker: str | None
     redaction_rules: tuple[RedactionRule, ...] = ()
+    annotations: dict[str, object] | None = None
 
     @property
     def digest(self) -> str:

@@ -3,8 +3,8 @@
 
 The router never reads capture files.  It invokes the existing outctl CLI,
 parses its bounded JSON envelope, and writes a deliberately small response for
-the model: a capture identifier, command status, and safe inline projection.
-Raw capture bytes remain in the outctl spool.
+the model. Exact small output is passed through without ceremony; raw capture
+bytes remain in the outctl spool.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def _outctl_command(value: str) -> list[str]:
     return parsed
 
 
-def _safe_envelope(stdout: bytes) -> tuple[str, int | None, str]:
+def _safe_envelope(stdout: bytes) -> tuple[str, int | None, str, str | None]:
     value: Any = json.loads(stdout.decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError("outctl response must be an object")
@@ -52,13 +52,31 @@ def _safe_envelope(stdout: bytes) -> tuple[str, int | None, str]:
         raise ValueError("outctl response has an invalid command exit status")
     if not isinstance(text, str):
         raise ValueError("outctl response lacks a safe projection")
-    return capture_id, exit_code, text
+    extra = projection.get("extra") if isinstance(projection, dict) else None
+    presentation = projection.get("presentation") if isinstance(projection, dict) else None
+    if presentation is None and isinstance(extra, dict):
+        presentation = extra.get("presentation")
+    if presentation is not None and not isinstance(presentation, str):
+        raise ValueError("outctl response has an invalid presentation mode")
+    return capture_id, exit_code, text, presentation
 
 
-def _emit(capture_id: str, exit_code: int | None, text: str) -> None:
+def _emit(
+    capture_id: str,
+    exit_code: int | None,
+    text: str,
+    presentation: str | None = None,
+) -> None:
+    if presentation == "exact-passthrough" and exit_code == 0:
+        sys.stdout.write(text)
+        return
     print(f"capture_id: {capture_id}")
     print(f"command_exit_code: {exit_code if exit_code is not None else 'signal'}")
-    print("bounded_projection:")
+    print(
+        "complete_health_scan:"
+        if presentation in {"semantic-complete", "semantic-bounded"}
+        else "bounded_projection:"
+    )
     sys.stdout.write(text)
     if not text.endswith("\n"):
         print()
@@ -151,7 +169,7 @@ def _run(argv: Sequence[str]) -> int:
         list(argv), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
     )
     try:
-        capture_id, exit_code, text = _safe_envelope(completed.stdout)
+        capture_id, exit_code, text, presentation = _safe_envelope(completed.stdout)
     except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
         # Do not expose child stderr: it may contain command output or secrets.
         # These bounded, raw-free facts are enough to distinguish an outctl
@@ -163,7 +181,7 @@ def _run(argv: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 1
-    _emit(capture_id, exit_code, text)
+    _emit(capture_id, exit_code, text, presentation)
     return completed.returncode
 
 
