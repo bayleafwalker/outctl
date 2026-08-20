@@ -49,5 +49,5 @@
     "targeted_first": true,
     "commands": ["uv run pytest", "uv run ruff check .", "uv run mypy src", "uv build", "python /projects/dev/agentops/templates/dispatch/scripts/validate_verification_artifacts.py --root ."]
   },
-  "hooks": {"level": "verification", "publishers": ["git", "dispatcher-gate", "github"]}
+  "hooks": {"level": "verification", "publishers": ["git", "github"]}
 }
