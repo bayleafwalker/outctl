@@ -67,6 +67,20 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
     "compare_direct_wrapped": ("outctl.comparison", "compare_direct_wrapped"),
     "make_direct_reference": ("outctl.comparison", "make_direct_reference"),
     "build_result_envelope": ("outctl.envelope", "build_result_envelope"),
+    # Observability and reporting
+    "ObservabilityError": ("outctl.observability", "ObservabilityError"),
+    "TelemetryContext": ("outctl.observability", "TelemetryContext"),
+    "TelemetryEvent": ("outctl.observability", "TelemetryEvent"),
+    "TelemetryRecorder": ("outctl.observability", "TelemetryRecorder"),
+    "events_from_pilot_report": ("outctl.observability", "events_from_pilot_report"),
+    "JsonlEventSink": ("outctl.observability", "JsonlEventSink"),
+    "ExperimentDefinition": ("outctl.observability", "ExperimentDefinition"),
+    "read_events": ("outctl.observability", "read_events"),
+    "render_prometheus": ("outctl.observability", "render_prometheus"),
+    "build_loki_push": ("outctl.observability", "build_loki_push"),
+    "build_otlp_logs": ("outctl.observability", "build_otlp_logs"),
+    "build_otlp_metrics": ("outctl.observability", "build_otlp_metrics"),
+    "compare_experiment": ("outctl.observability", "compare_experiment"),
 }
 
 

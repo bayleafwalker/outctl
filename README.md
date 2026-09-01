@@ -25,6 +25,8 @@ The design is deliberately narrow. `outctl` is not a scheduler, queue, workflow 
 10. [`docs/architecture/README.md`](docs/architecture/README.md) and
     [`docs/MIGRATION_ROADMAP.md`](docs/MIGRATION_ROADMAP.md) — accepted hybrid
     architecture and W0-W8 migration boundary.
+11. [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) — bounded Prometheus,
+    Loki/OTLP export, and Homelab Analytics experiment reporting.
 
 ## Core decision
 
@@ -48,6 +50,9 @@ kctl: curated policies and decisions, never raw command logs
 - `schemas/command-result-envelope.schema.json`: caller-facing result envelope.
 - `schemas/capture-manifest.schema.json`: immutable capture manifest.
 - `schemas/audit-event.schema.json`: audit event starter schema.
+- `schemas/observability-event.schema.json`: bounded model/tool telemetry.
+- `schemas/experiment-definition.schema.json` and
+  `schemas/experiment-report.schema.json`: comparison contracts.
 - `config/output-policies.example.yaml`: default and command-class policies.
 - `examples/execution-envelope-fragment.yaml`: actionq/runner binding.
 - `examples/command-result-envelope.json`: representative result.
@@ -89,6 +94,16 @@ The CLI supports an opt-in direct-argv wrapper via `outctl run -- <argv>`,
 bounded retrieval commands, and raw-free pilot-report validation. See
 [`docs/WORKSTATION_PILOT_RUNBOOK.md`](docs/WORKSTATION_PILOT_RUNBOOK.md) for
 the Codex/Claude appservice pilot and review procedure.
+
+Agent telemetry can be recorded locally and exported without a required
+daemon:
+
+```bash
+outctl telemetry validate examples/observability/events.ndjson
+outctl telemetry export examples/observability/events.ndjson --format prometheus
+outctl experiment compare examples/observability/outctl-long-horizon-v2.yaml \
+  examples/observability/events.ndjson
+```
 
 The native W6 command path remains generic and starts no Python. Stdin is null
 unless `--stdin inherit` is selected; reviewed explicit-shell and opaque

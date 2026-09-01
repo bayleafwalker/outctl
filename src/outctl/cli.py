@@ -34,6 +34,19 @@ from outctl.enforcement import (
     compile_enforcement_observation,
     select_command_mode,
 )
+from outctl.observability import (
+    ObservabilityError,
+    build_loki_push,
+    build_otlp_logs,
+    build_otlp_metrics,
+    compare_experiment,
+    events_from_pilot_report,
+    export_loki,
+    export_otlp,
+    load_document,
+    read_events,
+    render_prometheus,
+)
 from outctl.pilot import PilotReportError, validate_pilot_report
 from outctl.projection import ProjectionLimits, ProjectionResult, project_bytes
 from outctl.retrieval import (
@@ -49,6 +62,7 @@ from outctl.retrieval import (
     tail_stream,
     verify_capture,
 )
+from outctl.serialization import canonical_json_text
 from outctl.study import StudyCompileError, compile_study_analysis, load_json_object
 from outctl.ux import UxCompileError, compile_ux_evidence
 
@@ -159,8 +173,11 @@ def build_parser() -> argparse.ArgumentParser:
             "enablement-evidence",
             "enforcement-observation",
             "evidence-reference",
+            "experiment-definition",
+            "experiment-report",
             "expected-facts",
             "logical-command-request",
+            "observability-event",
             "runner-command-result",
             "scenario-manifest",
             "shadow-observation",
@@ -176,6 +193,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     study_compile.add_argument("protocol", type=Path)
     study_compile.add_argument("observations", type=Path)
+    telemetry = commands.add_parser(
+        "telemetry", help="validate and export bounded agent observability events"
+    )
+    telemetry_commands = telemetry.add_subparsers(dest="telemetry_command", required=True)
+    telemetry_validate = telemetry_commands.add_parser("validate", help="validate event JSONL")
+    telemetry_validate.add_argument("events", type=Path)
+    pilot_events = telemetry_commands.add_parser(
+        "from-pilot", help="convert an existing raw-free pilot report to event JSONL"
+    )
+    pilot_events.add_argument("report", type=Path)
+    pilot_events.add_argument("--experiment", required=True, dest="experiment_id")
+    pilot_events.add_argument("--baseline-session", default="B")
+    pilot_events.add_argument("--treatment-session", default="A")
+    pilot_events.add_argument("--provider", default="unknown")
+    pilot_events.add_argument("--model", default="unknown")
+    pilot_events.add_argument("--harness", default="codex")
+    pilot_events.add_argument("--scenario", default="pilot")
+    pilot_events.add_argument("--output", type=Path, required=True)
+    telemetry_export = telemetry_commands.add_parser("export", help="export event JSONL")
+    telemetry_export.add_argument("events", type=Path)
+    telemetry_export.add_argument(
+        "--format", choices=("prometheus", "loki", "otlp-logs", "otlp-metrics"), required=True
+    )
+    telemetry_export.add_argument("--endpoint", help="appservice endpoint for network export")
+    telemetry_export.add_argument(
+        "--output", type=Path, help="write the rendered payload to a file"
+    )
+    experiment = commands.add_parser("experiment", help="compile Homelab Analytics reports")
+    experiment_commands = experiment.add_subparsers(dest="experiment_command", required=True)
+    experiment_compare = experiment_commands.add_parser(
+        "compare", help="compare baseline and treatment event runs"
+    )
+    experiment_compare.add_argument("definition", type=Path)
+    experiment_compare.add_argument("events", type=Path)
+    # Keep a flat spelling for scripts while the nested form mirrors HLA's
+    # proposed `experiment compare` command.
+    flat_compare = commands.add_parser("experiment-compare", help=argparse.SUPPRESS)
+    flat_compare.add_argument("definition", type=Path)
+    flat_compare.add_argument("events", type=Path)
     ux_compile = commands.add_parser("ux-compile", help="compile digest-bound UX evidence")
     ux_compile.add_argument("task_protocol", type=Path)
     ux_compile.add_argument("observations", type=Path)
@@ -604,6 +660,79 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.command == "telemetry":
+            if args.telemetry_command == "from-pilot":
+                report = load_document(args.report)
+                events = events_from_pilot_report(
+                    report,
+                    experiment_id=args.experiment_id,
+                    baseline_session=args.baseline_session,
+                    treatment_session=args.treatment_session,
+                    provider=args.provider,
+                    model=args.model,
+                    harness=args.harness,
+                    scenario=args.scenario,
+                )
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                args.output.write_text(
+                    "".join(canonical_json_text(event.to_dict()) + "\n" for event in events),
+                    encoding="utf-8",
+                )
+                args.output.chmod(0o600)
+                _json({"status": "WRITTEN", "events": len(events), "path": str(args.output)})
+                return 0
+            events = read_events(args.events)
+            if args.telemetry_command == "validate":
+                _json(
+                    {
+                        "status": "VALID",
+                        "schema": "observability-event",
+                        "events": len(events),
+                        "runs": len({event.context.run_id for event in events}),
+                    }
+                )
+                return 0
+            if args.telemetry_command == "export":
+                if args.format == "prometheus":
+                    rendered = render_prometheus(events)
+                elif args.format == "loki":
+                    rendered = json.dumps(
+                        build_loki_push(events), sort_keys=True, separators=(",", ":")
+                    )
+                elif args.format == "otlp-logs":
+                    rendered = json.dumps(
+                        build_otlp_logs(events), sort_keys=True, separators=(",", ":")
+                    )
+                else:
+                    rendered = json.dumps(
+                        build_otlp_metrics(events), sort_keys=True, separators=(",", ":")
+                    )
+                if args.endpoint:
+                    if args.format == "loki":
+                        export_loki(events, args.endpoint)
+                    elif args.format in {"otlp-logs", "otlp-metrics"}:
+                        export_otlp(events, args.endpoint)
+                    else:
+                        raise ObservabilityError(
+                            "Prometheus export has no push endpoint; use --output or scrape it"
+                        )
+                    _json({"status": "EXPORTED", "format": args.format, "events": len(events)})
+                elif args.output:
+                    args.output.parent.mkdir(parents=True, exist_ok=True)
+                    args.output.write_text(rendered, encoding="utf-8")
+                    args.output.chmod(0o600)
+                    _json({"status": "WRITTEN", "format": args.format, "path": str(args.output)})
+                elif args.format == "prometheus":
+                    print(rendered, end="")
+                else:
+                    print(rendered)
+                return 0
+            raise AssertionError(f"unknown telemetry command {args.telemetry_command!r}")
+        if args.command in {"experiment", "experiment-compare"}:
+            definition = load_document(args.definition)
+            events = read_events(args.events)
+            _json(compare_experiment(definition, events))
+            return 0
         if args.command == "ux-compile":
             _json(
                 compile_ux_evidence(
@@ -636,6 +765,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         EnforcementError,
         OSError,
+        ObservabilityError,
         PilotReportError,
         StudyCompileError,
         UxCompileError,

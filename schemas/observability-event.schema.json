@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:observability-event:v1",
+  "title": "Bounded agent observability event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "occurred_at", "event", "experiment", "arm", "run_id", "session_id", "sequence"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.observability.event/v1"},
+    "occurred_at": {"type": "string", "minLength": 1},
+    "event": {"enum": ["run_started", "model_request", "model_response", "tool_call", "tool_result", "run_completed"]},
+    "experiment": {"$ref": "#/$defs/label"},
+    "arm": {"$ref": "#/$defs/label"},
+    "provider": {"$ref": "#/$defs/label"},
+    "model": {"$ref": "#/$defs/label"},
+    "harness": {"$ref": "#/$defs/label"},
+    "scenario": {"$ref": "#/$defs/label"},
+    "run_id": {"$ref": "#/$defs/identifier"},
+    "session_id": {"$ref": "#/$defs/identifier"},
+    "correlation_id": {"$ref": "#/$defs/identifier"},
+    "sequence": {"type": "integer", "minimum": 0},
+    "tool": {"$ref": "#/$defs/label"},
+    "duration_ms": {"type": "integer", "minimum": 0},
+    "active_time_ms": {"type": "integer", "minimum": 0},
+    "input_tokens": {"type": "integer", "minimum": 0},
+    "output_tokens": {"type": "integer", "minimum": 0},
+    "cached_tokens": {"type": "integer", "minimum": 0},
+    "cache_write_tokens": {"type": "integer", "minimum": 0},
+    "cost_usd": {"type": "number", "minimum": 0},
+    "output_bytes": {"type": "integer", "minimum": 0},
+    "visible_bytes": {"type": "integer", "minimum": 0},
+    "lines_changed": {"type": "integer", "minimum": 0},
+    "success": {"type": "boolean"},
+    "result": {"enum": ["pass", "fail", "error", "unknown"]},
+    "measurements": {"$ref": "#/$defs/measurements"},
+    "attributes": {"type": "object", "additionalProperties": {"type": ["string", "integer", "number", "boolean", "null"]}}
+  },
+  "$defs": {
+    "label": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001F\\u007F]+$"},
+    "identifier": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000-\\u001F\\u007F]+$"},
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tokens.input": {"type": "number", "minimum": 0},
+        "tokens.output": {"type": "number", "minimum": 0},
+        "tokens.cached": {"type": "number", "minimum": 0},
+        "tokens.cache_write": {"type": "number", "minimum": 0},
+        "cost": {"type": "number", "minimum": 0},
+        "duration": {"type": "number", "minimum": 0},
+        "model_requests": {"type": "number", "minimum": 0},
+        "tool_calls": {"type": "number", "minimum": 0},
+        "tool_failures": {"type": "number", "minimum": 0},
+        "active_time": {"type": "number", "minimum": 0},
+        "lines_changed": {"type": "number", "minimum": 0},
+        "evidence_bytes_visible": {"type": "number", "minimum": 0},
+        "tool_latency": {"type": "number", "minimum": 0}
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vuoro:outctl:experiment-report:v1",
+  "title": "Raw-free agent experiment comparison report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "experiment_id", "baseline", "treatment", "source", "metrics", "derived", "outcome", "generated_at", "report_digest"],
+  "properties": {
+    "schema_version": {"const": "vuoro.outctl.experiment-report/v1"},
+    "experiment_id": {"type": "string", "minLength": 1},
+    "baseline": {"type": "string", "minLength": 1},
+    "treatment": {"type": "string", "minLength": 1},
+    "source": {"type": "object", "additionalProperties": false, "required": ["events", "runs"], "properties": {"events": {"type": "integer", "minimum": 0}, "runs": {"type": "integer", "minimum": 0}}},
+    "metrics": {"type": "object"},
+    "derived": {"type": "object"},
+    "outcome": {"type": "object"},
+    "generated_at": {"type": ["string", "null"]},
+    "report_digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

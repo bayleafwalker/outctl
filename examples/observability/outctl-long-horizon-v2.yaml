@@ -1,0 +1,28 @@
+id: outctl-long-horizon-v2
+baseline: direct
+treatment: outctl
+
+metrics:
+  - tokens.input
+  - tokens.output
+  - tokens.cached
+  - cost
+  - duration
+  - model_requests
+  - tool_calls
+  - tool_failures
+  - active_time
+  - lines_changed
+  - evidence_bytes_visible
+  - outcome
+
+derived:
+  - model_decision_boundaries
+  - tools_per_model_round
+  - tokens_per_success
+  - cost_per_success
+  - evidence_bytes_visible
+  - interaction_topology
+
+outcome:
+  query: "diagnosis quality and acceptance outcome remain non-inferior"
