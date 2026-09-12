@@ -324,3 +324,59 @@ def test_app_server_approval_requires_existing_capture_for_one_guided_retrieval(
         "outctl", "tail", "--spool-root", str(tmp_path), "capture-1", "stdout", "--lines", "20"
     )
     assert policy.decision(_approval_params(shlex.join(retrieval), "tail")) == "decline"
+
+
+class _FakeCompleted:
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _preflight_kubeconfig(tmp_path: Path) -> Path:
+    kubeconfig = tmp_path / "readonly.kubeconfig"
+    kubeconfig.write_text("apiVersion: v1\nkind: Config\n")
+    return kubeconfig
+
+
+def test_preflight_reports_unreachable_api_as_transport_not_rbac(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreachable API must not be reported as a missing RBAC grant.
+
+    Regression: the sandbox denied egress to the API, every can-i returned a
+    non-zero exit with empty stdout, and the launcher blamed the read-only
+    role.  That sends the operator to widen a deliberately minimal ClusterRole
+    to fix a local network fault.
+    """
+
+    def fake_run(argv: list[str], **_: object) -> _FakeCompleted:
+        if "current-context" in argv:
+            return _FakeCompleted(0, stdout="pilot\n")
+        return _FakeCompleted(
+            1, stderr="dial tcp 192.168.20.10:6443: connect: operation not permitted"
+        )
+
+    monkeypatch.setattr(pilot.subprocess, "run", fake_run)
+    with pytest.raises(PilotError) as excinfo:
+        pilot._preflight(_preflight_kubeconfig(tmp_path), "pilot", "gatus")
+    message = str(excinfo.value)
+    assert "could not reach the API" in message
+    assert "RBAC preflight failed" not in message
+
+
+def test_preflight_still_reports_a_genuine_denial_as_rbac(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """kubectl exits 1 on a real "no", which must stay an RBAC finding."""
+
+    def fake_run(argv: list[str], **_: object) -> _FakeCompleted:
+        if "current-context" in argv:
+            return _FakeCompleted(0, stdout="pilot\n")
+        if "nodes" in argv:
+            return _FakeCompleted(1, stdout="no\n")
+        return _FakeCompleted(0, stdout="yes\n")
+
+    monkeypatch.setattr(pilot.subprocess, "run", fake_run)
+    with pytest.raises(PilotError, match="read-only RBAC preflight failed for get nodes"):
+        pilot._preflight(_preflight_kubeconfig(tmp_path), "pilot", "gatus")

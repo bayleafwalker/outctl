@@ -193,6 +193,40 @@ def test_enforce_envelope_exposes_only_opaque_capture_location(tmp_path: Path) -
     assert "bounded\n" in (result.envelope.projection.inline_text or "")
 
 
+def test_small_output_is_marked_for_exact_passthrough(tmp_path: Path) -> None:
+    result = run(request(AdapterMode.ENFORCE, tmp_path, "print('small')"))
+
+    assert result.envelope is not None
+    assert result.envelope.projection.extra == {
+        "redaction": {"rules": []},
+        "presentation": "exact-passthrough",
+    }
+
+
+def test_pod_health_adapter_returns_complete_summary(tmp_path: Path) -> None:
+    header = "NAMESPACE NAME READY STATUS RESTARTS AGE IP NODE\n"
+    rows = "".join(
+        f"media pod-{index:04d} 1/1 Running 0 1h 10.0.0.{index} node-1\n"
+        for index in range(600)
+    )
+    rows += "media failed 0/1 OOMKilled 0 1h 10.0.1.1 node-1\n"
+    result = run(
+        request(
+            AdapterMode.ENFORCE,
+            tmp_path,
+            f"print({(header + rows)!r}, end='')",
+            semantic_adapter="kubernetes.pod-health/v1",
+        )
+    )
+
+    assert result.envelope is not None
+    assert result.envelope.projection.extra is not None
+    assert result.envelope.projection.extra["presentation"] == "semantic-complete"
+    assert result.envelope.projection.extra["total_rows"] == 601
+    assert result.envelope.projection.extra["health_predicates"]["OOMKilled"] == 1
+    assert result.envelope.projection.extra["routine_rows_omitted"] == 600
+
+
 def test_enforce_keeps_command_and_capture_status_distinct(tmp_path: Path) -> None:
     result = run(
         request(AdapterMode.ENFORCE, tmp_path, "print('too much')", max_capture_bytes=1)

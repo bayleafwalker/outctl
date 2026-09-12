@@ -850,11 +850,27 @@ def _preflight(kubeconfig: Path, context: str, namespace: str) -> None:
     if current.returncode or current.stdout.strip() != context:
         raise PilotError("explicit kubeconfig/context preflight failed")
     def can_i(verb: str, resource: str, *, namespaced: bool) -> str:
+        """Return "yes"/"no", or raise if the API did not actually answer.
+
+        A check that cannot reach the API has not returned "no", it has
+        returned nothing.  Collapsing the two turns every network fault into a
+        false RBAC finding, so an unusable answer is reported as such.
+        """
         argv = ["kubectl", "--kubeconfig", str(kubeconfig), "auth", "can-i", verb, resource]
         if namespaced:
             argv.extend(("--namespace", namespace))
         result = subprocess.run(argv, capture_output=True, text=True, check=False)
-        return result.stdout.strip().lower()
+        answer = result.stdout.strip().lower()
+        if result.returncode and answer not in ("yes", "no"):
+            detail = result.stderr.strip() or f"kubectl exit {result.returncode}"
+            raise PilotError(
+                f"RBAC preflight could not reach the API to verify {verb} {resource}: {detail}"
+            )
+        if answer not in ("yes", "no"):
+            raise PilotError(
+                f"RBAC preflight got an unusable can-i answer for {verb} {resource}: {answer!r}"
+            )
+        return answer
 
     # This mirrors the frozen corpus plus the gatus health evidence it is
     # intended to interpret.  Cluster-scoped checks deliberately omit a

@@ -1,0 +1,30 @@
+{
+  "schema_version": "outctl.codex-ab.workflow/v1",
+  "workflow_id": "appservice-health-long-horizon-v1",
+  "large_output_sequence_index": 2,
+  "large_output_min_bytes": 30000,
+  "large_output_max_bytes": 100000,
+  "minimum_post_large_kubectl_cycles": 18,
+  "commands": [
+    ["kubectl", "version", "-o", "json"],
+    ["kubectl", "get", "pods", "-A", "-o", "wide"],
+    ["kubectl", "get", "nodes", "-o", "wide"],
+    ["kubectl", "get", "pods", "-A", "--field-selector=status.phase=Failed", "-o", "wide"],
+    ["kubectl", "-n", "flux-system", "get", "pods", "-o", "wide"],
+    ["kubectl", "-n", "gatus", "get", "deployments,persistentvolumeclaims"],
+    ["kubectl", "-n", "gatus", "get", "events", "--sort-by=.lastTimestamp"],
+    ["kubectl", "get", "pods", "-A", "--field-selector=status.phase=Pending", "-o", "wide"],
+    ["kubectl", "get", "nodes", "-o", "json"],
+    ["kubectl", "-n", "flux-system", "get", "pods"],
+    ["kubectl", "get", "pods", "-A", "--field-selector=status.phase=Running", "-o", "wide"],
+    ["kubectl", "-n", "gatus", "get", "deployments", "-o", "wide"],
+    ["kubectl", "get", "nodes", "--show-labels"],
+    ["kubectl", "-n", "gatus", "get", "events", "--sort-by=.lastTimestamp"],
+    ["kubectl", "get", "pods", "-A", "-o", "custom-columns=NAMESPACE:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase"],
+    ["kubectl", "-n", "flux-system", "get", "pods", "-o", "json"],
+    ["kubectl", "-n", "gatus", "get", "persistentvolumeclaims"],
+    ["kubectl", "get", "pods", "-A", "--field-selector=status.phase=Unknown", "-o", "wide"],
+    ["kubectl", "get", "nodes", "-o", "wide"],
+    ["kubectl", "-n", "gatus", "get", "deployments,persistentvolumeclaims"]
+  ]
+}

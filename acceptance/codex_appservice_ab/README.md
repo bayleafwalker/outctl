@@ -110,86 +110,12 @@ is wired.
 Reasoning-output tokens are already contained in output tokens and are never
 charged twice.
 
-### Runtime protocol tracing
-
-Every non-dry run now requires the experiment-local trace handler. It preserves
-the private `events.jsonl` byte-for-byte and writes, per arm,
-`runtime-trace.jsonl` plus `runtime-trace-summary.json`. The normalized trace
-is metadata-first: it records event hashes, field paths, safe scalar metadata,
-IDs, structural event types, and program-code hashes/behavior summaries. It
-does not copy arbitrary event bodies or program source.
-
-Detection is structural rather than lexical. Transport evidence is kept
-separate from semantic PTC evidence and program behavior. `program`, nested
-`function_call`, `function_call_output`, and `program_output` objects are
-validated relationally using `call_id` and `caller.caller_id`; the summary
-reports `linked_programs`, orphan nodes, and `caller_linkage_valid`.
-`tools.exec_command` and `Promise.all` are inspected only inside a structurally
-identified program code body. The handler records evidence for
-`custom_tool_call`, `code_mode_only`, PTC objects, the `exec` envelope, and
-program behavior when those structures are exposed by the runtime.
-
-The handler records absence as an observation, not proof that an internal
-mechanism was unused. Raw JSONL remains private and should be supplied to a
-reviewer only through an approved secure handoff. Exact values can be removed
-from normalized traces with `--trace-redaction-exact-json`; built-in patterns
-also redact common bearer/API-key/password forms. Use `--trace-max-events` and
-`--trace-max-bytes` to bound normalized handoff material without changing the
-raw source capture.
-
-For an existing private Codex event stream, the handler is independently
-replayable:
-
-```bash
-python acceptance/codex_appservice_ab/trace_handler.py private/pair-001/A/events.jsonl \
-  --trace /tmp/runtime-trace.jsonl \
-  --summary /tmp/runtime-trace-summary.json
-```
-
-Build a portable checked handoff from a private run root. The generated
-`SHA256SUMS` uses archive-relative paths; Codex homes, shell-home directories,
-generated tooling, temporary files, and UV caches are excluded from the archive.
-
-```bash
-python acceptance/codex_appservice_ab/build_trace_handoff.py \
-  --source-root "$AB_LIVE" \
-  --observer acceptance/codex_appservice_ab/trace_handler.py \
-  --output /tmp/codex-outctl-runtime-trace-handoff.tar.gz
-```
-
-### Minimal Responses API PTC commissioning probe
-
-The Codex CLI JSONL stream may expose only high-level `command_execution` items.
-When the required PTC topology itself must be observed, use the separate
-Responses API probe. It explicitly enables the hosted
-`programmatic_tool_calling` tool, gives two deterministic read-only functions
-`allowed_callers: ["programmatic"]`, preserves every response output item, and
-returns each client-owned function result with the original `call_id` and
-`caller`.
-
-The probe does not access Kubernetes or run shell commands. It writes a private
-`raw-responses/` capture, `events.jsonl`, the existing metadata-only runtime
-trace and summary, plus `metrics.json`. Metrics include response and
-continuation counts, response latency, item-type counts, function-call counts,
-usage totals, final-message presence, and the validated PTC caller graph.
-
-Run it only as a separately budgeted API commissioning request:
-
-```bash
-export OPENAI_API_KEY='...'
-uv run python acceptance/codex_appservice_ab/responses_ptc_probe.py \
-  --model gpt-5.6-terra \
-  --output /tmp/responses-ptc-commissioning
-```
-
-The deterministic test uses a fake transport and does not spend API tokens:
-
-```bash
-uv run python acceptance/codex_appservice_ab/test_responses_ptc_probe.py
-```
-
-This probe observes the Responses API PTC contract, not native Codex CLI
-behavior; keep its evidence domain separate from the Codex A/B report.
+In `report.json` and `acceptance.json`, economics deltas use the same `A - B`
+convention: negative means the guided treatment was lower. `retrieval_count`
+counts physical records in outctl's `retrieval-events.jsonl`; it is separate
+from `retrieval_tool_turns`, which counts retrieval-shaped model command turns.
+The two can differ when a helper performs retrieval without a visible Bash
+turn, so both are reported.
 
 ### Terra rate block pinned on 2026-08-08
 
@@ -546,3 +472,31 @@ Build deterministic raw-free evidence packages with
 `build_analyst_bundle.py`. `analyst-safe` and `reproducibility` packages both
 exclude bytecode and private/raw captures and include a bundle inventory with
 SHA-256 hashes; the reproducibility class also includes core source and tests.
+
+## Long-horizon follow-up
+
+`long-horizon-workflow.json` and `long-horizon-prompt.md` define the next
+economics experiment: twenty fixed read-only `kubectl` calls, with the large
+all-namespaces Pod inventory second and eighteen later calls. Pass the manifest
+with `--workflow-manifest`; the harness hashes the observed `kubectl` order and
+invalidates a pair when either arm deviates. The workflow is a protocol
+scaffold, not live evidence, until an explicitly scoped read-only kubeconfig
+and context are authorized.
+
+Dry-run the exact planned sequence with:
+
+```bash
+uv run python acceptance/codex_appservice_ab/run.py \
+  --dry-run \
+  --prompt acceptance/codex_appservice_ab/long-horizon-prompt.md \
+  --workflow-manifest acceptance/codex_appservice_ab/long-horizon-workflow.json \
+  --policy-ref "$OUTCTL_POLICY_REF" \
+  --policy-digest "$OUTCTL_POLICY_DIGEST"
+```
+
+Every arm report now also carries raw-free interaction telemetry: observable
+serial tool rounds, commands per concurrent wave, parallelism, sequential
+boundaries, repeated-command counts, and categorical follow-up reasons. Codex
+does not expose internal model invocation IDs in this JSONL contract, so the
+report states that limitation explicitly. Frozen offline replay cases for the
+telemetry classifier are in replay-scenarios.json.
