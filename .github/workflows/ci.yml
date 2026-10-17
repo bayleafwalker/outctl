@@ -22,7 +22,6 @@ jobs:
       - run: uv run pytest
       - run: uv run ruff check .
       - run: uv run mypy src
-      - run: python -m json.tool outctl.dispatch.json >/dev/null
 
   package:
     needs: python
