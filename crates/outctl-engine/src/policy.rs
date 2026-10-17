@@ -1359,7 +1359,21 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn executable_path(name: &str) -> PathBuf {
+        std::env::split_paths(&std::env::var_os("PATH").expect("test PATH is set"))
+            .map(|directory| directory.join(name))
+            .find(|candidate| {
+                candidate.is_absolute()
+                    && candidate.is_file()
+                    && candidate
+                        .metadata()
+                        .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            })
+            .unwrap_or_else(|| panic!("test executable {name:?} is not available on PATH"))
+    }
 
     fn temporary_spool(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -1723,7 +1737,7 @@ mod tests {
         let (snapshot, mut request, mut context) = source_policy();
         let exact = b"atomic-policy-secret".to_vec();
         request["command"]["argv"] = json!([
-            "/run/current-system/sw/bin/printf",
+            executable_path("printf"),
             "token=atomic-policy-secret\n"
         ]);
         request["command"]["cwd"] = json!("/tmp");
@@ -1804,7 +1818,7 @@ mod tests {
     #[test]
     fn generic_unknown_commands_need_no_command_specific_registration() {
         let (snapshot, mut request, mut context) = source_policy();
-        request["command"]["argv"] = json!(["/run/current-system/sw/bin/printf", "generic-ok"]);
+        request["command"]["argv"] = json!([executable_path("printf"), "generic-ok"]);
         request["command"]["cwd"] = json!("/tmp");
         request["sink"] = json!({"trust_domain": "trusted-local", "target": "model", "disclosure": "safe-unredacted"});
         request["secret_channel"] = json!({"mode": "none", "refs": []});
@@ -1906,7 +1920,7 @@ mod tests {
             "ref": snapshot["policy_ref"],
             "digest": snapshot["policy_digest"]
         });
-        request["command"]["argv"] = json!(["/run/current-system/sw/bin/wc", "-c"]);
+        request["command"]["argv"] = json!([executable_path("wc"), "-c"]);
         request["command"]["stdin"] =
             json!({"mode": "file-ref", "ref": "outctl://stdin/request/body"});
         request["command"]["cwd"] = json!("/tmp");
