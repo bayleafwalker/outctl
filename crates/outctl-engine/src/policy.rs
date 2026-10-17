@@ -1736,10 +1736,8 @@ mod tests {
     fn policy_bound_capture_cannot_swap_command_or_sink_options() {
         let (snapshot, mut request, mut context) = source_policy();
         let exact = b"atomic-policy-secret".to_vec();
-        request["command"]["argv"] = json!([
-            executable_path("printf"),
-            "token=atomic-policy-secret\n"
-        ]);
+        request["command"]["argv"] =
+            json!([executable_path("printf"), "token=atomic-policy-secret\n"]);
         request["command"]["cwd"] = json!("/tmp");
         request["command"]["environment"] = json!({"mode": "empty"});
         context.workspace_root = PathBuf::from("/tmp");
