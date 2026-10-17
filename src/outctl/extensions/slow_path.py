@@ -67,8 +67,12 @@ def _runtime_roots() -> tuple[Path, ...]:
         candidates.append(Path(base_executable).parents[2])
     if Path("/nix/store").is_dir():
         candidates.append(Path("/nix/store"))
-    if Path("/lib64").is_dir():
-        candidates.append(Path("/lib64"))
+    # Keep both the conventional loader paths and their canonical targets.
+    # On merged-/usr systems /lib64 is a directory symlink, and its loader
+    # may itself point into /lib or /usr/lib. Resolving just /lib64 loses
+    # the path encoded in the interpreter's ELF header.
+    library_roots = [path for path in (Path("/lib"), Path("/lib64")) if path.is_dir()]
+    candidates.extend(library_roots)
     roots: list[Path] = []
     for candidate in candidates:
         try:
@@ -77,6 +81,9 @@ def _runtime_roots() -> tuple[Path, ...]:
             raise ExtensionSandboxUnavailable("an extension runtime root is unavailable") from exc
         if not root.is_dir() or root == Path("/"):
             raise ExtensionSandboxUnavailable("an extension runtime root is unsafe")
+        if root not in roots:
+            roots.append(root)
+    for root in library_roots:
         if root not in roots:
             roots.append(root)
     roots.sort(key=lambda path: (len(path.parts), os.fspath(path)))
