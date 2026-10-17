@@ -34,10 +34,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from four_arm_plan import plan_payload
 from interaction import analyze_events
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from kubectl_guard import classify_kubectl, extract_kubectl_argvs
+from trace_handler import (
+    DEFAULT_MAX_EVENTS,
+    DEFAULT_MAX_TRACE_BYTES,
+    TraceCaptureError,
+    capture_runtime_trace,
+)
 
 from outctl.contracts import ContractValidationError, validate_controlled_study_launch
 from outctl.policy import PolicyError, load_policy_set, resolve_and_digest
@@ -2708,7 +2715,7 @@ def _compare_pair(
     )
     baseline_spontaneously_used_outctl = int(b_commands.get("kubectl_via_outctl_completed", 0)) > 0
     treatment_evidence_coverage_ok = a_final.get("evidence_coverage_ok", True) is True
-    baseline_evidence_coverage = b_final.get("evidence_coverage_ok")
+    _baseline_evidence_coverage = b_final.get("evidence_coverage_ok")
     no_mutation_attempts = (
         int(a_commands.get("kubectl_non_read_only_attempts", 0)) == 0
         and int(b_commands.get("kubectl_non_read_only_attempts", 0)) == 0

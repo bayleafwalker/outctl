@@ -81,7 +81,7 @@ toolchain path (Cargo 1.97.0, rustc/rustfmt/clippy 1.97.0, GCC 15.3.0):
 - `uv run ruff check .`: **All checks passed!**
 - `uv run mypy src`: **Success: no issues found in 31 source files**.
 - `uv build`: source distribution and wheel built successfully.
-- `python /projects/dev/agentops/templates/dispatch/scripts/validate_verification_artifacts.py --root .`:
+- `python /projects/dev/agentops/scripts/validate_verification_artifacts.py --root .`:
   repository dispatch file valid; no verification artifacts found.
 - Direct CLI reproduction of `--full-if-bytes 18446744073709551615` returned
   exit 125 with `OUTCTL_PRESPAWN_INVALID_REQUEST` and left the probe spool

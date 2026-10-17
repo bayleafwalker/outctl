@@ -216,21 +216,17 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[bytes] | int:
     return subprocess.run(
         list(argv), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False
     )
-    try:
-        capture_id, exit_code, text, presentation = _safe_envelope(completed.stdout)
-    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-        # Do not expose child stderr: it may contain command output or secrets.
-        # These bounded, raw-free facts are enough to distinguish an outctl
-        # bootstrap failure from a malformed safe envelope during commissioning.
-        print(
-            "outctl router could not read a bounded envelope: "
-            f"{exc}; outctl_exit={completed.returncode}; "
-            f"stdout_bytes={len(completed.stdout)}",
-            file=sys.stderr,
-        )
-        return 1
-    _emit(capture_id, exit_code, text, presentation)
-    return completed.returncode
+
+
+def _acquire_spool_lock(spool_root: str) -> IO[bytes]:
+    """Serialize one arm's commands while leaving the two A/B arms concurrent."""
+    root = Path(spool_root)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = root / ".router.lock"
+    handle = lock_path.open("a+b")
+    os.chmod(lock_path, 0o600)
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -385,7 +381,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if isinstance(completed, int):
             return completed
         try:
-            capture_id, exit_code, text = _safe_envelope(completed.stdout)
+            capture_id, exit_code, text, presentation = _safe_envelope(completed.stdout)
             semantic_applied = False
             if args.projection_profile == "semantic-pods" and "--" in command:
                 logical_argv = command[command.index("--") + 1 :]
@@ -405,7 +401,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 1
-        _emit(capture_id, exit_code, text)
+        _emit(capture_id, exit_code, text, presentation)
         _record_router_event(
             args.spool_root,
             action="run",

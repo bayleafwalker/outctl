@@ -1141,9 +1141,9 @@ class HarnessValidationTests(unittest.TestCase):
                                     {
                                         "capture_id": "capture-1",
                                         "operation": "projection",
-                                        "stream": None,
-                                        "start": None,
-                                        "end": None,
+                                        "stream": "stdout",
+                                        "start": 0,
+                                        "end": 1,
                                     }
                                 ],
                             }

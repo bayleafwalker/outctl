@@ -24,6 +24,8 @@ def _native_binary() -> Path:
 
 
 def test_generic_ordinary_command_starts_no_python_slow_path(tmp_path: Path) -> None:
+    printf = shutil.which("printf")
+    assert printf is not None
     marker = tmp_path / "python-started"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -42,7 +44,7 @@ def test_generic_ordinary_command_starts_no_python_slow_path(tmp_path: Path) -> 
             "--spool-root",
             str(spool),
             "--",
-            "/run/current-system/sw/bin/printf",
+            printf,
             "generic-unknown-ok",
         ],
         env={"PATH": str(fake_bin)},
@@ -57,7 +59,9 @@ def test_generic_ordinary_command_starts_no_python_slow_path(tmp_path: Path) -> 
 
 def test_cli_stdin_is_null_by_default_and_inherited_only_when_selected(tmp_path: Path) -> None:
     binary = _native_binary()
-    command = ["/run/current-system/sw/bin/wc", "-c"]
+    wc = shutil.which("wc")
+    assert wc is not None
+    command = [wc, "-c"]
     null_result = subprocess.run(
         [str(binary), "run", "--spool-root", str(tmp_path / "null"), "--", *command],
         input=b"not inherited",

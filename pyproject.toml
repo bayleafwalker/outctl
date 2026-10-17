@@ -46,6 +46,9 @@ testpaths = ["tests"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# Preserve the historical context-economy study scripts as recorded artifacts.
+# Maintained source, tests, scripts, and acceptance harnesses stay linted.
+extend-exclude = ["studies/context-economy"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
