@@ -4,6 +4,10 @@
 and retrieves omitted evidence. It does not own command scheduling, work state,
 action lifecycle, audit judgments, curated knowledge, or remote execution.
 
+The product thesis was killed on 2026-08-16. Treat this repository as a frozen
+discovery artifact under maintenance; do not resume product or roadmap work.
+See `docs/DISCOVERY_KILL_2026-08-16.md` before changing the retained source.
+
 ## Read first
 
 Before changing behavior, read:
@@ -12,7 +16,7 @@ Before changing behavior, read:
 2. `docs/THREAT-MODEL.md`
 3. `acceptance/SCENARIOS.md`
 4. `IMPLEMENTATION_HANDOFF.md`
-5. `outctl.dispatch.json` and the applicable risk surfaces
+5. The applicable risk surfaces and repository-local verification gates.
 
 ## Closed boundaries
 
@@ -28,13 +32,11 @@ Before changing behavior, read:
 - Do not add a required daemon, remote executor, central database, PTY, or
   cluster dependency in the mature MVP.
 
-## Implementation order
+## Historical implementation plans
 
-The four slices in `docs/IMPLEMENTATION_PLAN.md` describe the completed Python
-v1 baseline. New architecture work follows `docs/MIGRATION_ROADMAP.md` in strict
-W0-W8 order. Do not begin a later wave until the preceding wave's gates pass.
-Each wave must preserve a runnable Python reference engine and commit only its
-own scoped changes.
+The four slices in `docs/IMPLEMENTATION_PLAN.md` and W0-W8 in
+`docs/MIGRATION_ROADMAP.md` are historical. The roadmap was retired with the
+product thesis; its sequencing is not authorization to resume implementation.
 
 ## Verification
 
@@ -46,7 +48,7 @@ uv run pytest
 uv run ruff check .
 uv run mypy src
 uv build
-python /projects/dev/agentops/templates/dispatch/scripts/validate_verification_artifacts.py --root .
+python /projects/dev/agentops/scripts/validate_verification_artifacts.py --root .
 ```
 
 The AgentOps validator is required on hosts where `/projects/dev/agentops` is

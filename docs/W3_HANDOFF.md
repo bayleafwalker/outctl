@@ -80,7 +80,7 @@ uv run pytest
 uv run ruff check .
 uv run mypy src
 python scripts/check_package.py
-python /projects/dev/agentops/templates/dispatch/scripts/validate_verification_artifacts.py --root .
+python /projects/dev/agentops/scripts/validate_verification_artifacts.py --root .
 ```
 
 Observed on the isolated candidate:

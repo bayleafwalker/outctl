@@ -1052,7 +1052,7 @@ fn validate_command_scope(scope: &CommandScope) -> Result<(), PolicyError> {
         .execution_modes
         .iter()
         .any(|mode| mode == "explicit-shell")
-        != !scope.explicit_shell_argv.is_empty()
+        == scope.explicit_shell_argv.is_empty()
     {
         return Err(PolicyError::InvalidDocument(
             "explicit shell mode has no exact reviewed interpreter argv".to_owned(),

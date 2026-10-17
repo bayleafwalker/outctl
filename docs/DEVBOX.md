@@ -1,5 +1,9 @@
 # Devbox implementation setup
 
+> **Historical.** Outctl's product thesis and W0-W8 roadmap were retired on
+> 2026-08-16. Do not use this setup to start feature work or select new sprints.
+> The commands below are retained only to reproduce the frozen source checks.
+
 `/projects/dev` is host-local. The workstation repository and devbox-vm clone
 must be synchronized through Git; copying this path does not synchronize them.
 
@@ -16,7 +20,7 @@ uv run pytest
 uv run ruff check .
 uv run mypy src
 uv build
-python /projects/dev/agentops/templates/dispatch/scripts/validate_verification_artifacts.py --root .
+python /projects/dev/agentops/scripts/validate_verification_artifacts.py --root .
 ```
 
 If the repository is already cloned, inspect its worktree before pulling. Do
@@ -26,15 +30,10 @@ production credentials.
 
 ## Autonomous pass contract
 
-1. Read `AGENTS.md`, `docs/IMPLEMENTATION_PLAN.md`, and applicable risk surfaces.
-2. Select exactly one ready pass or smaller sprint item.
-3. Freeze interfaces and falsifying tests before mechanical implementation.
-4. Use disposable worktrees under `/tmp/outctl-hybrid/worktrees` for bounded workers.
-5. Run the registered gate cold in the exact candidate commit.
-6. Commit locally and leave a handoff with source host, path, commit, checks,
-   deviations, and evidence classification.
-7. Do not push, mutate workflow authorities, publish packages, or access
-   production unless the task separately grants that authority.
+This historical implementation workflow is closed. Any narrowly authorized
+maintenance correction should state its bounded source-only purpose, preserve
+the kill decision, run relevant repository checks, and leave a handoff that
+separates source evidence from installed or runtime qualification.
 
 Routine test captures are `session-local` or `host-persistent` depending on
 their configured spool. They are never `durable-authoritative`.

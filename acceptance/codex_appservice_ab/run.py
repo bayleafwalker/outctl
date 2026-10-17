@@ -38,6 +38,7 @@ from interaction import analyze_events
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from kubectl_guard import classify_kubectl, extract_kubectl_argvs
+from trace_handler import DEFAULT_MAX_EVENTS
 
 from outctl.contracts import ContractValidationError, validate_controlled_study_launch
 from outctl.policy import PolicyError, load_policy_set, resolve_and_digest

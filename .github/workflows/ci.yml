@@ -17,6 +17,12 @@ jobs:
         with:
           python-version: "3.12"
           enable-cache: true
+      - name: Install root-owned bubblewrap for extension sandbox tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap_path="$(command -v bwrap)"
+          python -c 'import os, sys; m = os.stat(sys.argv[1]); assert m.st_uid == 0 and not m.st_mode & 0o022' "$bwrap_path"
       - run: uv sync --all-extras --dev
       - run: uv build
       - run: uv run pytest
