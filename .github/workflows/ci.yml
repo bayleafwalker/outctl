@@ -25,6 +25,13 @@ jobs:
           sudo apt-get install --yes bubblewrap
           bwrap_path="$(command -v bwrap)"
           python -c 'import os, sys; m = os.stat(sys.argv[1]); assert m.st_uid == 0 and not m.st_mode & 0o022' "$bwrap_path"
+      - name: Verify hosted runner supports the required sandbox namespace
+        run: >-
+          bwrap --unshare-all --die-with-parent --new-session
+          --ro-bind /usr /usr
+          --ro-bind /lib /lib
+          --ro-bind /lib64 /lib64
+          --proc /proc --dev /dev /usr/bin/true
       - run: uv sync --all-extras --dev
       - run: uv build
       - run: uv run pytest
