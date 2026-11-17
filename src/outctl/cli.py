@@ -79,7 +79,12 @@ def _spool_argument(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="outctl",
-        description="Bounded, recoverable command-output retrieval",
+        description=(
+            "Bounded, recoverable command-output retrieval.\n\n"
+            "KILLED 2026-08-16: frozen discovery artifact, maintenance-only. Do not adopt it\n"
+            "for new work; see docs/DISCOVERY_KILL_2026-08-16.md."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command")
@@ -546,8 +551,10 @@ def _run_payload(args: argparse.Namespace) -> tuple[dict[str, object], int]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     if args.command is None:
+        parser.print_help()
         return 0
     try:
         if args.command == "run":
